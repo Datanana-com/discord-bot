@@ -1,0 +1,10 @@
+#!/bin/sh
+# Stands in for the Claude Code CLI: logs how it was called, then answers like `claude -p --output-format json`.
+{
+    printf 'cwd=%s\n' "$PWD"
+    printf 'api_key=%s\n' "${ANTHROPIC_API_KEY-unset}"
+    for arg in "$@"; do printf 'arg=%s\n' "$arg"; done
+    printf 'stdin=%s\n' "$(cat)"
+} > "$FAKE_CLAUDE_LOG"
+printf '%s' "$FAKE_CLAUDE_OUTPUT"
+exit "${FAKE_CLAUDE_EXIT:-0}"

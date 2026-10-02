@@ -1,0 +1,4 @@
+#!/bin/sh
+# Stands in for whisper-cli: logs its arguments and prints a transcript with annotations.
+for arg in "$@"; do printf 'arg=%s\n' "$arg"; done > "$FAKE_WHISPER_LOG"
+printf ' [BLANK_AUDIO]\n Hey Claude, (coughs) what time is it?\n'
