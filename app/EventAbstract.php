@@ -114,7 +114,7 @@ abstract class EventAbstract
             }
 
             try {
-                if ($this->{$method}() === true) {
+                if ($this->{$method}($this->eventData, $this->discord) === true) {
                     // If the method returns true, the event loop is terminated.
                     // And log its success.
                     $this->log->info("Event \"{$method}\" was executed successfully.");

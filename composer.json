@@ -1,14 +1,19 @@
 {
     "require": {
-        "php": ">=8.0.18",
-        "team-reflex/discord-php": "^10.4",
-        "vlucas/phpdotenv": "^5.4",
-        "symfony/var-dumper": "^5.4",
-        "illuminate/database": "^8.83"
+        "php": "^8.5",
+        "ext-ffi": "*",
+        "team-reflex/discord-php": "^10.66",
+        "discord-php-helpers/voice": "^8.3",
+        "react/child-process": "^0.6.7",
+        "react/promise": "^3.2",
+        "vlucas/phpdotenv": "^5.7",
+        "symfony/var-dumper": "^8.1",
+        "illuminate/database": "^13.34"
     },
     "scripts": {
         "serve": "php index.php",
-        "pint": "pint --config=pint.json"
+        "pint": "pint --config=pint.json",
+        "test": "phpunit"
     },
     "autoload": {
         "psr-4": {
@@ -19,7 +24,13 @@
             "./helpers/string.php"
         ]
     },
+    "autoload-dev": {
+        "psr-4": {
+            "Tests\\": "tests/"
+        }
+    },
     "require-dev": {
-        "laravel/pint": "^1.21"
+        "laravel/pint": "^1.32",
+        "phpunit/phpunit": "^13.4"
     }
 }
