@@ -29,7 +29,7 @@ final class ApplicationTest extends TestCase
 {
     private TestHandler $logs;
 
-    /** @var list<string> Files added to the app's folders, removed after each test. */
+    /** @var list<string> Files and folders added to the app's folders, removed after each test. */
     private array $appFiles = [];
 
     protected function setUp(): void
@@ -44,8 +44,8 @@ final class ApplicationTest extends TestCase
     {
         unset($_ENV['BOT_SLASH_COMMANDS']);
 
-        foreach ($this->appFiles as $path) {
-            unlink($path);
+        foreach (array_reverse($this->appFiles) as $path) {
+            is_dir($path) ? rmdir($path) : unlink($path);
         }
     }
 
@@ -121,7 +121,7 @@ final class ApplicationTest extends TestCase
             'stop' => ['Stops recording and leaves the voice channel.', Command::CHAT_INPUT],
             'test' => ['A test global command', Command::CHAT_INPUT],
         ], $commands->saved);
-        $this->assertContains('Global commands found: RecordGlobalCommand, StopGlobalCommand, TestGlobalCommand', $this->logged());
+        $this->assertContains('Global commands found: RecordCommand, StopCommand, TestCommand', $this->logged());
         $this->assertContains('Command record has been saved.', $this->logged());
 
         // Each command's interactions go to its class: /test logs a greeting.
@@ -132,8 +132,8 @@ final class ApplicationTest extends TestCase
 
     public function testOnlyRegistersGlobalCommands(): void
     {
-        // Commands without "Global" in their name are meant for one server, which isn't supported yet.
-        $this->addAppFile('Commands/PingCommand.php', "<?php\n\nnamespace App\\Commands;\n\nfinal class PingCommand\n{\n}\n");
+        // Commands in Commands/Guild are meant for one server, which isn't supported yet.
+        $this->addAppFile('Commands/Guild/PingCommand.php', "<?php\n\nnamespace App\\Commands\\Guild;\n\nfinal class PingCommand\n{\n}\n");
         [$app, $commands] = $this->appWithCommands();
 
         $app->prepareCommandClasses();
@@ -292,6 +292,12 @@ final class ApplicationTest extends TestCase
     private function addAppFile(string $path, string $contents): void
     {
         $path = dirname(__DIR__, 2) . "/app/{$path}";
+
+        if (! is_dir(dirname($path))) {
+            mkdir(dirname($path));
+            $this->appFiles[] = dirname($path);
+        }
+
         file_put_contents($path, $contents);
         $this->appFiles[] = $path;
     }

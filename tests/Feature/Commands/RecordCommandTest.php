@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature\Commands;
 
-use App\Commands\RecordGlobalCommand;
+use App\Commands\Global\RecordCommand;
 use App\Voice\VoiceSession;
 use Discord\Parts\Channel\Channel;
 use Discord\Voice\Manager;
@@ -111,7 +111,7 @@ final class RecordCommandTest extends CommandTestCase
 
     private function record(object $interaction): void
     {
-        (new RecordGlobalCommand($this->discord))->handle($interaction);
+        (new RecordCommand($this->discord))->handle($interaction);
     }
 
     private function joinsWith(object $promise): void

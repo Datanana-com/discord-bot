@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace App\Commands;
+namespace App\Commands\Global;
 
 use App\CommandAbstract;
 use App\Voice\VoiceSession;
@@ -11,7 +11,7 @@ use Discord\Parts\Interactions\Interaction;
 use Discord\Voice\VoiceClient;
 use Throwable;
 
-final class RecordGlobalCommand extends CommandAbstract
+final class RecordCommand extends CommandAbstract
 {
     public string $description = 'Records your voice channel and lets everyone in it talk to Claude.';
 

@@ -2,14 +2,14 @@
 
 declare(strict_types=1);
 
-namespace App\Commands;
+namespace App\Commands\Global;
 
 use App\CommandAbstract;
 use App\Voice\VoiceSession;
 use Discord\Builders\MessageBuilder;
 use Discord\Parts\Interactions\Interaction;
 
-final class StopGlobalCommand extends CommandAbstract
+final class StopCommand extends CommandAbstract
 {
     public string $description = 'Stops recording and leaves the voice channel.';
 

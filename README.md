@@ -88,6 +88,10 @@ class MessageCreate extends EventAbstract
 }
 ```
 
+##### Slash commands
+
+Each class in `app/Commands/Global`, named `<Name>Command` and extending `App\CommandAbstract`, is registered as the slash command `/<name>` in every server the bot is in, when `BOT_SLASH_COMMANDS` is set. Commands for a single server, in `app/Commands/Guild`, aren't supported yet.
+
 ## Voice calls with Claude
 
 `/record` joins your voice channel, records it, and lets everyone in it talk to Claude:

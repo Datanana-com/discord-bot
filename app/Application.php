@@ -91,15 +91,9 @@ class Application
      */
     private function getClassesFromFolder(string $folder): array
     {
-        $classes = scandir(__DIR__ . '/' . $folder);
-
-        // Removes . and ..
-        array_splice($classes, 0, 2);
-
-        // Removes the .php
         return array_map(
-            fn (string $class) => str_replace('.php', '', $class),
-            $classes
+            fn (string $path) => basename($path, '.php'),
+            glob(__DIR__ . "/{$folder}/*.php") ?: [],
         );
     }
 
@@ -197,19 +191,9 @@ class Application
             return;
         }
 
-        $commands = $this->getClassesFromFolder('Commands');
-        $globalCommands = [];
-        $guildSpecificCommands = [];
-
-        foreach ($commands as $command) {
-            $commandClass = $command;
-            $command = strtolower($command);
-            if (str_contains($command, 'global')) {
-                $globalCommands[] = $commandClass;
-            } else {
-                $guildSpecificCommands[] = $commandClass;
-            }
-        }
+        // A command's folder says where it is registered: in every server, or in one.
+        $globalCommands = $this->getClassesFromFolder('Commands/Global');
+        $guildSpecificCommands = $this->getClassesFromFolder('Commands/Guild');
 
         if (!empty($globalCommands)) {
             $this->log->info('Global commands found: ' . implode(', ', $globalCommands));
@@ -238,9 +222,9 @@ class Application
         $commands = [];
 
         foreach ($globalCommandsClasses as $commandClass) {
-            $commandName = Str::slug(strtolower(str_replace(['Global', 'Command'], '', $commandClass)));
+            $commandName = Str::slug(strtolower(Str::replaceEnd('Command', '', $commandClass)));
 
-            $commandClass = "\\App\\Commands\\{$commandClass}";
+            $commandClass = "\\App\\Commands\\Global\\{$commandClass}";
             $commandClass = new $commandClass($this->discord);
             $commands[$commandName] = (new Command($this->discord))
                 ->setName($commandName)
