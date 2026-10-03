@@ -21,7 +21,6 @@
             "App\\": "app/"
         },
         "files": [
-            "./helpers/main.php",
             "./helpers/string.php"
         ]
     },

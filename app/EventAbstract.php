@@ -93,16 +93,10 @@ abstract class EventAbstract
      * 1. If the function returns `true` or `throws an exception`, the event **will** be terminated.
      * 2. If the function returns `false` or `null` or `void`, the event **will not** be terminated.
      *
-     * @param EventAbstract|\Discord\WebSockets\Event $class The event object to handle data from
-     * @param Discord $discord The Discord object to handle data from
      * @return bool|void
      */
-    public function handle($class = null)
+    public function handle()
     {
-        if ($class !== null && !isset($this->eventData)) {
-            $this->eventData = $class;
-        }
-
         if ($this->executableMethods === []) {
             $this->log->warning('No executable methods were found for this event.');
             return false;

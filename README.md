@@ -192,6 +192,8 @@ Unit tests cover each class on its own. Feature tests run the whole voice flow a
 
 `tests/Feature/VoiceCallTest.php` goes further: the call's audio travels over a local UDP socket standing in for Discord's media server, encrypted and Opus-encoded like in a real call, and the spoken answer is encoded by ffmpeg. It needs ffmpeg and libopus, like the bot itself, and is skipped without them.
 
+GitHub Actions runs these tests with coverage on every pull request and push to `master` (`.github/workflows/tests.yml`), with ffmpeg and libopus installed so `VoiceCallTest` runs too.
+
 To see the code coverage, install a coverage driver (`sudo apt install php8.5-pcov`, or Xdebug) and run:
 
 ```bash
