@@ -1,0 +1,224 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Tests\Feature;
+
+use App\Application;
+use Closure;
+use Discord\Discord;
+use Discord\Parts\Application\Command\Command;
+use Discord\Parts\Channel\Message;
+use Discord\Parts\Interactions\Interaction;
+use Discord\Helpers\RegisteredCommand;
+use Discord\WebSockets\Event;
+use Monolog\Handler\TestHandler;
+use Monolog\Logger;
+use PHPUnit\Framework\TestCase;
+use React\EventLoop\StreamSelectLoop;
+use React\Promise\PromiseInterface;
+use ReflectionClass;
+use RuntimeException;
+use Tests\Fixtures\Events\RecordingEvent;
+
+use function React\Promise\resolve;
+
+final class ApplicationTest extends TestCase
+{
+    private TestHandler $logs;
+
+    protected function setUp(): void
+    {
+        $this->logs = new TestHandler();
+        RecordingEvent::$calls = [];
+        RecordingEvent::$before = null;
+        unset($_ENV['BOT_SLASH_COMMANDS'], $_SERVER['BOT_SLASH_COMMANDS']);
+    }
+
+    protected function tearDown(): void
+    {
+        unset($_ENV['BOT_SLASH_COMMANDS']);
+    }
+
+    public function testHandlesEachEventClassUnderItsEventName(): void
+    {
+        $app = $this->app();
+        $message = (new ReflectionClass(Message::class))->newInstanceWithoutConstructor();
+
+        // app/Events/MessageCreate.php handles MESSAGE_CREATE.
+        $app->discord->emit(Event::MESSAGE_CREATE, [$message, $app->discord]);
+
+        $this->assertContains('another example', $this->logged());
+    }
+
+    public function testRunsBeforeAndAfterAroundTheEvent(): void
+    {
+        $this->emitRecordingEvent();
+
+        $this->assertSame(['before', 'first:hi', 'after'], RecordingEvent::$calls);
+    }
+
+    public function testBeforeCanStopTheEvent(): void
+    {
+        RecordingEvent::$before = true;
+
+        $this->emitRecordingEvent();
+
+        $this->assertSame(['before', 'after'], RecordingEvent::$calls);
+    }
+
+    public function testLogsErrorsInEventsAndStillRunsAfter(): void
+    {
+        RecordingEvent::$before = new RuntimeException('Something broke');
+
+        $this->emitRecordingEvent();
+
+        $this->assertSame(['before', 'after'], RecordingEvent::$calls);
+        $this->assertContains('Error while handling event: Something broke', $this->logged());
+    }
+
+    public function testRunsTheReadyCallbackWhenTheBotIsReady(): void
+    {
+        $readyWith = null;
+        $app = $this->app(function (Discord $discord) use (&$readyWith) {
+            $readyWith = $discord;
+        });
+
+        $app->discord->emit('init', [$app->discord]);
+
+        $this->assertSame($app->discord, $readyWith);
+        $this->assertContains('Bot is ready!', $this->logged());
+        $this->assertContains('Slash commands are disabled.', $this->logged());
+    }
+
+    public function testRegistersEveryGlobalCommand(): void
+    {
+        $_ENV['BOT_SLASH_COMMANDS'] = 'true';
+        $app = $this->app();
+        $commands = new class () {
+            /** @var array<string, array{string, int}> Saved commands: name => [description, type]. */
+            public array $saved = [];
+
+            /** @var array<string, callable> Interaction handlers by command name. */
+            public array $listeners = [];
+
+            /** @return list<Command> */
+            public function toArray(): array
+            {
+                return [];
+            }
+
+            public function save(Command $command): PromiseInterface
+            {
+                $this->saved[$command->name] = [$command->description, $command->type];
+
+                return resolve($command);
+            }
+
+            public function freshen(): PromiseInterface
+            {
+                return resolve(null);
+            }
+        };
+        $app->discord = $this->discordStub($app->discord, ['application' => (object) ['commands' => $commands]], $commands->listeners);
+
+        $app->prepareCommandClasses();
+
+        $this->assertSame([
+            'record' => ['Records your voice channel and lets everyone in it talk to Claude.', Command::CHAT_INPUT],
+            'stop' => ['Stops recording and leaves the voice channel.', Command::CHAT_INPUT],
+            'test' => ['A test global command', Command::CHAT_INPUT],
+        ], $commands->saved);
+        $this->assertContains('Global commands found: RecordGlobalCommand, StopGlobalCommand, TestGlobalCommand', $this->logged());
+        $this->assertContains('Command record has been saved.', $this->logged());
+
+        // Each command's interactions go to its class: /test logs a greeting.
+        $this->assertSame(['record', 'stop', 'test'], array_keys($commands->listeners));
+        ($commands->listeners['test'])((new ReflectionClass(Interaction::class))->newInstanceWithoutConstructor());
+        $this->assertContains('Hello, World!', $this->logged());
+    }
+
+    public function testClosesTheBotWhenCommandsCannotBeRegistered(): void
+    {
+        $_ENV['BOT_SLASH_COMMANDS'] = 'true';
+        $app = $this->app();
+        $client = $app->discord;
+        $listeners = [];
+        $app->discord = $this->discordStub($client, ['application' => new RuntimeException('Discord API unavailable')], $listeners, expectClose: true);
+
+        $client->emit('init', [$client]);
+
+        $this->assertContains('Error while preparing command classes: Discord API unavailable', $this->logged());
+    }
+
+    public function testRunStartsTheBot(): void
+    {
+        $app = $this->app();
+        $app->discord = $this->getMockBuilder(Discord::class)->disableOriginalConstructor()->onlyMethods(['run'])->getMock();
+        $app->discord->expects($this->once())->method('run');
+
+        $app->run();
+    }
+
+    /**
+     * An application whose Discord client never connects: it runs on a loop that is never started,
+     * so its requests to Discord are queued and never sent.
+     */
+    private function app(?Closure $ready = null): Application
+    {
+        return new Application(
+            ['token' => 'test-token', 'loop' => new StreamSelectLoop(), 'logger' => new Logger('test', [$this->logs])],
+            $ready,
+        );
+    }
+
+    private function emitRecordingEvent(): void
+    {
+        $app = $this->app();
+        $app->handleEvent('TEST_EVENT', RecordingEvent::class);
+
+        $app->discord->emit('TEST_EVENT', [(object) ['content' => 'hi'], $app->discord]);
+    }
+
+    /**
+     * A Discord client with the given properties; a property that is an exception is thrown when read.
+     *
+     * @param array<string, mixed>     $properties
+     * @param array<string, callable> &$listeners  Collects the handlers passed to listenCommand().
+     */
+    private function discordStub(Discord $client, array $properties, array &$listeners, bool $expectClose = false): Discord
+    {
+        $methods = ['__get', 'getLogger', 'getHttpClient', 'getFactory', 'listenCommand', 'close'];
+        $discord = $expectClose
+            ? $this->getMockBuilder(Discord::class)->disableOriginalConstructor()->onlyMethods($methods)->getMock()
+            : static::getStubBuilder(Discord::class)->disableOriginalConstructor()->onlyMethods($methods)->getStub();
+
+        if ($expectClose) {
+            $discord->expects($this->once())->method('close');
+        }
+
+        $discord->method('__get')->willReturnCallback(function (string $name) use ($properties) {
+            $value = $properties[$name] ?? null;
+
+            return $value instanceof \Throwable ? throw $value : $value;
+        });
+        $discord->method('getLogger')->willReturn($client->getLogger());
+        $discord->method('getHttpClient')->willReturn($client->getHttpClient());
+        $discord->method('getFactory')->willReturn($client->getFactory());
+        $discord->method('listenCommand')->willReturnCallback(function (string $name, callable $callback) use (&$listeners): RegisteredCommand {
+            $listeners[$name] = $callback;
+
+            return (new ReflectionClass(RegisteredCommand::class))->newInstanceWithoutConstructor();
+        });
+
+        return $discord;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function logged(): array
+    {
+        return array_map(fn ($record) => $record->message, $this->logs->getRecords());
+    }
+}

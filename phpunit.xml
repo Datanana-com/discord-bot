@@ -14,9 +14,11 @@
             <directory>tests/Feature</directory>
         </testsuite>
     </testsuites>
-    <source>
+    <source ignoreIndirectDeprecations="true">
         <include>
             <directory>app</directory>
+            <directory>configs</directory>
+            <directory>helpers</directory>
         </include>
     </source>
 </phpunit>

@@ -189,6 +189,12 @@ composer test -- --testsuite Unit      # or Feature
 
 Unit tests cover each class on its own. Feature tests run the whole voice flow and the `/record` and `/stop` commands against a fake Discord, with whisper.cpp, Claude Code and Piper replaced by the scripts in `tests/Fixtures`, so they need no models, Claude login or Discord connection.
 
+To see the code coverage, install a coverage driver (`sudo apt install php8.5-pcov`, or Xdebug) and run:
+
+```bash
+composer test:coverage
+```
+
 ## Contributing
 
 We are open to contributions.

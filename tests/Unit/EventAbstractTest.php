@@ -10,6 +10,7 @@ use Discord\Discord;
 use Monolog\Handler\TestHandler;
 use Monolog\Logger;
 use PHPUnit\Framework\TestCase;
+use RuntimeException;
 
 final class EventAbstractTest extends TestCase
 {
@@ -51,6 +52,30 @@ final class EventAbstractTest extends TestCase
         $this->assertSame([['withoutArguments']], $event->calls);
     }
 
+    public function testOtherPropertiesReadTheEventData(): void
+    {
+        $data = (object) ['content' => 'hello'];
+        $event = $this->event($data, ['first']);
+
+        $this->assertSame($data, $event->message);
+        $this->assertSame(['first'], $event->getExecutableMethods());
+    }
+
+    public function testWarnsWhenThereIsNothingToRun(): void
+    {
+        $this->assertFalse($this->event((object) [], [])->handle());
+        $this->assertSame(['No executable methods were found for this event.'], $this->logged());
+    }
+
+    public function testLogsAFailingMethodAndStops(): void
+    {
+        $event = $this->event((object) [], ['fail', 'first']);
+
+        $this->assertFalse($event->handle());
+        $this->assertSame([['fail']], $event->calls);
+        $this->assertSame('Event "fail" failed with the following error: Something broke', $this->logged()[0]);
+    }
+
     public function testFailsForMethodsThatDoNotExist(): void
     {
         $this->expectException(EventFunctionNotFoundException::class);
@@ -88,6 +113,21 @@ final class EventAbstractTest extends TestCase
             {
                 $this->calls[] = ['withoutArguments'];
             }
+
+            public function fail(): void
+            {
+                $this->calls[] = ['fail'];
+
+                throw new RuntimeException('Something broke');
+            }
         };
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function logged(): array
+    {
+        return array_map(fn ($record) => $record->message, $this->logs->getRecords());
     }
 }

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Voice\VoiceSession;
+use RuntimeException;
 
 final class VoiceConversationTest extends VoiceTestCase
 {
@@ -135,5 +136,83 @@ final class VoiceConversationTest extends VoiceTestCase
         $vc->emit('close');
 
         $this->assertNull(VoiceSession::forGuild(self::GUILD_ID));
+    }
+
+    public function testIgnoresWhatWhisperHearsAsBlankAudio(): void
+    {
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => '']);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $utterances = "{$session->directory}/utterances";
+        $this->waitUntil(fn () => is_dir($utterances) && glob("{$utterances}/*") === [], 'the utterance to be transcribed');
+
+        $this->assertSame('', $this->transcript($session));
+        $this->assertFileDoesNotExist($this->claudeLog);
+        $this->assertSame([], $this->sent);
+    }
+
+    public function testPostsButDoesNotSpeakAnAnswerThatArrivesAfterStop(): void
+    {
+        $this->setProcessEnv(['FAKE_CLAUDE_DELAY' => '1']);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => is_file($this->claudeLog), 'Claude to be asked');
+        $session->stop();
+        $this->waitUntil(fn () => $this->sent !== [], 'the answer');
+
+        $this->assertSame(["> **Alice:** Hey Claude, what time is it?\nIt is a quarter past four."], $this->sent);
+        $this->assertSame([], $this->played);
+    }
+
+    public function testStillSpeaksAnswersThatCannotBePosted(): void
+    {
+        $this->sendError = new RuntimeException('Missing Send Messages permission');
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');
+
+        $this->assertSame(['Could not post in the text channel: Missing Send Messages permission'], $this->loggedProblems());
+    }
+
+    public function testRecordsButCannotAnswerSpeakersWithoutAReceiveStream(): void
+    {
+        $session = VoiceSession::start(
+            $vc = $this->voiceClient($channel = $this->voiceChannel(), findsReceiveStreams: false),
+            $channel,
+            $this->discord,
+        );
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->runFor(1.5);
+        $session->stop();
+
+        $this->assertSame('', $this->transcript($session));
+        $this->assertSame(['No receive stream for 555; their speech will not be answered.'], $this->loggedProblems());
+        $this->assertWavDuration(1.0, "{$session->directory}/555-1.wav");
+    }
+
+    public function testStopIsSafeToCallTwice(): void
+    {
+        // The voice client expects to be closed exactly once.
+        $session = VoiceSession::start($this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);
+
+        $session->stop();
+        $session->stop();
+
+        $this->assertNull(VoiceSession::forGuild(self::GUILD_ID));
+    }
+
+    public function testWarnsWhenTheRecordingCannotBeStoppedCleanly(): void
+    {
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $vc->stopRecording();
+
+        $session->stop();
+
+        $this->assertNull(VoiceSession::forGuild(self::GUILD_ID));
+        $this->assertSame(['Could not stop recording cleanly: Not recording audio.'], $this->loggedProblems());
     }
 }

@@ -6,5 +6,6 @@
     for arg in "$@"; do printf 'arg=%s\n' "$arg"; done
     printf 'stdin=%s\n' "$(cat)"
 } > "${FAKE_CLAUDE_LOG:-/dev/null}"
+sleep "${FAKE_CLAUDE_DELAY:-0}"
 printf '%s' "$FAKE_CLAUDE_OUTPUT"
 exit "${FAKE_CLAUDE_EXIT:-0}"

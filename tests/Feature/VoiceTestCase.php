@@ -25,6 +25,7 @@ use ReflectionProperty;
 
 use function React\Async\await;
 use function React\Async\delay;
+use function React\Promise\reject;
 use function React\Promise\resolve;
 
 /**
@@ -52,6 +53,9 @@ abstract class VoiceTestCase extends TestCase
 
     /** @var list<string> Files played into the call. */
     protected array $played = [];
+
+    /** When set, posting in the text channel fails with this error. */
+    protected ?\Throwable $sendError = null;
 
     /** @var array<int, true> SSRCs that already sent a speaking event. */
     private array $speaking = [];
@@ -173,7 +177,7 @@ abstract class VoiceTestCase extends TestCase
             $this->assertSame(['parse' => []], $message->jsonSerialize()['allowed_mentions'] ?? null, 'Mentions are disabled.');
             $this->sent[] = $message->getContent();
 
-            return resolve(null);
+            return $this->sendError === null ? resolve(null) : reject($this->sendError);
         });
 
         return $channel;
@@ -183,11 +187,12 @@ abstract class VoiceTestCase extends TestCase
      * A voice client connected to the channel. Only its network side and Opus decoding are faked;
      * files it is asked to play are collected in {@see $played}.
      *
-     * @param bool $connected Whether it reports being connected; it then expects to be closed exactly once.
+     * @param bool $connected            Whether it reports being connected; it then expects to be closed exactly once.
+     * @param bool $findsReceiveStreams Whether getReceiveStream() finds speakers' streams.
      */
-    protected function voiceClient(Channel $channel, bool $connected = false): VoiceClient
+    protected function voiceClient(Channel $channel, bool $connected = false, bool $findsReceiveStreams = true): VoiceClient
     {
-        $methods = ['createDecoder', 'playFile', 'isReady', 'close'];
+        $methods = ['createDecoder', 'playFile', 'isReady', 'close', ...($findsReceiveStreams ? [] : ['getReceiveStream'])];
 
         if ($connected) {
             $vc = $this->getMockBuilder(VoiceClient::class)->disableOriginalConstructor()->onlyMethods($methods)->getMock();
@@ -206,6 +211,11 @@ abstract class VoiceTestCase extends TestCase
         $this->setProperty($vc, VoiceClient::class, 'startTime', 0);
 
         $vc->method('isReady')->willReturn($connected);
+
+        if (! $findsReceiveStreams) {
+            $vc->method('getReceiveStream')->willReturn(null);
+        }
+
         $vc->method('playFile')->willReturnCallback(function (string $file): PromiseInterface {
             $this->played[] = $file;
 

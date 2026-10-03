@@ -12,7 +12,7 @@ use Illuminate\Support\Str;
 use Psr\Log\LoggerInterface;
 use Discord\WebSockets\Event;
 use App\Exceptions\EventNotFoundException;
-use Discord\Parts\Interactions\Command\Command;
+use Discord\Parts\Application\Command\Command;
 use Discord\Parts\Interactions\Interaction;
 
 class Application
@@ -43,7 +43,9 @@ class Application
      */
     public function __construct(array $options, ?Closure $readyFunction = null)
     {
-        $this->discord = new Discord($options + ['logger' => new Logger()]);
+        // Only create the default logger when none is given: it opens a log file.
+        $options['logger'] ??= new Logger();
+        $this->discord = new Discord($options);
         $this->log = $this->discord->getLogger();
 
         // Retrieves every event name from the constants from the \Discord\WebSockets\Event class
