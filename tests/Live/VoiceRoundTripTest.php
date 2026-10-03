@@ -88,26 +88,28 @@ final class VoiceRoundTripTest extends TestCase
         try {
             $session = $this->within(60, $joined->promise(), 'the bot to join the voice channel');
 
-            // Counts what reaches the bot: UDP datagrams, and those that decrypted into audio.
-            $received = ['udp packets' => 0, 'audio packets' => 0];
+            // Counts what reaches the bot: UDP datagrams, those that decrypted into audio, and
+            // speaking events, which tell it who sends which audio.
+            $received = ['udp packets' => 0, 'audio packets' => 0, 'speaking events' => 0];
             $voiceClient->udp->on('message', function () use (&$received) {
                 $received['udp packets']++;
             });
             $voiceClient->on('raw', function () use (&$received) {
                 $received['audio packets']++;
             });
+            $voiceClient->on('speaking', function () use (&$received) {
+                $received['speaking events']++;
+            });
 
             $speakerRecordings = "{$session->directory}/speaker";
             mkdir($speakerRecordings, 0755, true);
-            $speaker = json_decode($this->within(
+            $this->within(
                 150,
-                Shell::run(
-                    // Its result is printed on stdout, so PHP's own messages must not end up there.
-                    [PHP_BINARY, '-d', 'display_errors=stderr', __DIR__ . '/speaker.php', getenv('LIVE_TEST_QUESTION'), $speakerRecordings],
-                    timeout: 140,
-                ),
+                Shell::run([PHP_BINARY, __DIR__ . '/speaker.php', getenv('LIVE_TEST_QUESTION'), $speakerRecordings], timeout: 140),
                 'the speaker to ask its question and hear the answer',
-            ), true);
+            );
+            $result = "{$speakerRecordings}/result.json";
+            $speaker = is_file($result) ? json_decode(file_get_contents($result), true) : null;
         } finally {
             if (isset($session)) {
                 $logger->info('The bot received', $received ?? []);

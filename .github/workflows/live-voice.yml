@@ -114,6 +114,16 @@ jobs:
         timeout-minutes: 10
         run: vendor/bin/phpunit --testsuite Live --colors=always
 
+      - name: Show the logs
+        if: failure()
+        # Without the lines holding the voice session's token and keys.
+        run: |
+          for log in $(find recordings -name '*.log'); do
+            echo "::group::$log"
+            grep -v -e secret_key -e '"token"' "$log" || true
+            echo "::endgroup::"
+          done
+
       - name: Keep the recordings
         if: always()
         uses: actions/upload-artifact@v4

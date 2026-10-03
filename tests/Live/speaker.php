@@ -8,7 +8,8 @@ declare(strict_types=1);
  *
  * Usage: php tests/Live/speaker.php <question.wav> <output directory>
  * Needs DISCORD_TEST_SPEAKER_TOKEN and DISCORD_TEST_VOICE_CHANNEL_ID.
- * Prints {"recordings": [...], "answered": bool, "heardFrames": int} when done, and logs to <output>/speaker.log.
+ * Writes {"recordings": [...], "answered": bool, "heardFrames": int, "sentPackets": int} to <output>/result.json
+ * when done, and logs to <output>/speaker.log. Not to stdout: libdave prints its own logs there.
  */
 
 use Discord\Discord;
@@ -34,7 +35,6 @@ const QUIET_SECONDS = 3.0;
 const MAX_LISTEN_SECONDS = 60.0;
 
 $logger = new Logger('speaker', [
-    // stdout carries the result, so logs go to stderr.
     new StreamHandler('php://stderr', Level::Info),
     new StreamHandler("{$output}/speaker.log", Level::Debug),
 ]);
@@ -67,16 +67,20 @@ $discord->on('init', function (Discord $discord) use ($question, $output, $fail,
                 $heardAt = microtime(true);
                 $heardFrames++;
             });
+            $sentPackets = 0;
+            $vc->on('packet-sent', function () use (&$sentPackets) {
+                $sentPackets++;
+            });
 
-            Loop::addTimer(SETTLE_SECONDS, function () use ($vc, $discord, $question, $output, $fail, $logger, &$heardAt, &$heardFrames) {
+            Loop::addTimer(SETTLE_SECONDS, function () use ($vc, $discord, $question, $output, $fail, $logger, &$heardAt, &$heardFrames, &$sentPackets) {
                 $logger->info('Playing the question', ['file' => $question]);
 
-                $vc->playFile($question)->then(function () use ($vc, $discord, $output, $logger, &$heardAt, &$heardFrames) {
-                    $logger->info('Finished playing the question; listening for the answer');
+                $vc->playFile($question)->then(function () use ($vc, $discord, $output, $logger, &$heardAt, &$heardFrames, &$sentPackets) {
+                    $logger->info('Finished playing the question; listening for the answer', ['sent packets' => $sentPackets]);
                     $listeningSince = microtime(true);
                     $heardAt = null;
 
-                    Loop::addPeriodicTimer(0.25, function (TimerInterface $timer) use ($vc, $discord, $output, $listeningSince, &$heardAt, &$heardFrames) {
+                    Loop::addPeriodicTimer(0.25, function (TimerInterface $timer) use ($vc, $discord, $output, $listeningSince, &$heardAt, &$heardFrames, &$sentPackets) {
                         $now = microtime(true);
                         $answered = $heardAt !== null && $now - $heardAt >= QUIET_SECONDS;
 
@@ -86,7 +90,12 @@ $discord->on('init', function (Discord $discord) use ($question, $output, $fail,
 
                         Loop::cancelTimer($timer);
                         $vc->stopRecording();
-                        echo json_encode(['recordings' => glob("{$output}/*.wav"), 'answered' => $answered, 'heardFrames' => $heardFrames]), PHP_EOL;
+                        file_put_contents("{$output}/result.json", json_encode([
+                            'recordings' => glob("{$output}/*.wav"),
+                            'answered' => $answered,
+                            'heardFrames' => $heardFrames,
+                            'sentPackets' => $sentPackets,
+                        ]));
                         $vc->close();
                         $discord->close();
                     });

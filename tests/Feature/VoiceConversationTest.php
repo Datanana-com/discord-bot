@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Voice\VoiceSession;
+use Discord\Voice\Rtp\UDP;
+use Discord\Voice\VoiceClient;
 use RuntimeException;
 
 final class VoiceConversationTest extends VoiceTestCase
@@ -192,6 +194,28 @@ final class VoiceConversationTest extends VoiceTestCase
         $this->assertSame('', $this->transcript($session));
         $this->assertSame(['No receive stream for 555; their speech will not be answered.'], $this->loggedProblems());
         $this->assertWavDuration(1.0, "{$session->directory}/555-1.wav");
+    }
+
+    public function testSendsSilenceSoDiscordSendsItTheCallsAudio(): void
+    {
+        $session = VoiceSession::start($this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);
+
+        $this->assertSame(array_fill(0, 5, UDP::SILENCE_FRAME), $this->sentFrames);
+        $this->assertSame([VoiceClient::MICROPHONE, VoiceClient::NOT_SPEAKING], $this->speakingUpdates, 'It announced the audio, and that it ended.');
+        $session->stop();
+    }
+
+    public function testDoesNotSendSilenceWhileSpeaking(): void
+    {
+        // As when the next silence is due while an answer plays.
+        $vc = $this->voiceClient($channel = $this->voiceChannel(), connected: true);
+        $vc->speaking = VoiceClient::MICROPHONE;
+
+        $session = VoiceSession::start($vc, $channel, $this->discord);
+
+        $this->assertSame([], $this->sentFrames);
+        $this->assertSame([], $this->speakingUpdates);
+        $session->stop();
     }
 
     public function testStopIsSafeToCallTwice(): void
