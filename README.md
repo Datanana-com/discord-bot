@@ -195,6 +195,23 @@ To see the code coverage, install a coverage driver (`sudo apt install php8.5-pc
 composer test:coverage
 ```
 
+### Live voice test
+
+`tests/Live` asks the bot a question in a real Discord voice call. A second bot plays the spoken question "Hey Claude, what time is it?" and records the answer.
+
+Everything except Claude is real: Discord with its end-to-end encryption, whisper.cpp and Piper. Claude is replaced by a fixed answer, so no Claude subscription is used. It runs in GitHub Actions (`.github/workflows/live-voice.yml`) every night, on demand, and on pull requests that change the bot. Every run keeps its recordings as an artifact you can download and listen to.
+
+It needs its own private Discord server:
+
+1. Create a server with a voice channel.
+2. In the [Developer Portal](https://discord.com/developers/applications), create two applications, one for the bot under test and one for the "speaker". Copy each bot's token. On the bot under test, enable the **Server Members Intent**.
+3. Invite both bots with the `bot` scope and the View Channels, Connect, Speak and Send Messages permissions. Add the `applications.commands` scope for the bot under test.
+4. In the GitHub repository, under Settings → Secrets and variables → Actions, add:
+    - the secrets `DISCORD_TEST_BOT_TOKEN` and `DISCORD_TEST_SPEAKER_TOKEN`;
+    - the variable `DISCORD_TEST_VOICE_CHANNEL_ID` (right-click the channel → Copy Channel ID, with Developer Mode enabled).
+
+Until those are set, the workflow skips itself.
+
 ## Contributing
 
 We are open to contributions.
