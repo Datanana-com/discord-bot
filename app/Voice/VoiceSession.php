@@ -73,7 +73,7 @@ final class VoiceSession
         $transcriber = Transcriber::fromEnv();
         $speech = Speech::fromEnv();
 
-        foreach ([$transcriber->binary, Claude::fromEnv()->binary, $speech->binary] as $binary) {
+        foreach ([$transcriber->binary, Claude::fromEnv()->binary, $speech->binary, $speech->ffmpeg] as $binary) {
             if (ProcessAbstract::checkForExecutable($binary) === null) {
                 return "`{$binary}` was not found. Install it or set its path in .env.";
             }
@@ -257,10 +257,10 @@ final class VoiceSession
         }
 
         // Replies are kept next to the recordings, so the bot's side of the call is saved too.
-        $wavPath = sprintf('%s/claude-%d.wav', $this->directory, ++$this->files);
+        $oggPath = sprintf('%s/claude-%d.ogg', $this->directory, ++$this->files);
 
-        return $this->speech->synthesize($answer, $wavPath)
-            ->then(fn () => $this->vc->playFile($wavPath));
+        return $this->speech->synthesize($answer, $oggPath)
+            ->then(fn () => $this->vc->playFile($oggPath));
     }
 
     private function prompt(string $name): string

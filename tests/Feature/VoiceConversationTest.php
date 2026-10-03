@@ -30,7 +30,7 @@ final class VoiceConversationTest extends VoiceTestCase
 
         // The answer is posted in the text chat and spoken into the call.
         $this->assertSame(["> **Alice:** Hey Claude, what time is it?\nIt is a quarter past four."], $this->sent);
-        $this->assertSame(["{$session->directory}/claude-2.wav"], $this->played);
+        $this->assertSame(["{$session->directory}/claude-2.ogg"], $this->played);
         $this->assertSame('It is a quarter past four.', file_get_contents($this->played[0]), 'Piper was given the answer.');
 
         // Alice's speech is recorded, and the temporary utterance file is gone.

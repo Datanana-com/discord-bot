@@ -88,6 +88,7 @@ abstract class VoiceTestCase extends TestCase
             'CLAUDE_MODEL' => 'haiku',
             'PIPER_BINARY' => "{$fixtures}/fake-piper",
             'PIPER_MODEL' => "{$this->recordings}/models/voice.onnx",
+            'FFMPEG_BINARY' => "{$fixtures}/fake-ffmpeg",
         ]);
         $this->setProcessEnv([
             'FAKE_CLAUDE_LOG' => $this->claudeLog,
