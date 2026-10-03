@@ -11,7 +11,6 @@ use Discord\Helpers\Collection;
 use Discord\Parts\Channel\Channel;
 use Discord\Voice\Processes\OpusDecoderInterface;
 use Discord\Voice\Rtp\Packet;
-use Discord\Voice\Rtp\UDP;
 use Discord\Voice\Speaking;
 use Discord\Voice\VoiceClient;
 use Monolog\Handler\TestHandler;
@@ -54,12 +53,6 @@ abstract class VoiceTestCase extends TestCase
 
     /** @var list<string> Files played into the call. */
     protected array $played = [];
-
-    /** @var list<string> Opus frames sent into the call, other than played files. */
-    protected array $sentFrames = [];
-
-    /** @var list<int> Speaking states the bot announced. */
-    protected array $speakingUpdates = [];
 
     /** When set, posting in the text channel fails with this error. */
     protected ?\Throwable $sendError = null;
@@ -193,15 +186,14 @@ abstract class VoiceTestCase extends TestCase
 
     /**
      * A voice client connected to the channel. Only its network side and Opus decoding are faked;
-     * files it is asked to play are collected in {@see $played}, other audio it sends in
-     * {@see $sentFrames}, and its speaking updates in {@see $speakingUpdates}.
+     * files it is asked to play are collected in {@see $played}.
      *
      * @param bool $connected            Whether it reports being connected; it then expects to be closed exactly once.
      * @param bool $findsReceiveStreams Whether getReceiveStream() finds speakers' streams.
      */
     protected function voiceClient(Channel $channel, bool $connected = false, bool $findsReceiveStreams = true): VoiceClient
     {
-        $methods = ['createDecoder', 'playFile', 'setSpeaking', 'isReady', 'close', ...($findsReceiveStreams ? [] : ['getReceiveStream'])];
+        $methods = ['createDecoder', 'playFile', 'isReady', 'close', ...($findsReceiveStreams ? [] : ['getReceiveStream'])];
 
         if ($connected) {
             $vc = $this->getMockBuilder(VoiceClient::class)->disableOriginalConstructor()->onlyMethods($methods)->getMock();
@@ -230,14 +222,6 @@ abstract class VoiceTestCase extends TestCase
 
             return resolve(null);
         });
-        $vc->method('setSpeaking')->willReturnCallback(function (int $speaking) use ($vc): void {
-            $this->speakingUpdates[] = $vc->speaking = $speaking;
-        });
-        $udp = static::getStubBuilder(UDP::class)->disableOriginalConstructor()->onlyMethods(['sendBuffer'])->getStub();
-        $udp->method('sendBuffer')->willReturnCallback(function (string $frame): void {
-            $this->sentFrames[] = $frame;
-        });
-        $vc->udp = $udp;
         // The ffmpeg decoder process is not needed: PCM comes from the Opus decoder below.
         $vc->method('createDecoder')->willReturnCallback(function (object $ss) use ($vc): void {
             $vc->voiceDecoders[$ss->ssrc] = new class () {

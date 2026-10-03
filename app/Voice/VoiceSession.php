@@ -9,7 +9,6 @@ use Discord\Discord;
 use Discord\Parts\Channel\Channel;
 use Discord\Voice\Processes\ProcessAbstract;
 use Discord\Voice\Recording\RecordingFormat;
-use Discord\Voice\Rtp\UDP;
 use Discord\Voice\VoiceClient;
 use React\EventLoop\TimerInterface;
 use React\Promise\PromiseInterface;
@@ -29,17 +28,12 @@ final class VoiceSession
     /** Transcript lines given to Claude as context. */
     private const int CONTEXT_LINES = 20;
 
-    /** How often silence is sent to keep receiving the call's audio; Discord stops after about 5 minutes. */
-    private const float SILENCE_INTERVAL_SECONDS = 60.0;
-
     /** @var array<string, self> Active sessions by guild ID. */
     private static array $sessions = [];
 
     private UtteranceSplitter $splitter;
 
     private TimerInterface $ticker;
-
-    private TimerInterface $silenceTimer;
 
     /** Utterances are handled one at a time, in the order they ended. */
     private PromiseInterface $queue;
@@ -143,7 +137,6 @@ final class VoiceSession
         $this->stopped = true;
         unset(self::$sessions[$this->vc->channel->guild_id]);
         $this->discord->getLoop()->cancelTimer($this->ticker);
-        $this->discord->getLoop()->cancelTimer($this->silenceTimer);
 
         // Speech still in progress is transcribed for the transcript, but no longer answered.
         $this->splitter->flushAll();
@@ -183,32 +176,8 @@ final class VoiceSession
             fn () => $this->splitter->flushSilent(microtime(true)),
         );
 
-        // Discord only sends a bot the call's audio after the bot has sent some itself, and stops
-        // when it hasn't for a while.
-        $this->sendSilence();
-        $this->silenceTimer = $this->discord->getLoop()->addPeriodicTimer(self::SILENCE_INTERVAL_SECONDS, $this->sendSilence(...));
-
         // Also clean up when someone else disconnects the bot from the call.
         $this->vc->once('close', $this->stop(...));
-    }
-
-    /**
-     * Sends a moment of silence into the call, unless the bot is already speaking.
-     */
-    private function sendSilence(): void
-    {
-        if (! $this->vc->isReady() || $this->vc->speaking !== VoiceClient::NOT_SPEAKING) {
-            return;
-        }
-
-        // Discord expects a speaking update before any audio.
-        $this->vc->setSpeaking(VoiceClient::MICROPHONE);
-
-        for ($frame = 0; $frame < 5; $frame++) {
-            $this->vc->udp->sendBuffer(UDP::SILENCE_FRAME);
-        }
-
-        $this->vc->setSpeaking(VoiceClient::NOT_SPEAKING);
     }
 
     private function queueUtterance(string $userId, string $wavPath): void
