@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Analytics\Usage;
 use App\Voice\VoiceSession;
 use Discord\Builders\MessageBuilder;
 use Discord\Discord;
@@ -22,6 +23,7 @@ use React\Promise\Deferred;
 use React\Promise\PromiseInterface;
 use ReflectionClass;
 use ReflectionProperty;
+use Tests\UsesStatsDatabase;
 
 use function React\Async\await;
 use function React\Async\delay;
@@ -36,6 +38,8 @@ use function React\Promise\resolve;
  */
 abstract class VoiceTestCase extends TestCase
 {
+    use UsesStatsDatabase;
+
     protected const string GUILD_ID = '100';
 
     protected const array MEMBERS = ['555' => 'Alice', '666' => 'Bob'];
@@ -90,6 +94,7 @@ abstract class VoiceTestCase extends TestCase
             'FAKE_WHISPER_OUTPUT' => 'Hey Claude, what time is it?',
         ]);
 
+        $this->useStatsDatabase();
         $this->logs = new TestHandler();
         $logger = new Logger('test', [$this->logs]);
         $discord = static::getStubBuilder(Discord::class)
@@ -336,6 +341,25 @@ abstract class VoiceTestCase extends TestCase
         $path = "{$session->directory}/transcript.txt";
 
         return is_file($path) ? file_get_contents($path) : '';
+    }
+
+    /**
+     * @return list<array<string, mixed>> The context of each time the message was logged.
+     */
+    protected function logged(string $message): array
+    {
+        return array_values(array_map(
+            fn ($record) => $record->context,
+            array_filter($this->logs->getRecords(), fn ($record) => $record->message === $message),
+        ));
+    }
+
+    /**
+     * @return array<string, mixed> This server's usage statistics.
+     */
+    protected function usage(): array
+    {
+        return (new Usage(new Logger('test')))->summary(self::GUILD_ID);
     }
 
     /**

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Live;
 
+use App\Analytics\Usage;
 use App\Application;
 use App\Support\Shell;
 use App\Voice\Transcriber;
@@ -20,6 +21,7 @@ use React\EventLoop\Loop;
 use React\Promise\Deferred;
 use React\Promise\PromiseInterface;
 use RuntimeException;
+use Tests\UsesStatsDatabase;
 use Throwable;
 
 use function React\Async\await;
@@ -35,6 +37,8 @@ use function React\Promise\race;
  */
 final class VoiceRoundTripTest extends TestCase
 {
+    use UsesStatsDatabase;
+
     private const array REQUIRED_ENV = [
         'DISCORD_TEST_BOT_TOKEN',
         'DISCORD_TEST_SPEAKER_TOKEN',
@@ -50,6 +54,7 @@ final class VoiceRoundTripTest extends TestCase
             }
         }
 
+        $this->useStatsDatabase();
         $logs = new TestHandler();
         $logger = new Logger('bot', [
             $logs,
@@ -136,6 +141,10 @@ final class VoiceRoundTripTest extends TestCase
         // It answered, in the text chat and out loud.
         $this->assertStringContainsString('Claude: It is a quarter past four.', $transcript);
         $this->assertEmpty(preg_grep('/^(Voice reply failed|Could not post)/', $logged), 'Answering did not fail.');
+
+        // The call and its answer were counted for /stats.
+        $usage = (new Usage($logger))->summary((string) $voiceClient->channel->guild_id);
+        $this->assertSame([1, 1, 0], [$usage['calls'], $usage['answers'], $usage['failures']], 'Usage: ' . json_encode($usage));
 
         // The speaker heard the spoken answer, and whisper understands it too.
         $this->assertIsArray($speaker, 'The speaker reported what it heard.');

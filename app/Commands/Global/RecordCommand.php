@@ -27,6 +27,7 @@ final class RecordCommand extends CommandAbstract
         };
 
         if ($problem !== null) {
+            $this->log->info("/record refused: {$problem}", ['guild' => $interaction->guild_id]);
             $interaction->respondWithMessage(MessageBuilder::new()->setContent($problem), ephemeral: true);
 
             return;
@@ -46,8 +47,8 @@ final class RecordCommand extends CommandAbstract
                         . ' Use /stop to end the recording.'
                     ));
                 },
-                function (Throwable $e) use ($interaction) {
-                    $this->log->error('Could not join the voice channel: ' . $e->getMessage());
+                function (Throwable $e) use ($interaction, $voiceChannel) {
+                    $this->log->error('Could not join the voice channel: ' . $e->getMessage(), ['guild' => $interaction->guild_id, 'channel' => $voiceChannel->id]);
 
                     return $interaction->updateOriginalResponse(
                         MessageBuilder::new()->setContent('Could not join the voice channel: ' . $e->getMessage())

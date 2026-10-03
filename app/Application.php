@@ -231,7 +231,14 @@ class Application
                 ->setDescription($commandClass->description)
                 ->setType($commandClass?->type ?? Command::CHAT_INPUT);
 
-            $this->discord->listenCommand($commandName, fn (Interaction $interaction) => $commandClass->handle($interaction));
+            $this->discord->listenCommand($commandName, function (Interaction $interaction) use ($commandName, $commandClass) {
+                $this->log->info("/{$commandName} used", [
+                    'guild' => $interaction->guild_id,
+                    'channel' => $interaction->channel_id,
+                    'user' => $interaction->user?->id,
+                ]);
+                $commandClass->handle($interaction);
+            });
         }
 
         // The repository is empty until the registered commands are fetched from Discord.

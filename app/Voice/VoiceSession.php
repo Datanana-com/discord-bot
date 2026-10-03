@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Voice;
 
+use App\Analytics\Usage;
 use Discord\Builders\MessageBuilder;
 use Discord\Discord;
 use Discord\Parts\Channel\Channel;
@@ -22,6 +23,9 @@ use function React\Promise\resolve;
  * Every speaker is recorded to their own WAV file. Meanwhile each utterance is transcribed
  * with whisper.cpp, and when it mentions the wake word, Claude's answer is posted in the
  * text channel and spoken back into the call with Piper.
+ *
+ * Each step is logged with the session's ID and how long it took, and the call's usage is
+ * recorded for /stats. Neither includes what anyone said: that is only in transcript.txt.
  */
 final class VoiceSession
 {
@@ -45,6 +49,17 @@ final class VoiceSession
 
     private bool $stopped = false;
 
+    /** Identifies the call in the logs and statistics. */
+    public readonly string $id;
+
+    private readonly float $startedAt;
+
+    /** @var array<string, true> */
+    private array $speakers = [];
+
+    /** @var array{utterances: int, answers: int, failures: int} */
+    private array $counts = ['utterances' => 0, 'answers' => 0, 'failures' => 0];
+
     private function __construct(
         private readonly VoiceClient $vc,
         private readonly Channel $textChannel,
@@ -54,7 +69,10 @@ final class VoiceSession
         private readonly Claude $claude,
         private readonly Speech $speech,
         private readonly string $wakeWord,
+        private readonly Usage $usage,
     ) {
+        $this->id = bin2hex(random_bytes(4));
+        $this->startedAt = microtime(true);
         $this->queue = resolve(null);
         $this->splitter = new UtteranceSplitter("{$directory}/utterances", $this->queueUtterance(...));
     }
@@ -111,8 +129,11 @@ final class VoiceSession
             Claude::fromEnv(),
             Speech::fromEnv(),
             trim(env('VOICE_WAKE_WORD', 'claude')),
+            new Usage($discord->getLogger()),
         );
         $session->listen();
+        $session->log('info', 'Voice session started', ['channel' => $vc->channel->id, 'directory' => $directory]);
+        $session->track(Usage::CALL_STARTED, ['channel' => $vc->channel->id]);
 
         return self::$sessions[$vc->channel->guild_id] = $session;
     }
@@ -145,12 +166,16 @@ final class VoiceSession
             // Finalizes every speaker's WAV file.
             $this->vc->stopRecording();
         } catch (Throwable $e) {
-            $this->discord->getLogger()->warning('Could not stop recording cleanly: ' . $e->getMessage());
+            $this->log('warning', 'Could not stop recording cleanly: ' . $e->getMessage());
         }
 
         if ($this->vc->isReady()) {
             $this->vc->close();
         }
+
+        $ms = $this->msSince($this->startedAt);
+        $this->log('info', 'Voice session stopped', ['ms' => $ms, 'speakers' => count($this->speakers), ...$this->counts]);
+        $this->track(Usage::CALL_ENDED, ['duration_ms' => $ms]);
     }
 
     private function listen(): void
@@ -160,9 +185,11 @@ final class VoiceSession
         // while record() itself keeps writing the speaker's full recording to the returned path.
         $this->vc->record(RecordingFormat::WAV, function (string $userId): string {
             $stream = $this->vc->getReceiveStream($userId);
+            $this->speakers[$userId] = true;
+            $this->log('info', 'Recording a speaker', ['user' => $userId]);
 
             if ($stream === null) {
-                $this->discord->getLogger()->warning("No receive stream for {$userId}; their speech will not be answered.");
+                $this->log('warning', "No receive stream for {$userId}; their speech will not be answered.", ['user' => $userId]);
             }
 
             $stream?->on('pcm', fn (string $pcm) => $this->splitter->push($userId, $pcm, microtime(true)));
@@ -180,20 +207,35 @@ final class VoiceSession
         $this->vc->once('close', $this->stop(...));
     }
 
-    private function queueUtterance(string $userId, string $wavPath): void
+    private function queueUtterance(string $userId, string $wavPath, float $seconds): void
     {
+        $endedAt = microtime(true);
+        $ms = (int) round($seconds * 1000);
+        $this->counts['utterances']++;
+        $this->log('info', 'Utterance ended', ['user' => $userId, 'ms' => $ms]);
+        $this->track(Usage::UTTERANCE, ['user' => $userId, 'duration_ms' => $ms]);
+
         $this->queue = $this->queue
-            ->then(fn () => $this->handleUtterance($userId, $wavPath))
-            ->catch(function (Throwable $e) {
-                $this->discord->getLogger()->error('Voice reply failed: ' . $e->getMessage());
+            ->then(fn () => $this->handleUtterance($userId, $wavPath, $endedAt))
+            ->catch(function (Throwable $e) use ($userId) {
+                $this->counts['failures']++;
+                $this->log('error', 'Voice reply failed: ' . $e->getMessage(), ['user' => $userId]);
+                $this->track(Usage::FAILED, ['user' => $userId]);
             });
     }
 
-    private function handleUtterance(string $userId, string $wavPath): PromiseInterface
+    /**
+     * @param float $endedAt When the utterance ended, to time the answer from.
+     */
+    private function handleUtterance(string $userId, string $wavPath, float $endedAt): PromiseInterface
     {
+        $transcribing = microtime(true);
+
         return $this->transcriber->transcribe($wavPath)
             ->finally(fn () => unlink($wavPath))
-            ->then(function (string $text) use ($userId) {
+            ->then(function (string $text) use ($userId, $endedAt, $transcribing) {
+                $this->log('info', 'Transcribed', ['user' => $userId, 'ms' => $this->msSince($transcribing), 'characters' => mb_strlen($text)]);
+
                 if ($text === '') {
                     return null;
                 }
@@ -202,11 +244,19 @@ final class VoiceSession
                 $this->remember("{$name}: {$text}");
 
                 if ($this->stopped || ! self::mentions($text, $this->wakeWord)) {
+                    $this->log('debug', 'Not answering', ['user' => $userId, 'reason' => $this->stopped ? 'the session stopped' : 'Claude was not addressed']);
+
                     return null;
                 }
 
+                $asking = microtime(true);
+
                 return $this->claude->ask($this->prompt($name))->then(
-                    fn (string $answer) => $this->reply($name, $text, $answer),
+                    function (string $answer) use ($userId, $name, $text, $endedAt, $asking) {
+                        $this->log('info', 'Claude answered', ['user' => $userId, 'ms' => $this->msSince($asking), 'characters' => mb_strlen($answer)]);
+
+                        return $this->reply($userId, $name, $text, $answer, $endedAt);
+                    },
                     function (Throwable $e) {
                         $this->post("Sorry, I couldn't get an answer from Claude. ({$e->getMessage()})");
 
@@ -216,10 +266,12 @@ final class VoiceSession
             });
     }
 
-    private function reply(string $name, string $question, string $answer): PromiseInterface
+    private function reply(string $userId, string $name, string $question, string $answer, float $endedAt): PromiseInterface
     {
         $this->remember("Claude: {$answer}");
         $this->post("> **{$name}:** {$question}\n{$answer}");
+        $this->counts['answers']++;
+        $this->track(Usage::ANSWERED, ['user' => $userId, 'duration_ms' => $this->msSince($endedAt)]);
 
         if ($this->stopped) {
             return resolve(null);
@@ -227,9 +279,14 @@ final class VoiceSession
 
         // Replies are kept next to the recordings, so the bot's side of the call is saved too.
         $oggPath = sprintf('%s/claude-%d.ogg', $this->directory, ++$this->files);
+        $synthesizing = microtime(true);
 
         return $this->speech->synthesize($answer, $oggPath)
-            ->then(fn () => $this->vc->playFile($oggPath));
+            ->then(function () use ($userId, $oggPath, $synthesizing) {
+                $this->log('info', 'Speaking the answer', ['user' => $userId, 'synthesis_ms' => $this->msSince($synthesizing)]);
+
+                return $this->vc->playFile($oggPath);
+            });
     }
 
     private function prompt(string $name): string
@@ -255,8 +312,33 @@ final class VoiceSession
             ->setAllowedMentions(['parse' => []]);
 
         $this->textChannel->sendMessage($message)->catch(function (Throwable $e) {
-            $this->discord->getLogger()->warning('Could not post in the text channel: ' . $e->getMessage());
+            $this->log('warning', 'Could not post in the text channel: ' . $e->getMessage());
         });
+    }
+
+    /**
+     * Logs a step of the call, with what identifies the call.
+     *
+     * @param array<string, mixed> $context
+     */
+    private function log(string $level, string $message, array $context = []): void
+    {
+        $this->discord->getLogger()->log($level, $message, ['guild' => $this->vc->channel->guild_id, 'session' => $this->id, ...$context]);
+    }
+
+    /**
+     * Records something that happened in the call, for /stats.
+     *
+     * @param array{channel?: string, user?: string, duration_ms?: int} $details
+     */
+    private function track(string $type, array $details = []): void
+    {
+        $this->usage->record($type, (string) $this->vc->channel->guild_id, ['session' => $this->id, ...$details]);
+    }
+
+    private function msSince(float $time): int
+    {
+        return (int) round((microtime(true) - $time) * 1000);
     }
 
     private function nameOf(string $userId): string

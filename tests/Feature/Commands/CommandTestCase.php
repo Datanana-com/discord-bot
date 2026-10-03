@@ -25,8 +25,10 @@ abstract class CommandTestCase extends VoiceTestCase
 
     /**
      * A slash command used by a member who is in the given voice channel, or in none.
+     *
+     * @param string|null $guildId The server it was used in, or null for a direct message.
      */
-    protected function interaction(?Channel $voiceChannel): Interaction
+    protected function interaction(?Channel $voiceChannel, ?string $guildId = self::GUILD_ID): Interaction
     {
         $member = static::getStubBuilder(Member::class)->disableOriginalConstructor()->onlyMethods(['getVoiceChannel'])->getStub();
         $member->method('getVoiceChannel')->willReturn($voiceChannel);
@@ -37,7 +39,7 @@ abstract class CommandTestCase extends VoiceTestCase
             ->getStub();
         $attributes = fn (string $name) => match ($name) {
             'member' => $member,
-            'guild_id' => self::GUILD_ID,
+            'guild_id' => $guildId,
             default => null,
         };
         $interaction->method('__get')->willReturnCallback($attributes);

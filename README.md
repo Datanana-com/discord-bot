@@ -101,7 +101,7 @@ Each class in `app/Commands/Global`, named `<Name>Command` and extending `App\Co
 3. If it mentions the wake word ("Claude" by default), the recent transcript is sent to Claude through the [Claude Code CLI](https://code.claude.com/docs/en/headless), so it uses the Claude subscription you're logged in with instead of an API key.
 4. Claude's answer is posted in the text channel and spoken back into the call with [Piper](https://github.com/OHF-Voice/piper1-gpl).
 
-`/stop` finishes the recordings and leaves the channel.
+`/stop` finishes the recordings and leaves the channel, and `/stats` shows how the server has used the bot (see [Logs and statistics](#logs-and-statistics)).
 
 > [!IMPORTANT]
 > Only record people who have agreed to it. The bot announces in the channel when it starts recording.
@@ -117,7 +117,7 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
     ```bash
     sudo add-apt-repository ppa:ondrej/php
     sudo apt update
-    sudo apt install php8.5-cli php8.5-mbstring php8.5-xml php8.5-curl php8.5-zip \
+    sudo apt install php8.5-cli php8.5-mbstring php8.5-xml php8.5-curl php8.5-zip php8.5-sqlite3 \
         ffmpeg libopus0 unzip git curl cmake build-essential python3-venv
     ```
 
@@ -167,7 +167,7 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 
 | Variable | Default | |
 |---|---|---|
-| `BOT_SLASH_COMMANDS` | | Must be set for `/record` and `/stop` to be registered. |
+| `BOT_SLASH_COMMANDS` | | Must be set for `/record`, `/stop` and `/stats` to be registered. |
 | `RECORDINGS_PATH` | `recordings` | Where recordings and transcripts are saved. |
 | `VOICE_WAKE_WORD` | `claude` | Claude only answers what mentions this word. Leave it empty to answer everything. |
 | `WHISPER_BINARY` | `whisper-cli` | Path to whisper.cpp's `whisper-cli`. |
@@ -178,6 +178,28 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 | `PIPER_BINARY` | `piper` | Path to Piper. |
 | `PIPER_MODEL` | | Path to the Piper voice, e.g. `~/piper/voices/en_US-lessac-medium.onnx`. |
 | `FFMPEG_BINARY` | `ffmpeg` | Path to ffmpeg, which converts Piper's speech for Discord. The voice library always uses the `ffmpeg` on your `PATH`. |
+| `STATS_DATABASE` | `databases/stats.sqlite` | SQLite database for the usage statistics. It is created on the first start. |
+
+### Logs and statistics
+
+Neither the logs nor the statistics contain what anyone said: that is only in the call's `transcript.txt`.
+
+**Logs** are printed to the console and written to `logs/<date>.log`, one JSON object per line. Each step of a call is logged with the server (`guild`), a `session` ID for the call, the `user` it concerns, and how long it took in milliseconds: the call starting, each new speaker, each utterance, its transcription, Claude's answer, the speech synthesis, failures, and the call ending with its totals. Slash commands are logged with who used them, and where. To search the log with [jq](https://jqlang.org/):
+
+```bash
+# Everything that happened in one call
+jq -c 'select(.context.session == "1a2b3c4d") | [.datetime, .message, .context]' logs/2026-10-03.log
+# How long Claude took to answer, in milliseconds
+jq 'select(.message == "Claude answered") | .context.ms' logs/*.log
+# Warnings and errors only
+jq -c 'select(.level >= 300) | [.datetime, .message, .context]' logs/*.log
+```
+
+**Statistics** are kept in `STATS_DATABASE`, one row per event in the `events` table: `call_started`, `call_ended` (with the call's length), `utterance` (with its length), `answered` (with the time from the end of the question to the answer being posted) and `failed` (something said couldn't be transcribed or answered, or the answer couldn't be spoken), each with the server, channel, user and session. `/stats` shows the server it is used in its totals: calls and minutes recorded, utterances and people speaking, questions answered and how long that took on average, and failures. Only whoever used `/stats` sees them. To query the statistics yourself:
+
+```bash
+sqlite3 databases/stats.sqlite "SELECT guild_id, COUNT(*) AS answers FROM events WHERE type = 'answered' GROUP BY guild_id"
+```
 
 ### Known limitations
 

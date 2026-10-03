@@ -51,6 +51,7 @@ final class VoiceConversationTest extends VoiceTestCase
         $this->assertFileDoesNotExist($this->claudeLog, 'Claude was not asked.');
         $this->assertSame([], $this->sent);
         $this->assertSame([], $this->played);
+        $this->assertSame(['user' => '555', 'reason' => 'Claude was not addressed'], array_slice($this->logged('Not answering')[0], 2));
     }
 
     public function testAnswersEverythingWithoutAWakeWord(): void
@@ -108,6 +109,8 @@ final class VoiceConversationTest extends VoiceTestCase
         $this->assertSame([], $this->played);
         $this->assertStringContainsString('] Alice: Hey Claude, what time is it?', $this->transcript($session));
         $this->assertSame(['Voice reply failed: Claude Code: Not logged in · Please run /login'], $this->loggedProblems());
+        $this->assertSame('555', $this->logged('Voice reply failed: Claude Code: Not logged in · Please run /login')[0]['user']);
+        $this->assertSame([1, 0], [$this->usage()['failures'], $this->usage()['answers']]);
     }
 
     public function testStopLeavesAndStillTranscribesUnfinishedSpeech(): void
@@ -192,6 +195,41 @@ final class VoiceConversationTest extends VoiceTestCase
         $this->assertSame('', $this->transcript($session));
         $this->assertSame(['No receive stream for 555; their speech will not be answered.'], $this->loggedProblems());
         $this->assertWavDuration(1.0, "{$session->directory}/555-1.wav");
+    }
+
+    public function testLogsEachStepAndRecordsTheCallsUsage(): void
+    {
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');
+        $session->stop();
+
+        // Each step is logged with the call's server and session, so one call can be followed in the log.
+        $steps = array_filter($this->logs->getRecords(), fn ($record) => ($record->context['session'] ?? null) === $session->id);
+        $this->assertSame(
+            ['Voice session started', 'Recording a speaker', 'Utterance ended', 'Transcribed', 'Claude answered', 'Speaking the answer', 'Voice session stopped'],
+            array_values(array_map(fn ($record) => $record->message, $steps)),
+        );
+        $this->assertSame(self::GUILD_ID, $this->logged('Voice session started')[0]['guild']);
+        $this->assertSame(['user' => '555', 'ms' => 1000], array_slice($this->logged('Utterance ended')[0], 2));
+        $this->assertSame(28, $this->logged('Transcribed')[0]['characters']);
+        $this->assertSame(26, $this->logged('Claude answered')[0]['characters']);
+        $this->assertSame(['speakers' => 1, 'utterances' => 1, 'answers' => 1, 'failures' => 0], array_slice($this->logged('Voice session stopped')[0], 3));
+
+        // What was said stays in transcript.txt: it is never logged.
+        foreach ($this->logs->getRecords() as $record) {
+            $this->assertDoesNotMatchRegularExpression('/what time|quarter past/i', json_encode([$record->message, $record->context]));
+        }
+
+        // The call is counted for /stats.
+        $usage = $this->usage();
+        $this->assertSame(
+            ['calls' => 1, 'speakers' => 1, 'utterances' => 1, 'speech_ms' => 1000, 'answers' => 1, 'failures' => 0],
+            array_intersect_key($usage, array_flip(['calls', 'speakers', 'utterances', 'speech_ms', 'answers', 'failures'])),
+        );
+        $this->assertGreaterThan(0, $usage['answer_ms']);
+        $this->assertGreaterThanOrEqual($usage['answer_ms'], $usage['call_ms']);
     }
 
     public function testStopIsSafeToCallTwice(): void

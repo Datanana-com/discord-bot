@@ -63,6 +63,7 @@ final class RecordCommandTest extends CommandTestCase
         $this->assertSame(['Could not join the voice channel: Missing the Speak permission.'], $this->updates);
         $this->assertNull(VoiceSession::forGuild(self::GUILD_ID));
         $this->assertSame(['Could not join the voice channel: Missing the Speak permission.'], $this->loggedProblems());
+        $this->assertSame([['guild' => self::GUILD_ID, 'channel' => '200']], $this->logged('Could not join the voice channel: Missing the Speak permission.'));
     }
 
     public function testRequiresTheMemberToBeInAVoiceChannel(): void
@@ -128,5 +129,6 @@ final class RecordCommandTest extends CommandTestCase
         $this->assertSame([['content' => $message, 'ephemeral' => true]], $this->responses);
         $this->assertSame([], $this->joins);
         $this->assertFalse($this->acknowledged);
+        $this->assertSame([['guild' => self::GUILD_ID]], $this->logged("/record refused: {$message}"));
     }
 }

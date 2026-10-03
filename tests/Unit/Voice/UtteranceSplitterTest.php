@@ -14,7 +14,7 @@ final class UtteranceSplitterTest extends TestCase
 
     private string $directory;
 
-    /** @var list<array{string, string}> */
+    /** @var list<array{string, string, float}> */
     private array $utterances = [];
 
     private UtteranceSplitter $splitter;
@@ -22,8 +22,8 @@ final class UtteranceSplitterTest extends TestCase
     protected function setUp(): void
     {
         $this->directory = sys_get_temp_dir() . '/splitter-test-' . uniqid();
-        $this->splitter = new UtteranceSplitter($this->directory, function (string $userId, string $wavPath) {
-            $this->utterances[] = [$userId, $wavPath];
+        $this->splitter = new UtteranceSplitter($this->directory, function (string $userId, string $wavPath, float $seconds) {
+            $this->utterances[] = [$userId, $wavPath, $seconds];
         });
     }
 
@@ -43,8 +43,9 @@ final class UtteranceSplitterTest extends TestCase
         $this->splitter->flushSilent(2.0);
         $this->assertCount(1, $this->utterances);
 
-        [$userId, $wavPath] = $this->utterances[0];
+        [$userId, $wavPath, $seconds] = $this->utterances[0];
         $this->assertSame('alice', $userId);
+        $this->assertSame(1.0, $seconds);
         $this->assertValidWav($wavPath, seconds: 1.0);
     }
 

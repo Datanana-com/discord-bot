@@ -35,7 +35,7 @@ final class UtteranceSplitter
 
     /**
      * @param string $directory Where utterance WAV files are written.
-     * @param Closure(string $userId, string $wavPath): void $onUtterance Called with each finished utterance.
+     * @param Closure(string $userId, string $wavPath, float $seconds): void $onUtterance Called with each finished utterance.
      */
     public function __construct(
         private readonly string $directory,
@@ -98,6 +98,6 @@ final class UtteranceSplitter
             return;
         }
 
-        ($this->onUtterance)($userId, $writer->getPath());
+        ($this->onUtterance)($userId, $writer->getPath(), $bytes / self::BYTES_PER_SECOND);
     }
 }
