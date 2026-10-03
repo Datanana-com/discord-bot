@@ -227,40 +227,50 @@ class Application
     /**
      * Automates the handling of global commands by class.
      *
-     * @param string $commandClass
+     * Commands are only saved to Discord when it doesn't have them yet or they changed,
+     * as Discord limits how many commands can be created per day.
+     *
+     * @param array $globalCommandsClasses
      * @return void
      */
     public function handleGlobalCommands(array $globalCommandsClasses)
     {
+        $commands = [];
+
         foreach ($globalCommandsClasses as $commandClass) {
             $commandName = Str::slug(strtolower(str_replace(['Global', 'Command'], '', $commandClass)));
 
             $commandClass = "\\App\\Commands\\{$commandClass}";
             $commandClass = new $commandClass($this->discord);
-            $discordCommandClass = (new Command($this->discord))
+            $commands[$commandName] = (new Command($this->discord))
                 ->setName($commandName)
                 ->setDescription($commandClass->description)
                 ->setType($commandClass?->type ?? Command::CHAT_INPUT);
 
-            // Check if the command already exists
-            $availableCommands = $this->discord->application->commands;
-
-            if (! in_array($commandName, $availableCommands->toArray())) {
-
-                // Save the command to the Discord API
-                $this->discord->application->commands->save($discordCommandClass)
-                    ->finally(function () use ($commandName) {
-                        $this->log->info("Command {$commandName} has been saved.");
-                    });
-
-                $this->discord->application->commands->freshen();
-                $this->log->info('Something...');
-            } else {
-                $this->log->info("Command {$commandName} already exists.");
-            }
-
             $this->discord->listenCommand($commandName, fn (Interaction $interaction) => $commandClass->handle($interaction));
         }
+
+        // The repository is empty until the registered commands are fetched from Discord.
+        $this->discord->application->commands->freshen()->then(
+            function ($registered) use ($commands) {
+                foreach ($commands as $commandName => $command) {
+                    $existing = $registered->find(fn (Command $registeredCommand) => $registeredCommand->name === $commandName);
+
+                    if ($existing !== null && $existing->description === $command->description && $existing->type === $command->type) {
+                        $this->log->info("Command {$commandName} already exists.");
+
+                        continue;
+                    }
+
+                    // Saving a command under an existing name replaces it.
+                    $registered->save($command)->then(
+                        fn () => $this->log->info("Command {$commandName} has been saved."),
+                        fn (\Throwable $e) => $this->log->error("Could not save command {$commandName}: {$e->getMessage()}"),
+                    );
+                }
+            },
+            fn (\Throwable $e) => $this->log->error('Could not fetch the registered commands: ' . $e->getMessage()),
+        );
     }
 
     /**

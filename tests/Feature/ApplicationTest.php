@@ -21,6 +21,7 @@ use ReflectionClass;
 use RuntimeException;
 use Tests\Fixtures\Events\RecordingEvent;
 
+use function React\Promise\reject;
 use function React\Promise\resolve;
 
 final class ApplicationTest extends TestCase
@@ -91,36 +92,9 @@ final class ApplicationTest extends TestCase
         $this->assertContains('Slash commands are disabled.', $this->logged());
     }
 
-    public function testRegistersEveryGlobalCommand(): void
+    public function testSavesCommandsDiscordDoesNotHaveYet(): void
     {
-        $_ENV['BOT_SLASH_COMMANDS'] = 'true';
-        $app = $this->app();
-        $commands = new class () {
-            /** @var array<string, array{string, int}> Saved commands: name => [description, type]. */
-            public array $saved = [];
-
-            /** @var array<string, callable> Interaction handlers by command name. */
-            public array $listeners = [];
-
-            /** @return list<Command> */
-            public function toArray(): array
-            {
-                return [];
-            }
-
-            public function save(Command $command): PromiseInterface
-            {
-                $this->saved[$command->name] = [$command->description, $command->type];
-
-                return resolve($command);
-            }
-
-            public function freshen(): PromiseInterface
-            {
-                return resolve(null);
-            }
-        };
-        $app->discord = $this->discordStub($app->discord, ['application' => (object) ['commands' => $commands]], $commands->listeners);
+        [$app, $commands] = $this->appWithCommands();
 
         $app->prepareCommandClasses();
 
@@ -136,6 +110,55 @@ final class ApplicationTest extends TestCase
         $this->assertSame(['record', 'stop', 'test'], array_keys($commands->listeners));
         ($commands->listeners['test'])((new ReflectionClass(Interaction::class))->newInstanceWithoutConstructor());
         $this->assertContains('Hello, World!', $this->logged());
+    }
+
+    public function testDoesNotSaveCommandsDiscordAlreadyHas(): void
+    {
+        [$app, $commands] = $this->appWithCommands(registered: [
+            ['name' => 'record', 'description' => 'Records your voice channel and lets everyone in it talk to Claude.', 'type' => Command::CHAT_INPUT],
+            ['name' => 'stop', 'description' => 'Stops recording and leaves the voice channel.', 'type' => Command::CHAT_INPUT],
+        ]);
+
+        $app->prepareCommandClasses();
+
+        $this->assertSame(['test'], array_keys($commands->saved));
+        $this->assertContains('Command record already exists.', $this->logged());
+        $this->assertContains('Command stop already exists.', $this->logged());
+        $this->assertSame(['record', 'stop', 'test'], array_keys($commands->listeners), 'Existing commands are still handled.');
+    }
+
+    public function testSavesCommandsThatChanged(): void
+    {
+        [$app, $commands] = $this->appWithCommands(registered: [
+            // /record as it was registered before its description changed.
+            ['name' => 'record', 'description' => 'Starts recording the current voice channel.', 'type' => Command::CHAT_INPUT],
+        ]);
+
+        $app->prepareCommandClasses();
+
+        $this->assertSame(['Records your voice channel and lets everyone in it talk to Claude.', Command::CHAT_INPUT], $commands->saved['record']);
+        $this->assertNotContains('Command record already exists.', $this->logged());
+    }
+
+    public function testLogsWhenTheRegisteredCommandsCannotBeFetched(): void
+    {
+        [$app, $commands] = $this->appWithCommands(fetchError: new RuntimeException('Discord API unavailable'));
+
+        $app->prepareCommandClasses();
+
+        $this->assertSame([], $commands->saved);
+        $this->assertContains('Could not fetch the registered commands: Discord API unavailable', $this->logged());
+        $this->assertSame(['record', 'stop', 'test'], array_keys($commands->listeners), 'Commands Discord already has keep working.');
+    }
+
+    public function testLogsCommandsThatCannotBeSaved(): void
+    {
+        [$app] = $this->appWithCommands(saveError: new RuntimeException('Invalid Form Body'));
+
+        $app->prepareCommandClasses();
+
+        $this->assertContains('Could not save command record: Invalid Form Body', $this->logged());
+        $this->assertNotContains('Command record has been saved.', $this->logged());
     }
 
     public function testClosesTheBotWhenCommandsCannotBeRegistered(): void
@@ -170,6 +193,67 @@ final class ApplicationTest extends TestCase
             ['token' => 'test-token', 'loop' => new StreamSelectLoop(), 'logger' => new Logger('test', [$this->logs])],
             $ready,
         );
+    }
+
+    /**
+     * An application with slash commands enabled, whose Discord application already has the given commands.
+     *
+     * @param list<array<string, mixed>> $registered Attributes of the commands Discord already has.
+     * @return array{Application, object} The application, and the command repository that records what is saved.
+     */
+    private function appWithCommands(array $registered = [], ?\Throwable $fetchError = null, ?\Throwable $saveError = null): array
+    {
+        $_ENV['BOT_SLASH_COMMANDS'] = 'true';
+        $app = $this->app();
+        $client = $app->discord;
+        $registered = array_map(fn (array $attributes) => new Command($client, $attributes, true), $registered);
+
+        // Behaves like DiscordPHP's GlobalCommandRepository: freshen() fetches the registered commands.
+        $commands = new class ($registered, $fetchError, $saveError) {
+            /** @var array<string, array{string, int}> Saved commands: name => [description, type]. */
+            public array $saved = [];
+
+            /** @var array<string, callable> Interaction handlers by command name. */
+            public array $listeners = [];
+
+            /** @param list<Command> $registered */
+            public function __construct(
+                private array $registered,
+                private ?\Throwable $fetchError,
+                private ?\Throwable $saveError,
+            ) {
+            }
+
+            public function freshen(): PromiseInterface
+            {
+                return $this->fetchError === null ? resolve($this) : reject($this->fetchError);
+            }
+
+            public function find(callable $callback): ?Command
+            {
+                foreach ($this->registered as $command) {
+                    if ($callback($command)) {
+                        return $command;
+                    }
+                }
+
+                return null;
+            }
+
+            public function save(Command $command): PromiseInterface
+            {
+                if ($this->saveError !== null) {
+                    return reject($this->saveError);
+                }
+
+                $this->saved[$command->name] = [$command->description, $command->type];
+
+                return resolve($command);
+            }
+        };
+        $app->discord = $this->discordStub($client, ['application' => (object) ['commands' => $commands]], $commands->listeners);
+
+        return [$app, $commands];
     }
 
     private function emitRecordingEvent(): void
