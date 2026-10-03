@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Tests\Support;
+namespace Tests\Unit\Support;
 
 use App\Support\CommandFailedException;
 use App\Support\Shell;

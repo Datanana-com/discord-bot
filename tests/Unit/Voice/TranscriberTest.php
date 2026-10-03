@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Tests\Voice;
+namespace Tests\Unit\Voice;
 
 use App\Voice\Transcriber;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -17,7 +17,7 @@ final class TranscriberTest extends TestCase
         $log = tempnam(sys_get_temp_dir(), 'fake-whisper-');
         putenv("FAKE_WHISPER_LOG={$log}");
 
-        $transcriber = new Transcriber(__DIR__ . '/../Fixtures/fake-whisper', '/models/ggml-base.bin', 'auto');
+        $transcriber = new Transcriber(__DIR__ . '/../../Fixtures/fake-whisper', '/models/ggml-base.bin', 'auto');
         $text = await($transcriber->transcribe('/recordings/utterance-1.wav'));
 
         $this->assertSame('Hey Claude, what time is it?', $text);

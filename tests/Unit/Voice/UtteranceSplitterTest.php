@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Tests\Voice;
+namespace Tests\Unit\Voice;
 
 use App\Voice\UtteranceSplitter;
 use PHPUnit\Framework\TestCase;

@@ -184,7 +184,10 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 
 ```bash
 composer test
+composer test -- --testsuite Unit      # or Feature
 ```
+
+Unit tests cover each class on its own. Feature tests run the whole voice flow and the `/record` and `/stop` commands against a fake Discord, with whisper.cpp, Claude Code and Piper replaced by the scripts in `tests/Fixtures`, so they need no models, Claude login or Discord connection.
 
 ## Contributing
 

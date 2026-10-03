@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Tests\Voice;
+namespace Tests\Unit\Voice;
 
 use App\Voice\VoiceSession;
 use PHPUnit\Framework\Attributes\DataProvider;

@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Tests\Voice;
+namespace Tests\Unit\Voice;
 
 use App\Support\CommandFailedException;
 use App\Voice\Claude;
@@ -101,7 +101,7 @@ final class ClaudeTest extends TestCase
 
     private function claude(): Claude
     {
-        return new Claude(__DIR__ . '/../Fixtures/fake-claude', 'haiku', $this->workingDirectory);
+        return new Claude(__DIR__ . '/../../Fixtures/fake-claude', 'haiku', $this->workingDirectory);
     }
 
     /**
