@@ -67,7 +67,7 @@ jobs:
       PIPER_BINARY: ${{ github.workspace }}/.piper/bin/piper
       PIPER_MODEL: ${{ github.workspace }}/.piper/voices/en_US-lessac-medium.onnx
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: shivammathur/setup-php@v2
         with:
@@ -86,7 +86,7 @@ jobs:
         run: bash vendor/discord-php-helpers/voice/scripts/setup-libdave.sh
 
       - id: whisper-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .whisper
           key: whisper.cpp-v1.9.4-base.en-portable-${{ runner.os }}
@@ -130,7 +130,7 @@ jobs:
 
       - name: Keep the recordings
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: live-voice-recordings
           path: recordings/
