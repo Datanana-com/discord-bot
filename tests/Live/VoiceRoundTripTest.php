@@ -51,15 +51,22 @@ final class VoiceRoundTripTest extends TestCase
         }
 
         $logs = new TestHandler();
+        $logger = new Logger('bot', [
+            $logs,
+            new StreamHandler('php://stderr', Level::Info),
+            // Kept with the recordings, for when a run needs investigating.
+            new StreamHandler((getenv('RECORDINGS_PATH') ?: 'recordings') . '/bot.log', Level::Debug),
+        ]);
         $joined = new Deferred();
+        $voiceClient = null;
         $app = new Application(
             [
                 'token' => getenv('DISCORD_TEST_BOT_TOKEN'),
                 'intents' => Intents::getDefaultIntents() | Intents::GUILD_MEMBERS,
                 'loadAllMembers' => true,
-                'logger' => new Logger('bot', [$logs, new StreamHandler('php://stderr', Level::Info)]),
+                'logger' => $logger,
             ],
-            function (Discord $discord) use ($joined) {
+            function (Discord $discord) use ($joined, &$voiceClient) {
                 $channel = $discord->getChannel(getenv('DISCORD_TEST_VOICE_CHANNEL_ID'));
 
                 if ($channel === null) {
@@ -69,7 +76,10 @@ final class VoiceRoundTripTest extends TestCase
                 }
 
                 $discord->joinVoiceChannel($channel, mute: false, deaf: false)->then(
-                    fn (VoiceClient $vc) => $joined->resolve(VoiceSession::start($vc, $channel, $discord)),
+                    function (VoiceClient $vc) use ($joined, $channel, $discord, &$voiceClient) {
+                        $voiceClient = $vc;
+                        $joined->resolve(VoiceSession::start($vc, $channel, $discord));
+                    },
                     fn (Throwable $e) => $joined->reject($e),
                 );
             },
@@ -77,6 +87,15 @@ final class VoiceRoundTripTest extends TestCase
 
         try {
             $session = $this->within(60, $joined->promise(), 'the bot to join the voice channel');
+
+            // Counts what reaches the bot: UDP datagrams, and those that decrypted into audio.
+            $received = ['udp packets' => 0, 'audio packets' => 0];
+            $voiceClient->udp->on('message', function () use (&$received) {
+                $received['udp packets']++;
+            });
+            $voiceClient->on('raw', function () use (&$received) {
+                $received['audio packets']++;
+            });
 
             $speakerRecordings = "{$session->directory}/speaker";
             mkdir($speakerRecordings, 0755, true);
@@ -91,6 +110,7 @@ final class VoiceRoundTripTest extends TestCase
             ), true);
         } finally {
             if (isset($session)) {
+                $logger->info('The bot received', $received ?? []);
                 $session->stop();
             }
 
@@ -105,7 +125,11 @@ final class VoiceRoundTripTest extends TestCase
         $this->assertNotEmpty(preg_grep('/^Command record (has been saved|already exists)\.$/', $logged), 'The /record command was registered.');
 
         // The bot heard the question through Discord, and whisper understood it.
-        $this->assertMatchesRegularExpression('/: .*what time is it/i', $transcript);
+        $this->assertMatchesRegularExpression(
+            '/: .*what time is it/i',
+            $transcript,
+            'The bot received ' . json_encode($received) . '; the speaker reported ' . json_encode($speaker) . '.',
+        );
 
         // It answered, in the text chat and out loud.
         $this->assertStringContainsString('Claude: It is a quarter past four.', $transcript);
@@ -117,6 +141,13 @@ final class VoiceRoundTripTest extends TestCase
         $this->assertCount(1, $speaker['recordings'], 'Only the bot spoke to the speaker.');
         $heard = await(Transcriber::fromEnv()->transcribe($speaker['recordings'][0]));
         $this->assertStringContainsStringIgnoringCase('quarter', $heard, "The speaker heard: {$heard}");
+    }
+
+    protected function tearDown(): void
+    {
+        // await() runs the loop to completion when PHP exits, and Discord's client leaves
+        // timers on it, so without this the test process would never exit.
+        Loop::stop();
     }
 
     /**

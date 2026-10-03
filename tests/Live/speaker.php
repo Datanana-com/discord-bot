@@ -8,7 +8,7 @@ declare(strict_types=1);
  *
  * Usage: php tests/Live/speaker.php <question.wav> <output directory>
  * Needs DISCORD_TEST_SPEAKER_TOKEN and DISCORD_TEST_VOICE_CHANNEL_ID.
- * Prints {"recordings": [...], "answered": bool} when done.
+ * Prints {"recordings": [...], "answered": bool, "heardFrames": int} when done, and logs to <output>/speaker.log.
  */
 
 use Discord\Discord;
@@ -33,10 +33,14 @@ const QUIET_SECONDS = 3.0;
 /** Stop listening after this long, answered or not. */
 const MAX_LISTEN_SECONDS = 60.0;
 
+$logger = new Logger('speaker', [
+    // stdout carries the result, so logs go to stderr.
+    new StreamHandler('php://stderr', Level::Info),
+    new StreamHandler("{$output}/speaker.log", Level::Debug),
+]);
 $discord = new Discord([
     'token' => getenv('DISCORD_TEST_SPEAKER_TOKEN'),
-    // stdout carries the result, so logs go to stderr.
-    'logger' => new Logger('speaker', [new StreamHandler('php://stderr', Level::Info)]),
+    'logger' => $logger,
 ]);
 
 $fail = function (Throwable $e) use ($discord): never {
@@ -46,7 +50,7 @@ $fail = function (Throwable $e) use ($discord): never {
     exit(1);
 };
 
-$discord->on('init', function (Discord $discord) use ($question, $output, $fail) {
+$discord->on('init', function (Discord $discord) use ($question, $output, $fail, $logger) {
     $channel = $discord->getChannel(getenv('DISCORD_TEST_VOICE_CHANNEL_ID'));
 
     if ($channel === null) {
@@ -54,20 +58,25 @@ $discord->on('init', function (Discord $discord) use ($question, $output, $fail)
     }
 
     $discord->joinVoiceChannel($channel, mute: false, deaf: false)->then(
-        function (VoiceClient $vc) use ($discord, $question, $output, $fail) {
+        function (VoiceClient $vc) use ($discord, $question, $output, $fail, $logger) {
             $vc->record(RecordingFormat::WAV, fn (string $userId) => "{$output}/{$userId}.wav");
 
             $heardAt = null;
-            $vc->on('channel-pcm', function () use (&$heardAt) {
+            $heardFrames = 0;
+            $vc->on('channel-pcm', function () use (&$heardAt, &$heardFrames) {
                 $heardAt = microtime(true);
+                $heardFrames++;
             });
 
-            Loop::addTimer(SETTLE_SECONDS, fn () => $vc->playFile($question)->then(
-                function () use ($vc, $discord, $output, &$heardAt) {
+            Loop::addTimer(SETTLE_SECONDS, function () use ($vc, $discord, $question, $output, $fail, $logger, &$heardAt, &$heardFrames) {
+                $logger->info('Playing the question', ['file' => $question]);
+
+                $vc->playFile($question)->then(function () use ($vc, $discord, $output, $logger, &$heardAt, &$heardFrames) {
+                    $logger->info('Finished playing the question; listening for the answer');
                     $listeningSince = microtime(true);
                     $heardAt = null;
 
-                    Loop::addPeriodicTimer(0.25, function (TimerInterface $timer) use ($vc, $discord, $output, $listeningSince, &$heardAt) {
+                    Loop::addPeriodicTimer(0.25, function (TimerInterface $timer) use ($vc, $discord, $output, $listeningSince, &$heardAt, &$heardFrames) {
                         $now = microtime(true);
                         $answered = $heardAt !== null && $now - $heardAt >= QUIET_SECONDS;
 
@@ -77,13 +86,12 @@ $discord->on('init', function (Discord $discord) use ($question, $output, $fail)
 
                         Loop::cancelTimer($timer);
                         $vc->stopRecording();
-                        echo json_encode(['recordings' => glob("{$output}/*.wav"), 'answered' => $answered]), PHP_EOL;
+                        echo json_encode(['recordings' => glob("{$output}/*.wav"), 'answered' => $answered, 'heardFrames' => $heardFrames]), PHP_EOL;
                         $vc->close();
                         $discord->close();
                     });
-                },
-                $fail,
-            ));
+                }, $fail);
+            });
         },
         $fail,
     );

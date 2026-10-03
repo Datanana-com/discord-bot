@@ -111,6 +111,7 @@ jobs:
           echo "Hey Claude, what time is it?" | "$PIPER_BINARY" --model "$PIPER_MODEL" --output_file "$LIVE_TEST_QUESTION"
 
       - name: Ask the bot in a voice call
+        timeout-minutes: 10
         run: vendor/bin/phpunit --testsuite Live --colors=always
 
       - name: Keep the recordings
