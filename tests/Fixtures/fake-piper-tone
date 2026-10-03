@@ -1,0 +1,9 @@
+#!/bin/sh
+# Stands in for piper with real audio: writes a one-second 660 Hz tone to the --output_file path,
+# as a 22,050 Hz mono WAV like Piper's voices. Needs ffmpeg.
+while [ $# -gt 0 ]; do
+    if [ "$1" = "--output_file" ]; then out="$2"; fi
+    shift
+done
+cat > /dev/null
+exec ffmpeg -loglevel error -y -f lavfi -i sine=frequency=660:duration=1 -ar 22050 -ac 1 "$out"

@@ -224,33 +224,7 @@ abstract class VoiceTestCase extends TestCase
         });
         // The ffmpeg decoder process is not needed: PCM comes from the Opus decoder below.
         $vc->method('createDecoder')->willReturnCallback(function (object $ss) use ($vc): void {
-            $vc->voiceDecoders[$ss->ssrc] = new class () {
-                public object $stdin;
-
-                public function __construct()
-                {
-                    $this->stdin = new class () {
-                        public function isWritable(): bool
-                        {
-                            return true;
-                        }
-
-                        public function write(string $data): bool
-                        {
-                            return true;
-                        }
-                    };
-                }
-
-                public function close(): void
-                {
-                }
-
-                public function isRunning(): bool
-                {
-                    return false;
-                }
-            };
+            $vc->voiceDecoders[$ss->ssrc] = $this->decoderProcess();
         });
         // Stands in for libopus: every packet decodes to one 20 ms frame of 48 kHz stereo PCM.
         $vc->opusdecoder = new class () implements OpusDecoderInterface {
@@ -264,15 +238,46 @@ abstract class VoiceTestCase extends TestCase
     }
 
     /**
+     * Stands in for the ffmpeg process the voice client starts for each speaker.
+     */
+    protected function decoderProcess(): object
+    {
+        return new class () {
+            public object $stdin;
+
+            public function __construct()
+            {
+                $this->stdin = new class () {
+                    public function isWritable(): bool
+                    {
+                        return true;
+                    }
+
+                    public function write(string $data): bool
+                    {
+                        return true;
+                    }
+                };
+            }
+
+            public function close(): void
+            {
+            }
+
+            public function isRunning(): bool
+            {
+                return false;
+            }
+        };
+    }
+
+    /**
      * Sends a member's speech through the voice client's receive path, as 20 ms RTP packets.
      */
     protected function speak(VoiceClient $vc, int $ssrc, string $userId, float $seconds): void
     {
         if (! isset($this->speaking[$ssrc])) {
-            // The voice gateway's speaking event, which maps the SSRC to the member.
-            $speaking = (new ReflectionClass(Speaking::class))->newInstanceWithoutConstructor();
-            $this->setProperty($speaking, Speaking::class, 'attributes', ['ssrc' => $ssrc, 'user_id' => $userId, 'speaking' => 1, 'delay' => 0]);
-            $vc->updateSpeakingStatus($speaking);
+            $this->announceSpeaker($vc, $ssrc, $userId);
             $this->speaking[$ssrc] = true;
         }
 
@@ -283,6 +288,16 @@ abstract class VoiceTestCase extends TestCase
             $packet->decryptedAudio = str_repeat("\xAB", 40);
             $vc->handleAudioData($packet);
         }
+    }
+
+    /**
+     * Sends the voice gateway's speaking event, which tells the voice client whose audio an SSRC carries.
+     */
+    protected function announceSpeaker(VoiceClient $vc, int $ssrc, string $userId): void
+    {
+        $speaking = (new ReflectionClass(Speaking::class))->newInstanceWithoutConstructor();
+        $this->setProperty($speaking, Speaking::class, 'attributes', ['ssrc' => $ssrc, 'user_id' => $userId, 'speaking' => 1, 'delay' => 0]);
+        $vc->updateSpeakingStatus($speaking);
     }
 
     /**
@@ -340,7 +355,7 @@ abstract class VoiceTestCase extends TestCase
         $this->assertSame(44 + (int) round($seconds * 48000 * 4), filesize($path), "{$path} should hold {$seconds}s of audio.");
     }
 
-    private function setProperty(object $object, string $class, string $property, mixed $value): void
+    protected function setProperty(object $object, string $class, string $property, mixed $value): void
     {
         (new ReflectionProperty($class, $property))->setValue($object, $value);
     }

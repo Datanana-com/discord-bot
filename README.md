@@ -190,6 +190,8 @@ composer test -- --testsuite Unit      # or Feature
 
 Unit tests cover each class on its own. Feature tests run the whole voice flow and the `/record` and `/stop` commands against a fake Discord, with whisper.cpp, Claude Code and Piper replaced by the scripts in `tests/Fixtures`, so they need no models, Claude login or Discord connection.
 
+`tests/Feature/VoiceCallTest.php` goes further: the call's audio travels over a local UDP socket standing in for Discord's media server, encrypted and Opus-encoded like in a real call, and the spoken answer is encoded by ffmpeg. It needs ffmpeg and libopus, like the bot itself, and is skipped without them.
+
 To see the code coverage, install a coverage driver (`sudo apt install php8.5-pcov`, or Xdebug) and run:
 
 ```bash

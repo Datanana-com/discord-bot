@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Application;
+use App\Exceptions\EventNotFoundException;
 use Closure;
 use Discord\Discord;
 use Discord\Parts\Application\Command\Command;
@@ -28,6 +29,9 @@ final class ApplicationTest extends TestCase
 {
     private TestHandler $logs;
 
+    /** @var list<string> Files added to the app's folders, removed after each test. */
+    private array $appFiles = [];
+
     protected function setUp(): void
     {
         $this->logs = new TestHandler();
@@ -39,6 +43,10 @@ final class ApplicationTest extends TestCase
     protected function tearDown(): void
     {
         unset($_ENV['BOT_SLASH_COMMANDS']);
+
+        foreach ($this->appFiles as $path) {
+            unlink($path);
+        }
     }
 
     public function testHandlesEachEventClassUnderItsEventName(): void
@@ -50,6 +58,16 @@ final class ApplicationTest extends TestCase
         $app->discord->emit(Event::MESSAGE_CREATE, [$message, $app->discord]);
 
         $this->assertContains('another example', $this->logged());
+    }
+
+    public function testRefusesEventClassesNotNamedAfterADiscordEvent(): void
+    {
+        $this->addAppFile('Events/MessageCreated.php', "<?php\n\nnamespace App\\Events;\n\nfinal class MessageCreated\n{\n}\n");
+
+        $this->expectException(EventNotFoundException::class);
+        $this->expectExceptionMessage('Event MessageCreated not found');
+
+        $this->app();
     }
 
     public function testRunsBeforeAndAfterAroundTheEvent(): void
@@ -110,6 +128,18 @@ final class ApplicationTest extends TestCase
         $this->assertSame(['record', 'stop', 'test'], array_keys($commands->listeners));
         ($commands->listeners['test'])((new ReflectionClass(Interaction::class))->newInstanceWithoutConstructor());
         $this->assertContains('Hello, World!', $this->logged());
+    }
+
+    public function testOnlyRegistersGlobalCommands(): void
+    {
+        // Commands without "Global" in their name are meant for one server, which isn't supported yet.
+        $this->addAppFile('Commands/PingCommand.php', "<?php\n\nnamespace App\\Commands;\n\nfinal class PingCommand\n{\n}\n");
+        [$app, $commands] = $this->appWithCommands();
+
+        $app->prepareCommandClasses();
+
+        $this->assertContains('Guild specific commands found: PingCommand', $this->logged());
+        $this->assertSame(['record', 'stop', 'test'], array_keys($commands->saved));
     }
 
     public function testDoesNotSaveCommandsDiscordAlreadyHas(): void
@@ -254,6 +284,16 @@ final class ApplicationTest extends TestCase
         $app->discord = $this->discordStub($client, ['application' => (object) ['commands' => $commands]], $commands->listeners);
 
         return [$app, $commands];
+    }
+
+    /**
+     * Adds a file to one of the app's folders until the test ends: Application finds events and commands there.
+     */
+    private function addAppFile(string $path, string $contents): void
+    {
+        $path = dirname(__DIR__, 2) . "/app/{$path}";
+        file_put_contents($path, $contents);
+        $this->appFiles[] = $path;
     }
 
     private function emitRecordingEvent(): void

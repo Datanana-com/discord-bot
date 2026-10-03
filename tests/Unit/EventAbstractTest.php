@@ -61,6 +61,13 @@ final class EventAbstractTest extends TestCase
         $this->assertSame(['first'], $event->getExecutableMethods());
     }
 
+    public function testItsOwnPropertiesCanBeReadToo(): void
+    {
+        $event = $this->event((object) [], ['first']);
+
+        $this->assertSame($this->discord->getLogger(), $event->log);
+    }
+
     public function testWarnsWhenThereIsNothingToRun(): void
     {
         $this->assertFalse($this->event((object) [], [])->handle());
