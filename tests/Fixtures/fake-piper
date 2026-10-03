@@ -1,0 +1,7 @@
+#!/bin/sh
+# Stands in for piper: writes the text it receives on stdin to the --output_file path.
+while [ $# -gt 0 ]; do
+    if [ "$1" = "--output_file" ]; then out="$2"; fi
+    shift
+done
+cat > "$out"

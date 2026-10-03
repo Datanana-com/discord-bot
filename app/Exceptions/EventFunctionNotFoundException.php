@@ -14,7 +14,7 @@ use Throwable;
  * @author  alexandre433 <alexandreluisbarreto@gmail.com>
  * @license MIT
  */
-class EventFunctionNotFoundException extends Exception
+final class EventFunctionNotFoundException extends Exception
 {
     /**
      * EventFunctionNotFoundException constructor.

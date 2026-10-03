@@ -1,3 +1,8 @@
 {
-    "preset": "psr12"
+    "preset": "psr12",
+    "rules": {
+        "final_class": true,
+        "declare_strict_types": true,
+        "fully_qualified_strict_types": false
+    }
 }

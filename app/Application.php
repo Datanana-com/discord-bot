@@ -12,7 +12,7 @@ use Illuminate\Support\Str;
 use Psr\Log\LoggerInterface;
 use Discord\WebSockets\Event;
 use App\Exceptions\EventNotFoundException;
-use Discord\Parts\Interactions\Command\Command;
+use Discord\Parts\Application\Command\Command;
 use Discord\Parts\Interactions\Interaction;
 
 class Application
@@ -43,7 +43,9 @@ class Application
      */
     public function __construct(array $options, ?Closure $readyFunction = null)
     {
-        $this->discord = new Discord($options + ['logger' => new Logger()]);
+        // Only create the default logger when none is given: it opens a log file.
+        $options['logger'] ??= new Logger();
+        $this->discord = new Discord($options);
         $this->log = $this->discord->getLogger();
 
         // Retrieves every event name from the constants from the \Discord\WebSockets\Event class
@@ -89,15 +91,9 @@ class Application
      */
     private function getClassesFromFolder(string $folder): array
     {
-        $classes = scandir(__DIR__ . '/' . $folder);
-
-        // Removes . and ..
-        array_splice($classes, 0, 2);
-
-        // Removes the .php
         return array_map(
-            fn (string $class) => str_replace('.php', '', $class),
-            $classes
+            fn (string $path) => basename($path, '.php'),
+            glob(__DIR__ . "/{$folder}/*.php") ?: [],
         );
     }
 
@@ -195,19 +191,9 @@ class Application
             return;
         }
 
-        $commands = $this->getClassesFromFolder('Commands');
-        $globalCommands = [];
-        $guildSpecificCommands = [];
-
-        foreach ($commands as $command) {
-            $commandClass = $command;
-            $command = strtolower($command);
-            if (str_contains($command, 'global')) {
-                $globalCommands[] = $commandClass;
-            } else {
-                $guildSpecificCommands[] = $commandClass;
-            }
-        }
+        // A command's folder says where it is registered: in every server, or in one.
+        $globalCommands = $this->getClassesFromFolder('Commands/Global');
+        $guildSpecificCommands = $this->getClassesFromFolder('Commands/Guild');
 
         if (!empty($globalCommands)) {
             $this->log->info('Global commands found: ' . implode(', ', $globalCommands));
@@ -225,40 +211,57 @@ class Application
     /**
      * Automates the handling of global commands by class.
      *
-     * @param string $commandClass
+     * Commands are only saved to Discord when it doesn't have them yet or they changed,
+     * as Discord limits how many commands can be created per day.
+     *
+     * @param array $globalCommandsClasses
      * @return void
      */
     public function handleGlobalCommands(array $globalCommandsClasses)
     {
-        foreach ($globalCommandsClasses as $commandClass) {
-            $commandName = Str::slug(strtolower(str_replace(['Global', 'Command'], '', $commandClass)));
+        $commands = [];
 
-            $commandClass = "\\App\\Commands\\{$commandClass}";
+        foreach ($globalCommandsClasses as $commandClass) {
+            $commandName = Str::slug(strtolower(Str::replaceEnd('Command', '', $commandClass)));
+
+            $commandClass = "\\App\\Commands\\Global\\{$commandClass}";
             $commandClass = new $commandClass($this->discord);
-            $discordCommandClass = (new Command($this->discord))
+            $commands[$commandName] = (new Command($this->discord))
                 ->setName($commandName)
                 ->setDescription($commandClass->description)
                 ->setType($commandClass?->type ?? Command::CHAT_INPUT);
 
-            // Check if the command already exists
-            $availableCommands = $this->discord->application->commands;
-
-            if (! in_array($commandName, $availableCommands->toArray())) {
-
-                // Save the command to the Discord API
-                $this->discord->application->commands->save($discordCommandClass)
-                    ->finally(function () use ($commandName) {
-                        $this->log->info("Command {$commandName} has been saved.");
-                    });
-
-                $this->discord->application->commands->freshen();
-                $this->log->info('Something...');
-            } else {
-                $this->log->info("Command {$commandName} already exists.");
-            }
-
-            $this->discord->listenCommand($commandName, fn (Interaction $interaction) => $commandClass->handle($interaction));
+            $this->discord->listenCommand($commandName, function (Interaction $interaction) use ($commandName, $commandClass) {
+                $this->log->info("/{$commandName} used", [
+                    'guild' => $interaction->guild_id,
+                    'channel' => $interaction->channel_id,
+                    'user' => $interaction->user?->id,
+                ]);
+                $commandClass->handle($interaction);
+            });
         }
+
+        // The repository is empty until the registered commands are fetched from Discord.
+        $this->discord->application->commands->freshen()->then(
+            function ($registered) use ($commands) {
+                foreach ($commands as $commandName => $command) {
+                    $existing = $registered->find(fn (Command $registeredCommand) => $registeredCommand->name === $commandName);
+
+                    if ($existing !== null && $existing->description === $command->description && $existing->type === $command->type) {
+                        $this->log->info("Command {$commandName} already exists.");
+
+                        continue;
+                    }
+
+                    // Saving a command under an existing name replaces it.
+                    $registered->save($command)->then(
+                        fn () => $this->log->info("Command {$commandName} has been saved."),
+                        fn (\Throwable $e) => $this->log->error("Could not save command {$commandName}: {$e->getMessage()}"),
+                    );
+                }
+            },
+            fn (\Throwable $e) => $this->log->error('Could not fetch the registered commands: ' . $e->getMessage()),
+        );
     }
 
     /**

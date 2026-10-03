@@ -1,0 +1,137 @@
+# Asks the bot a question in a real Discord voice call (tests/Live).
+#
+# Needs a private test server with two bots, configured under
+# Settings → Secrets and variables → Actions (see README.md, "Live voice test"):
+#   secrets:   DISCORD_TEST_BOT_TOKEN, DISCORD_TEST_SPEAKER_TOKEN
+#   variables: DISCORD_TEST_VOICE_CHANNEL_ID
+name: Live voice test
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 4 * * *'
+  pull_request:
+    paths:
+      - 'app/**'
+      - 'tests/Live/**'
+      - 'composer.lock'
+      - '.github/workflows/live-voice.yml'
+
+# Both bots can only be in one call at a time.
+concurrency:
+  group: live-voice
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  configured:
+    runs-on: ubuntu-24.04
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      - id: check
+        env:
+          BOT_TOKEN: ${{ secrets.DISCORD_TEST_BOT_TOKEN }}
+          SPEAKER_TOKEN: ${{ secrets.DISCORD_TEST_SPEAKER_TOKEN }}
+          VOICE_CHANNEL_ID: ${{ vars.DISCORD_TEST_VOICE_CHANNEL_ID }}
+        run: |
+          if [ -n "$BOT_TOKEN" ] && [ -n "$SPEAKER_TOKEN" ] && [ -n "$VOICE_CHANNEL_ID" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Skipped: the test server's secrets and variables are not set (see README.md, \"Live voice test\")."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  live:
+    needs: configured
+    if: needs.configured.outputs.ready == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      DISCORD_TEST_BOT_TOKEN: ${{ secrets.DISCORD_TEST_BOT_TOKEN }}
+      DISCORD_TEST_SPEAKER_TOKEN: ${{ secrets.DISCORD_TEST_SPEAKER_TOKEN }}
+      DISCORD_TEST_VOICE_CHANNEL_ID: ${{ vars.DISCORD_TEST_VOICE_CHANNEL_ID }}
+      LIVE_TEST_QUESTION: ${{ github.workspace }}/recordings/question.ogg
+      BOT_SLASH_COMMANDS: 'true'
+      RECORDINGS_PATH: ${{ github.workspace }}/recordings
+      # Answer everything, so the test doesn't depend on whisper hearing "Claude" exactly.
+      VOICE_WAKE_WORD: ''
+      WHISPER_BINARY: ${{ github.workspace }}/.whisper/build/bin/whisper-cli
+      WHISPER_MODEL: ${{ github.workspace }}/.whisper/models/ggml-base.en.bin
+      WHISPER_LANGUAGE: en
+      # A fixed answer instead of Claude, so CI doesn't use a Claude subscription.
+      CLAUDE_BINARY: ${{ github.workspace }}/tests/Fixtures/fake-claude
+      FAKE_CLAUDE_OUTPUT: '{"type":"result","is_error":false,"result":"It is a quarter past four."}'
+      PIPER_BINARY: ${{ github.workspace }}/.piper/bin/piper
+      PIPER_MODEL: ${{ github.workspace }}/.piper/voices/en_US-lessac-medium.onnx
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.5'
+          extensions: ffi, sodium, mbstring, zip, pdo_sqlite
+          ini-values: ffi.enable=true
+          coverage: none
+
+      - name: Install audio tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg libopus0
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress
+
+      - name: Install libdave
+        run: bash vendor/discord-php-helpers/voice/scripts/setup-libdave.sh
+
+      - id: whisper-cache
+        uses: actions/cache@v4
+        with:
+          path: .whisper
+          key: whisper.cpp-v1.9.4-base.en-portable-${{ runner.os }}
+
+      - name: Build whisper.cpp and download its model
+        if: steps.whisper-cache.outputs.cache-hit != 'true'
+        # GGML_NATIVE=OFF: the build is cached, and a later run may get a runner whose CPU lacks
+        # instructions this one has (a -march=native build then dies with SIGILL).
+        run: |
+          git clone --depth 1 --branch v1.9.4 https://github.com/ggml-org/whisper.cpp .whisper
+          cmake -S .whisper -B .whisper/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_TESTS=OFF -DGGML_NATIVE=OFF
+          cmake --build .whisper/build -j --config Release --target whisper-cli
+          sh .whisper/models/download-ggml-model.sh base.en
+
+      - name: Install Piper and a voice
+        run: |
+          python3 -m venv .piper
+          .piper/bin/pip install --quiet piper-tts
+          .piper/bin/python -m piper.download_voices --download-dir .piper/voices en_US-lessac-medium
+
+      - name: Record the question
+        # Converted to Ogg Opus like the bot's answers, or it would play as silence (see app/Voice/Speech.php).
+        run: |
+          mkdir -p recordings
+          echo "Hey Claude, what time is it?" | "$PIPER_BINARY" --model "$PIPER_MODEL" --output_file "$RUNNER_TEMP/question.wav"
+          ffmpeg -loglevel error -i "$RUNNER_TEMP/question.wav" -c:a libopus "$LIVE_TEST_QUESTION"
+
+      - name: Ask the bot in a voice call
+        timeout-minutes: 10
+        run: vendor/bin/phpunit --testsuite Live --colors=always
+
+      - name: Show the logs
+        if: failure()
+        # Without the lines holding the voice session's token and keys.
+        run: |
+          for log in $(find recordings -name '*.log'); do
+            echo "::group::$log"
+            grep -v -e secret_key -e '"token"' "$log" || true
+            echo "::endgroup::"
+          done
+
+      - name: Keep the recordings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-voice-recordings
+          path: recordings/
+          if-no-files-found: ignore

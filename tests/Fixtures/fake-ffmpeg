@@ -1,0 +1,7 @@
+#!/bin/sh
+# Stands in for ffmpeg: copies the -i input file to the output file, the last argument.
+while [ $# -gt 1 ]; do
+    if [ "$1" = "-i" ]; then in="$2"; fi
+    shift
+done
+cp "$in" "$1"

@@ -3,3 +3,6 @@
 /vendor
 /logs
 /databases/*
+/recordings/*
+/.cache
+/.phpunit.result.cache

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         defaultTestSuite="Unit,Feature"
+         colors="true"
+         failOnDeprecation="true"
+         failOnNotice="true"
+         failOnWarning="true">
+    <testsuites>
+        <testsuite name="Unit">
+            <directory>tests/Unit</directory>
+        </testsuite>
+        <testsuite name="Feature">
+            <directory>tests/Feature</directory>
+        </testsuite>
+        <!-- Talks to real Discord: not run by default, see .github/workflows/live-voice.yml. -->
+        <testsuite name="Live">
+            <directory>tests/Live</directory>
+        </testsuite>
+    </testsuites>
+    <source ignoreIndirectDeprecations="true" restrictNotices="true" restrictWarnings="true">
+        <include>
+            <directory>app</directory>
+            <directory>configs</directory>
+            <directory>helpers</directory>
+        </include>
+    </source>
+</phpunit>
