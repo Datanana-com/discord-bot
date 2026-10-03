@@ -89,13 +89,15 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .whisper
-          key: whisper.cpp-v1.9.4-base.en-${{ runner.os }}
+          key: whisper.cpp-v1.9.4-base.en-portable-${{ runner.os }}
 
       - name: Build whisper.cpp and download its model
         if: steps.whisper-cache.outputs.cache-hit != 'true'
+        # GGML_NATIVE=OFF: the build is cached, and a later run may get a runner whose CPU lacks
+        # instructions this one has (a -march=native build then dies with SIGILL).
         run: |
           git clone --depth 1 --branch v1.9.4 https://github.com/ggml-org/whisper.cpp .whisper
-          cmake -S .whisper -B .whisper/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_TESTS=OFF
+          cmake -S .whisper -B .whisper/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_TESTS=OFF -DGGML_NATIVE=OFF
           cmake --build .whisper/build -j --config Release --target whisper-cli
           sh .whisper/models/download-ggml-model.sh base.en
 

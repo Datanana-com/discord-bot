@@ -38,6 +38,16 @@ final class ShellTest extends TestCase
         }
     }
 
+    public function testSaysWhichSignalKilledTheCommand(): void
+    {
+        try {
+            await(Shell::run(['sh', '-c', 'kill -ILL $$']));
+            $this->fail('The command should have failed.');
+        } catch (CommandFailedException $e) {
+            $this->assertSame('sh was killed by signal 4', $e->getMessage());
+        }
+    }
+
     public function testKillsTheCommandAfterTheTimeout(): void
     {
         $started = microtime(true);

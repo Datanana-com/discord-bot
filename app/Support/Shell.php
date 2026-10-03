@@ -56,7 +56,7 @@ final class Shell
             $process->terminate();
         });
 
-        $process->on('exit', function (?int $code) use ($deferred, $command, $timeout, $timer, &$stdout, &$stderr, &$timedOut) {
+        $process->on('exit', function (?int $code, ?int $signal) use ($deferred, $command, $timeout, $timer, &$stdout, &$stderr, &$timedOut) {
             Loop::cancelTimer($timer);
 
             if ($code === 0) {
@@ -65,9 +65,15 @@ final class Shell
                 return;
             }
 
-            $reason = $timedOut ? "timed out after {$timeout}s" : 'exited with code ' . ($code ?? 'unknown');
+            $reason = match (true) {
+                $timedOut => "timed out after {$timeout}s",
+                // E.g. a crash, or SIGILL for a program built for a newer CPU.
+                $signal !== null => "was killed by signal {$signal}",
+                default => 'exited with code ' . ($code ?? 'unknown'),
+            };
             $output = trim($stderr) !== '' ? trim($stderr) : trim($stdout);
-            $deferred->reject(new CommandFailedException("{$command[0]} {$reason}: " . mb_substr($output, 0, 500), $stdout));
+            $message = "{$command[0]} {$reason}" . ($output !== '' ? ': ' . mb_substr($output, 0, 500) : '');
+            $deferred->reject(new CommandFailedException($message, $stdout));
         });
 
         $process->stdin->end($input ?? '');
