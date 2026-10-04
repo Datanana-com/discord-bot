@@ -196,7 +196,7 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 | `wake_word` | A word or short phrase: at most 32 letters, numbers, spaces, apostrophes and hyphens, starting and ending with a letter or number. `none` answers everything: Discord doesn't let an option be empty. |
 | `language` | `auto`, or a whisper language code such as `en` or `pt`. |
 | `voice` | The name of a Piper voice in the same folder as `PIPER_MODEL`, e.g. `pt_BR-faber-medium` for `pt_BR-faber-medium.onnx`. |
-| `model` | `haiku`, `sonnet` or `opus`. |
+| `model` | `haiku`, `sonnet` or `opus`. It answers in the server's calls, and writes their summaries. |
 | `reset` | Goes back to the `.env` defaults. Other options given with it are applied after it. |
 
 Without options, `/settings` shows the server's settings and which of them are the defaults. An invalid value is refused with what is allowed instead, e.g. the list of installed voices, and then nothing is changed. Only whoever used `/settings` sees its replies.
