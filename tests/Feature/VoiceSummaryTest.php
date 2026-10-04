@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Voice\VoiceSession;
+use React\Promise\Deferred;
 
 use function React\Async\await;
 
@@ -89,10 +90,32 @@ final class VoiceSummaryTest extends VoiceTestCase
         $this->assertFileExists("{$session->directory}/summary.md");
     }
 
+    public function testSummarizesACallThatStopsWhileAnAnswerIsBeingSpoken(): void
+    {
+        // Like the real voice client, which never says an answer finished when it is closed while speaking it.
+        $this->playing = (new Deferred())->promise();
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => 'Hey Claude, what time is it?']);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');
+
+        // Bob says something over the answer, and is still talking when the call stops.
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => "Let's stop here."]);
+        $this->speak($vc, ssrc: 2, userId: '666', seconds: 1.0);
+        $ended = $session->stop();
+        $this->waitUntil(fn () => count($this->sent) === 2, 'the summary', timeout: 3.0);
+        await($ended);
+
+        $this->assertStringEndsWith("] Bob: Let's stop here.\n", $this->transcript($session));
+        $this->assertStringContainsString("] Bob: Let's stop here.\n\nSummarize the call.\n", file_get_contents($this->claudeLog));
+        $this->assertSame(self::SUMMARY, $this->sent[1] ?? null);
+        $this->assertSame([], $this->loggedProblems());
+    }
+
     public function testSplitsASummaryThatDoesNotFitInOneMessage(): void
     {
-        $lines = array_map(fn (int $point) => sprintf('- Point %02d: %sand that was it.', $point, str_repeat('and so on, ', 8)), range(1, 30));
-        $summary = implode("\n", $lines);
+        $summary = $this->longSummary();
         $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => json_encode(['type' => 'result', 'is_error' => false, 'result' => $summary])]);
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
 
@@ -105,6 +128,45 @@ final class VoiceSummaryTest extends VoiceTestCase
         $this->assertLessThanOrEqual(2000, max(array_map(mb_strlen(...), $this->sent)));
         $this->assertSame($summary, implode("\n", $this->sent));
         $this->assertSame($summary . "\n", file_get_contents("{$session->directory}/summary.md"));
+    }
+
+    public function testPostsTheNextPartOfASummaryOnceThePreviousOneArrived(): void
+    {
+        $arriving = new Deferred();
+        $this->sending = $arriving->promise();
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => json_encode(['type' => 'result', 'is_error' => false, 'result' => $this->longSummary()])]);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $over = false;
+        $ended = $session->stop()->then(function () use (&$over) {
+            $over = true;
+        });
+        $this->waitUntil(fn () => $this->sent !== [], 'the first part of the summary');
+
+        // Discord hasn't accepted the first part yet: the second one waits, so they can't arrive out of order.
+        $this->assertCount(1, $this->sent);
+        $this->assertFalse($over, 'The call is not over before its summary is posted.');
+
+        $arriving->resolve(null);
+        await($ended);
+
+        $this->assertCount(2, $this->sent);
+    }
+
+    public function testTellsTheChannelWhenTheSummaryIsEmpty(): void
+    {
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => json_encode(['type' => 'result', 'is_error' => false, 'result' => " \n"])]);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        await($session->stop());
+
+        // Discord refuses empty messages, so an empty summary would otherwise go missing without a word.
+        $this->assertSame(["Sorry, I couldn't summarize the call. (Claude gave an empty summary.)"], $this->sent);
+        $this->assertSame(['Could not summarize the call: Claude gave an empty summary.'], $this->loggedProblems());
+        $this->assertSame([], $this->logged('Summarized the call'));
+        $this->assertFileDoesNotExist("{$session->directory}/summary.md");
     }
 
     public function testDoesNotAskClaudeWhenNothingWasSaid(): void
@@ -145,5 +207,15 @@ final class VoiceSummaryTest extends VoiceTestCase
         $this->assertWavDuration(1.0, "{$session->directory}/555-1.wav");
         $this->assertStringEndsWith("] Alice: Let's get lunch after this.\n", $this->transcript($session));
         $this->assertSame(1, $this->usage()['calls']);
+    }
+
+    /**
+     * A summary of 30 lines and 3509 characters: 17 lines fit in a Discord message.
+     */
+    private function longSummary(): string
+    {
+        $lines = array_map(fn (int $point) => sprintf('- Point %02d: %sand that was it.', $point, str_repeat('and so on, ', 8)), range(1, 30));
+
+        return implode("\n", $lines);
     }
 }

@@ -104,7 +104,7 @@ Each class in `app/Commands/Global`, named `<Name>Command` and extending `App\Co
 
 `/stop` finishes the recordings and leaves the channel, and `/stats` shows how the server has used the bot (see [Logs and statistics](#logs-and-statistics)).
 
-A call ends with `/stop`, or when someone disconnects the bot from the voice channel. Its summary is written in the language of the call, once everything said is transcribed, so it includes the last thing said. A summary that doesn't fit in one Discord message is split into several, never in the middle of a sentence. When nobody said anything, there is no summary. When Claude can't make one (it isn't logged in, the usage limit is reached, ...), the bot says so in the text channel, and why.
+A call ends with `/stop`, or when someone disconnects the bot from the voice channel. For the summary, the whole transcript is sent to Claude, including what was said without the wake word. The summary is written in the language of the call, once everything said is transcribed, so it includes the last thing said. A summary that doesn't fit in one Discord message is split into several, never in the middle of a sentence. When nobody said anything, there is no summary. When Claude can't make one (it isn't logged in, the usage limit is reached, ...), the bot says so in the text channel, and why.
 
 > [!IMPORTANT]
 > Only record people who have agreed to it. The bot announces in the channel when it starts recording.

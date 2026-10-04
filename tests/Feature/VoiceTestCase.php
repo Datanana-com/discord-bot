@@ -61,6 +61,12 @@ abstract class VoiceTestCase extends TestCase
     /** When set, posting in the text channel fails with this error. */
     protected ?\Throwable $sendError = null;
 
+    /** When set, a message only arrives in the text channel once this resolves. */
+    protected ?PromiseInterface $sending = null;
+
+    /** When set, a file played into the call only finishes once this resolves. */
+    protected ?PromiseInterface $playing = null;
+
     /** @var array<int, true> SSRCs that already sent a speaking event. */
     private array $speaking = [];
 
@@ -185,7 +191,7 @@ abstract class VoiceTestCase extends TestCase
             $this->assertSame(['parse' => []], $message->jsonSerialize()['allowed_mentions'] ?? null, 'Mentions are disabled.');
             $this->sent[] = $message->getContent();
 
-            return $this->sendError === null ? resolve(null) : reject($this->sendError);
+            return $this->sendError === null ? $this->sending ?? resolve(null) : reject($this->sendError);
         });
 
         return $channel;
@@ -227,7 +233,7 @@ abstract class VoiceTestCase extends TestCase
         $vc->method('playFile')->willReturnCallback(function (string $file): PromiseInterface {
             $this->played[] = $file;
 
-            return resolve(null);
+            return $this->playing ?? resolve(null);
         });
         // The ffmpeg decoder process is not needed: PCM comes from the Opus decoder below.
         $vc->method('createDecoder')->willReturnCallback(function (object $ss) use ($vc): void {

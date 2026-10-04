@@ -116,13 +116,15 @@ final class VoiceRoundTripTest extends TestCase
             $result = "{$speakerRecordings}/result.json";
             $speaker = is_file($result) ? json_decode(file_get_contents($result), true) : null;
         } finally {
-            if (isset($session)) {
-                $logger->info('The bot received', $received ?? []);
-                // The call's summary is posted after it stopped, while the bot is still connected to Discord.
-                $this->within(60, $session->stop(), 'the call to be summarized');
+            try {
+                if (isset($session)) {
+                    $logger->info('The bot received', $received ?? []);
+                    // The call's summary is posted after it stopped, while the bot is still connected to Discord.
+                    $this->within(60, $session->stop(), 'the call to be summarized');
+                }
+            } finally {
+                $app->discord->close(false);
             }
-
-            $app->discord->close(false);
         }
 
         $logged = array_map(fn ($record) => $record->message, $logs->getRecords());

@@ -49,6 +49,8 @@ final class VoiceSessionTest extends TestCase
         yield 'after a line' => ["- First item\n- Second item\n- Third", 20, ['- First item', '- Second item', '- Third']];
         yield 'after as many lines as fit' => ["- First item\n- Second item\n- Third", 30, ["- First item\n- Second item", '- Third']];
         yield 'after a sentence, when a line is too long' => ['One two three. Four five six! Seven?', 20, ['One two three.', 'Four five six!', 'Seven?']];
+        yield 'after a line exactly as long as the limit' => ["aaaa bbbbb\ncc", 10, ['aaaa bbbbb', 'cc']];
+        yield 'after a sentence exactly as long as the limit' => ['a a a a b. c', 10, ['a a a a b.', 'c']];
         yield 'after a sentence without spaces' => ['それは良い考えです。明日また話しましょう。', 20, ['それは良い考えです。', '明日また話しましょう。']];
         yield 'after a word, when a sentence is too long' => ['one two three four five six seven', 20, ['one two three four', 'five six seven']];
         yield 'anywhere, when a word is too long' => [str_repeat('a', 45), 20, [str_repeat('a', 20), str_repeat('a', 20), 'aaaaa']];
