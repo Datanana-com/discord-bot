@@ -190,7 +190,7 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 
 | Option | |
 |---|---|
-| `wake_word` | A word or short phrase, of at most 32 letters, numbers, spaces, apostrophes and hyphens. `none` answers everything: Discord doesn't let an option be empty. |
+| `wake_word` | A word or short phrase: at most 32 letters, numbers, spaces, apostrophes and hyphens, starting and ending with a letter or number. `none` answers everything: Discord doesn't let an option be empty. |
 | `language` | `auto`, or a whisper language code such as `en` or `pt`. |
 | `voice` | The name of a Piper voice in the same folder as `PIPER_MODEL`, e.g. `pt_BR-faber-medium` for `pt_BR-faber-medium.onnx`. |
 | `model` | `haiku`, `sonnet` or `opus`. |
@@ -231,6 +231,7 @@ sqlite3 databases/stats.sqlite "SELECT guild_id, COUNT(*) AS answers FROM events
 
 - Answers take a few seconds: transcription, Claude Code starting up, and speech synthesis each add some.
 - Speech recognition sometimes mishears the wake word (e.g. "cloud"). Change it, with `VOICE_WAKE_WORD` or `/settings`, if that happens often.
+- A wake word of several words only counts when they are transcribed with nothing but a space between them: "Okay, computer" doesn't mention "okay computer". A single word is more reliable.
 - The voice library (`discord-php-helpers/voice` 8.3.0) keeps every decoded audio frame in memory until `/stop`, roughly 12 MB per speaker per minute of speech. That's fine for normal calls; for very long ones, `/stop` and `/record` again now and then.
 
 ### Tests

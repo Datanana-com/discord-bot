@@ -43,10 +43,14 @@ final readonly class Speech
      */
     public static function voices(): array
     {
-        return array_map(
-            fn (string $path) => basename($path, '.onnx'),
-            glob(dirname(env('PIPER_MODEL', '')) . '/*.onnx') ?: [],
-        );
+        // Not glob(): a folder's name can have characters that mean something in a pattern.
+        $folder = dirname(env('PIPER_MODEL', ''));
+        $files = is_dir($folder) ? scandir($folder) : [];
+
+        return array_values(array_map(
+            fn (string $file) => basename($file, '.onnx'),
+            array_filter($files, fn (string $file) => str_ends_with($file, '.onnx')),
+        ));
     }
 
     /**

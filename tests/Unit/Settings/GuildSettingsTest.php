@@ -53,8 +53,16 @@ final class GuildSettingsTest extends TestCase
 
     public function testSavingAgainReplacesTheSettingsAndSaysWhoChangedThem(): void
     {
-        $this->settings->save('100', [...GuildSettings::DEFAULTS, 'language' => 'pt', 'model' => 'opus'], '555');
-        $this->settings->save('100', [...GuildSettings::DEFAULTS, 'model' => 'sonnet'], '666');
+        // Wherever the bot runs, the time is saved in UTC, like the statistics.
+        $timezone = date_default_timezone_get();
+        date_default_timezone_set('Pacific/Kiritimati');
+
+        try {
+            $this->settings->save('100', [...GuildSettings::DEFAULTS, 'language' => 'pt', 'model' => 'opus'], '555');
+            $this->settings->save('100', [...GuildSettings::DEFAULTS, 'model' => 'sonnet'], '666');
+        } finally {
+            date_default_timezone_set($timezone);
+        }
 
         $this->assertSame(['wake_word' => null, 'language' => null, 'voice' => null, 'model' => 'sonnet'], $this->settings->find('100'));
 
@@ -73,6 +81,13 @@ final class GuildSettingsTest extends TestCase
             ['guild_id', 'wake_word', 'language', 'voice', 'model', 'updated_by', 'updated_at'],
             DB::connection(Usage::CONNECTION)->getSchemaBuilder()->getColumnListing('guild_settings'),
         );
+
+        // The database itself keeps a server to one row.
+        $primaryKeys = array_filter(
+            DB::connection(Usage::CONNECTION)->getSchemaBuilder()->getIndexes('guild_settings'),
+            fn (array $index) => $index['primary'],
+        );
+        $this->assertSame([['guild_id']], array_column($primaryKeys, 'columns'));
     }
 
     public function testLogsWhenTheSettingsAreUnavailable(): void

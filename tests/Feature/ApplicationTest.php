@@ -193,6 +193,7 @@ final class ApplicationTest extends TestCase
             $settings['options'][3]['choices'],
         );
         $this->assertSame('32', $settings['default_member_permissions']);
+        $this->assertSame(32, $settings['options'][0]['max_length'], 'Discord stops a wake word that is too long from being typed.');
 
         // A command without them is sent as such, which also removes the ones Discord still has.
         $this->assertSame(
@@ -387,8 +388,9 @@ final class ApplicationTest extends TestCase
     }
 
     /**
-     * /settings as Discord returns it once registered: the options are objects, with null for what
-     * wasn't sent and without what is false.
+     * /settings as Discord returns it once registered, which is not how it was sent: the options
+     * are objects with their fields in Discord's order, and they also have what wasn't sent, as
+     * null or false, and what the bot never sets.
      *
      * @return array<string, mixed>
      */
@@ -397,10 +399,18 @@ final class ApplicationTest extends TestCase
         $declared = (new ReflectionClass(SettingsCommand::class))->getDefaultProperties();
         $options = array_map(
             fn (array $option) => [
-                ...$option,
                 'name_localizations' => null,
                 'description_localizations' => null,
-                ...(isset($option['choices']) ? ['choices' => array_map(fn (array $choice) => [...$choice, 'name_localizations' => null], $option['choices'])] : []),
+                'name_localized' => $option['name'],
+                'required' => false,
+                'autocomplete' => false,
+                'min_length' => null,
+                'min_value' => null,
+                'max_value' => null,
+                'channel_types' => null,
+                'choices' => null,
+                ...array_reverse($option),
+                ...(isset($option['choices']) ? ['choices' => array_map(fn (array $choice) => ['name_localizations' => null, ...array_reverse($choice)], $option['choices'])] : []),
             ],
             $declared['options'],
         );

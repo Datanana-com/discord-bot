@@ -287,6 +287,7 @@ class Application
      *
      * Discord returns an option with more than it was sent: null for what was left out, and nothing
      * for what is false. Comparing the options as they are would save every command on every start.
+     * Localizations are not compared: Discord only returns them when asked to.
      *
      * @return list<array<string, mixed>>
      */

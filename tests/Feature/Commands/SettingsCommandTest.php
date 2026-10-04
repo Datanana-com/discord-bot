@@ -119,6 +119,33 @@ final class SettingsCommandTest extends CommandTestCase
         $this->assertTrue(VoiceSession::mentions('What time is it?', $this->store->for(self::GUILD_ID)['wake_word']));
     }
 
+    /**
+     * @param string $wakeWord A wake word that can be said, and found in a transcript.
+     */
+    #[DataProvider('wakeWords')]
+    public function testAcceptsWakeWordsThatCanBeSaid(string $wakeWord, string $said): void
+    {
+        $this->settings(['wake_word' => $wakeWord]);
+
+        $saved = $this->store->find(self::GUILD_ID)['wake_word'];
+        $this->assertSame($wakeWord, $saved);
+        $this->assertTrue(VoiceSession::mentions($said, $saved), 'A call answers to it.');
+    }
+
+    /**
+     * @return iterable<string, array{string, string}>
+     */
+    public static function wakeWords(): iterable
+    {
+        yield 'one letter' => ['k', 'K, what time is it?'];
+        yield 'a hyphen inside' => ['Jean-Luc', 'Hey Jean-Luc, what time is it?'];
+        yield 'an apostrophe inside' => ["d'Artagnan", "What do you think, d'Artagnan?"];
+        yield 'numbers' => ['r2d2', 'R2D2, what time is it?'];
+        yield 'accents' => ['José', 'Olá José, que horas são?'];
+        yield 'another script' => ['クロード', 'ねえ クロード 今何時'];
+        yield 'as long as it can be' => [str_repeat('a', 32), 'Hey ' . str_repeat('a', 32) . '!'];
+    }
+
     public function testTidiesWhatWasTyped(): void
     {
         $this->settings(['wake_word' => '  okay   computer ', 'language' => ' PT ']);
@@ -146,13 +173,18 @@ final class SettingsCommandTest extends CommandTestCase
      */
     public static function invalidValues(): iterable
     {
-        $wakeWord = 'The wake word must be a word or short phrase of at most 32 letters, numbers, spaces, apostrophes and hyphens, or `none` to answer everything.';
+        $wakeWord = 'The wake word must be a word or short phrase: at most 32 letters, numbers, spaces, apostrophes and hyphens, starting and ending with a letter or number. Use `none` to answer everything.';
         $voice = 'The voice must be one of the installed Piper voices: `pt_BR-faber-medium`, `voice`.';
 
         yield 'a wake word that is too long' => [['wake_word' => str_repeat('a', 33)], $wakeWord];
         yield 'a wake word that pings everyone when /record announces it' => [['wake_word' => '@everyone'], $wakeWord];
         yield 'a wake word that is formatted' => [['wake_word' => '**claude**'], $wakeWord];
         yield 'a wake word of spaces' => [['wake_word' => '   '], $wakeWord];
+        // A wake word is looked for as whole words, so these would be found inside "well-known" and "don't".
+        yield 'a wake word that is only a hyphen' => [['wake_word' => '-'], $wakeWord];
+        yield 'a wake word that is only an apostrophe' => [['wake_word' => "'"], $wakeWord];
+        yield 'a wake word that ends with a hyphen' => [['wake_word' => 'jarvis-'], $wakeWord];
+        yield 'a wake word that starts with an apostrophe' => [['wake_word' => "'cause"], $wakeWord];
         yield 'a language by its name' => [
             ['language' => 'portuguese'],
             "The language must be `auto` or one of whisper's language codes: " . implode(', ', Transcriber::LANGUAGES) . '.',

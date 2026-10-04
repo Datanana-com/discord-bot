@@ -160,8 +160,9 @@ final class SettingsCommand extends CommandAbstract
 
         return array_values(array_filter([
             // Only what can be said: /record announces the wake word, where anything else could ping or format.
-            isset($values['wake_word']) && preg_match('/^[\p{L}\p{M}\p{N}\' -]{1,32}$/u', $values['wake_word']) !== 1
-                ? 'The wake word must be a word or short phrase of at most 32 letters, numbers, spaces, apostrophes and hyphens, or `none` to answer everything.'
+            // It is looked for as whole words, so it starts and ends with a letter or number.
+            isset($values['wake_word']) && preg_match('/^[\p{L}\p{N}]([\p{L}\p{M}\p{N}\' -]{0,30}[\p{L}\p{M}\p{N}])?$/u', $values['wake_word']) !== 1
+                ? 'The wake word must be a word or short phrase: at most 32 letters, numbers, spaces, apostrophes and hyphens, starting and ending with a letter or number. Use `none` to answer everything.'
                 : null,
             isset($values['language']) && ! in_array($values['language'], ['auto', ...Transcriber::LANGUAGES], true)
                 ? "The language must be `auto` or one of whisper's language codes: " . implode(', ', Transcriber::LANGUAGES) . '.'

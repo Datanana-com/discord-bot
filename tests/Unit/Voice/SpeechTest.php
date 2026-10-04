@@ -21,7 +21,8 @@ final class SpeechTest extends TestCase
     protected function setUp(): void
     {
         $this->oggPath = sys_get_temp_dir() . '/speech-test-' . uniqid() . '.ogg';
-        $this->voices = sys_get_temp_dir() . '/speech-test-voices-' . uniqid();
+        // Brackets mean something in a glob pattern, and nothing in a folder's name.
+        $this->voices = sys_get_temp_dir() . '/speech-test-voices [' . uniqid() . ']';
     }
 
     protected function tearDown(): void
@@ -33,7 +34,7 @@ final class SpeechTest extends TestCase
         }
 
         if (is_dir($this->voices)) {
-            array_map(unlink(...), glob("{$this->voices}/*"));
+            array_map(fn (string $file) => unlink("{$this->voices}/{$file}"), array_diff(scandir($this->voices), ['.', '..']));
             rmdir($this->voices);
         }
     }
@@ -63,6 +64,11 @@ final class SpeechTest extends TestCase
     public function testListsNoVoicesWhenTheFolderDoesNotExist(): void
     {
         $_ENV['PIPER_MODEL'] = '/nowhere/voices/en_US-lessac-medium.onnx';
+
+        $this->assertSame([], Speech::voices());
+
+        // Nor without a voice in .env: there is no folder to look in.
+        unset($_ENV['PIPER_MODEL']);
 
         $this->assertSame([], Speech::voices());
     }
