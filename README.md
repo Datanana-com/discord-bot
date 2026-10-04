@@ -218,7 +218,7 @@ Unit tests cover each class on its own. Feature tests run the whole voice flow a
 
 `tests/Feature/VoiceCallTest.php` goes further: the call's audio travels over a local UDP socket standing in for Discord's media server, encrypted and Opus-encoded like in a real call, and the spoken answer is encoded by ffmpeg. It needs ffmpeg and libopus, like the bot itself, and is skipped without them.
 
-GitHub Actions runs these tests with coverage on every pull request and push to `master` (`.github/workflows/tests.yml`), with ffmpeg and libopus installed so `VoiceCallTest` runs too.
+GitHub Actions runs these tests with coverage on pull requests and pushes to `master` that change PHP code, the tests, the dependencies or `phpunit.xml` (`.github/workflows/tests.yml`), with ffmpeg and libopus installed so `VoiceCallTest` runs too. Draft pull requests aren't tested until they're marked ready for review.
 
 To see the code coverage, install a coverage driver (`sudo apt install php8.5-pcov`, or Xdebug) and run:
 
@@ -230,7 +230,7 @@ composer test:coverage
 
 `tests/Live` asks the bot a question in a real Discord voice call. A second bot plays the spoken question "Hey Claude, what time is it?" and records the answer.
 
-Everything except Claude is real: Discord with its end-to-end encryption, whisper.cpp and Piper. Claude is replaced by a fixed answer, so no Claude subscription is used. It runs in GitHub Actions (`.github/workflows/live-voice.yml`) every night, on demand, and on pull requests that change the bot. Every run keeps its recordings as an artifact you can download and listen to.
+Everything except Claude is real: Discord with its end-to-end encryption, whisper.cpp and Piper. Claude is replaced by a fixed answer, so no Claude subscription is used. It runs in GitHub Actions (`.github/workflows/live-voice.yml`) every night, on demand, and on pull requests that change the bot once they're no longer drafts. Every run keeps its recordings as an artifact you can download and listen to.
 
 It needs its own private Discord server:
 

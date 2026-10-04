@@ -10,7 +10,9 @@ on:
   workflow_dispatch:
   schedule:
     - cron: '23 4 * * *'
+  # Not on draft pull requests: they run once marked ready for review.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'app/**'
       - 'tests/Live/**'
@@ -27,6 +29,7 @@ permissions:
 
 jobs:
   configured:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-24.04
     outputs:
       ready: ${{ steps.check.outputs.ready }}
