@@ -108,7 +108,9 @@ abstract class VoiceTestCase extends TestCase
 
     protected function tearDown(): void
     {
-        VoiceSession::forGuild(self::GUILD_ID)?->stop();
+        // A call is summarized after it stopped, which must be over before its recordings are deleted.
+        // A test that stops a call in which something was said has to wait for that itself.
+        await(VoiceSession::forGuild(self::GUILD_ID)?->stop() ?? resolve(null));
 
         foreach ($this->originalEnv as $name => $value) {
             if (str_starts_with($name, 'FAKE_')) {

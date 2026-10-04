@@ -118,7 +118,8 @@ final class VoiceRoundTripTest extends TestCase
         } finally {
             if (isset($session)) {
                 $logger->info('The bot received', $received ?? []);
-                $session->stop();
+                // The call's summary is posted after it stopped, while the bot is still connected to Discord.
+                $this->within(60, $session->stop(), 'the call to be summarized');
             }
 
             $app->discord->close(false);
@@ -141,6 +142,11 @@ final class VoiceRoundTripTest extends TestCase
         // It answered, in the text chat and out loud.
         $this->assertStringContainsString('Claude: It is a quarter past four.', $transcript);
         $this->assertEmpty(preg_grep('/^(Voice reply failed|Could not post)/', $logged), 'Answering did not fail.');
+
+        // When the call ended, it was summarized. Claude's stand-in gives the summary the same text as the answer.
+        $this->assertContains('Summarized the call', $logged);
+        $this->assertStringEqualsFile("{$session->directory}/summary.md", "It is a quarter past four.\n");
+        $this->assertEmpty(preg_grep('/^Could not summarize/', $logged), 'Summarizing did not fail.');
 
         // The call and its answer were counted for /stats.
         $usage = (new Usage($logger))->summary((string) $voiceClient->channel->guild_id);
