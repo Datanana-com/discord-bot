@@ -48,9 +48,10 @@ final readonly class Claude
     }
 
     /**
+     * @param string $systemPrompt What Claude is asked to do; by default, to answer in a voice call.
      * @return PromiseInterface<string> Claude's answer.
      */
-    public function ask(string $prompt): PromiseInterface
+    public function ask(string $prompt, string $systemPrompt = self::SYSTEM_PROMPT): PromiseInterface
     {
         // An empty directory keeps Claude Code from picking up a CLAUDE.md or project settings.
         if (! is_dir($this->workingDirectory)) {
@@ -67,7 +68,7 @@ final readonly class Claude
                 '--print',
                 '--output-format', 'json',
                 '--model', $this->model,
-                '--system-prompt', self::SYSTEM_PROMPT,
+                '--system-prompt', $systemPrompt,
                 // The prompt is built from whatever anyone says in the call,
                 // so Claude gets no tools and no MCP servers on this machine.
                 '--tools', '',
