@@ -12,6 +12,36 @@ use function React\Async\await;
 
 final class TranscriberTest extends TestCase
 {
+    protected function tearDown(): void
+    {
+        unset($_ENV['WHISPER_LANGUAGE']);
+    }
+
+    public function testAServersLanguageReplacesTheOneInEnv(): void
+    {
+        $this->assertSame('auto', Transcriber::fromEnv()->language);
+
+        $_ENV['WHISPER_LANGUAGE'] = 'en';
+
+        $this->assertSame('en', Transcriber::fromEnv()->language);
+        $this->assertSame('pt', Transcriber::fromEnv('pt')->language);
+    }
+
+    public function testKnowsTheLanguagesWhisperTranscribes(): void
+    {
+        // The codes of whisper.cpp's language table (g_lang in src/whisper.cpp).
+        $this->assertCount(100, Transcriber::LANGUAGES);
+        $this->assertSame(Transcriber::LANGUAGES, array_unique(Transcriber::LANGUAGES));
+        $this->assertContains('en', Transcriber::LANGUAGES);
+        $this->assertContains('pt', Transcriber::LANGUAGES);
+        $this->assertContains('yue', Transcriber::LANGUAGES);
+        $this->assertNotContains('auto', Transcriber::LANGUAGES, 'Detecting the language is not a language.');
+
+        foreach (Transcriber::LANGUAGES as $code) {
+            $this->assertMatchesRegularExpression('/^[a-z]{2,3}$/', $code);
+        }
+    }
+
     public function testRunsWhisperAndCleansItsOutput(): void
     {
         $log = tempnam(sys_get_temp_dir(), 'fake-whisper-');

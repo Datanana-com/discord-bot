@@ -21,12 +21,31 @@ final readonly class Speech
     ) {
     }
 
-    public static function fromEnv(): self
+    /**
+     * @param string|null $voice The name of the voice that speaks, when it is not the one in .env: one of voices().
+     */
+    public static function fromEnv(?string $voice = null): self
     {
+        $model = env('PIPER_MODEL', '');
+
         return new self(
             env('PIPER_BINARY', 'piper'),
-            env('PIPER_MODEL', ''),
+            $voice === null ? $model : dirname($model) . "/{$voice}.onnx",
             env('FFMPEG_BINARY', 'ffmpeg'),
+        );
+    }
+
+    /**
+     * The names of the installed voices: those in the same folder as the one in .env.
+     * The voice in en_US-lessac-medium.onnx is called "en_US-lessac-medium".
+     *
+     * @return list<string>
+     */
+    public static function voices(): array
+    {
+        return array_map(
+            fn (string $path) => basename($path, '.onnx'),
+            glob(dirname(env('PIPER_MODEL', '')) . '/*.onnx') ?: [],
         );
     }
 

@@ -226,10 +226,17 @@ class Application
 
             $commandClass = "\\App\\Commands\\Global\\{$commandClass}";
             $commandClass = new $commandClass($this->discord);
-            $commands[$commandName] = (new Command($this->discord))
+            $command = (new Command($this->discord))
                 ->setName($commandName)
                 ->setDescription($commandClass->description)
                 ->setType($commandClass?->type ?? Command::CHAT_INPUT);
+            // Set as they are sent: Command::addOption() loses the option. Both are always sent,
+            // so that saving a command also removes the ones it no longer has.
+            $command->options = $commandClass->options;
+            $command->default_member_permissions = $commandClass->defaultMemberPermissions === null
+                ? null
+                : (string) $commandClass->defaultMemberPermissions;
+            $commands[$commandName] = $command;
 
             $this->discord->listenCommand($commandName, function (Interaction $interaction) use ($commandName, $commandClass) {
                 $this->log->info("/{$commandName} used", [
@@ -247,7 +254,7 @@ class Application
                 foreach ($commands as $commandName => $command) {
                     $existing = $registered->find(fn (Command $registeredCommand) => $registeredCommand->name === $commandName);
 
-                    if ($existing !== null && $existing->description === $command->description && $existing->type === $command->type) {
+                    if ($existing !== null && ! self::changed($existing, $command)) {
                         $this->log->info("Command {$commandName} already exists.");
 
                         continue;
@@ -262,6 +269,47 @@ class Application
             },
             fn (\Throwable $e) => $this->log->error('Could not fetch the registered commands: ' . $e->getMessage()),
         );
+    }
+
+    /**
+     * Whether a command is no longer what Discord has registered for it, in what the bot sets.
+     */
+    private static function changed(Command $registered, Command $command): bool
+    {
+        return $registered->description !== $command->description
+            || $registered->type !== $command->type
+            || $registered->default_member_permissions !== $command->default_member_permissions
+            || self::comparable($registered) != self::comparable($command);
+    }
+
+    /**
+     * A command's options, reduced to what the bot sets on them.
+     *
+     * Discord returns an option with more than it was sent: null for what was left out, and nothing
+     * for what is false. Comparing the options as they are would save every command on every start.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private static function comparable(Command $command): array
+    {
+        // The raw attributes: reading $command->options turns them into parts, which are then sent as such.
+        $options = json_decode(json_encode($command->getRawAttributes()['options'] ?? []), true);
+
+        return array_map(self::comparableOption(...), $options);
+    }
+
+    /**
+     * @param array<string, mixed> $option
+     * @return array<string, mixed>
+     */
+    private static function comparableOption(array $option): array
+    {
+        $fields = ['type', 'name', 'description', 'required', 'choices', 'options', 'channel_types', 'min_value', 'max_value', 'min_length', 'max_length', 'autocomplete'];
+        $option = array_intersect_key($option, array_flip($fields));
+        $option['choices'] = array_map(fn (array $choice) => [$choice['name'], $choice['value']], $option['choices'] ?? []);
+        $option['options'] = array_map(self::comparableOption(...), $option['options'] ?? []);
+
+        return array_filter($option, fn (mixed $value) => ! in_array($value, [null, false, []], true));
     }
 
     /**
