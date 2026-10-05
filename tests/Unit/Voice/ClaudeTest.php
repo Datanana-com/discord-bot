@@ -44,8 +44,9 @@ final class ClaudeTest extends TestCase
         putenv('FAKE_CLAUDE_EXIT');
         putenv('FAKE_CLAUDE_PAUSE');
         putenv('FAKE_CLAUDE_RESUME');
+        putenv('FAKE_CLAUDE_DELAY');
         putenv('ANTHROPIC_API_KEY');
-        unset($_ENV['CLAUDE_MODEL']);
+        unset($_ENV['CLAUDE_MODEL'], $_ENV['CLAUDE_BINARY'], $_ENV['CLAUDE_LOOKUP_MODEL'], $_ENV['CLAUDE_LOOKUP_ADVISOR']);
         unlink($this->log);
         @unlink($this->resume);
         @rmdir($this->workingDirectory);
@@ -82,6 +83,8 @@ final class ClaudeTest extends TestCase
         $this->assertContains('--include-partial-messages', $args, 'Without it, the text only comes once it is all written.');
         $this->assertSame('haiku', $this->option($args, '--model'));
         $this->assertSame('', $this->option($args, '--tools'));
+        $this->assertNotContains('--allowedTools', $args);
+        $this->assertNotContains('--advisor', $args);
         $this->assertContains('--strict-mcp-config', $args);
         $this->assertContains('--no-session-persistence', $args);
         $this->assertStringContainsString('Discord voice call', $this->option($args, '--system-prompt'));
@@ -106,6 +109,76 @@ final class ClaudeTest extends TestCase
         $this->assertContains('--no-session-persistence', $args);
         $this->assertStringContainsString("cwd={$this->workingDirectory}\n", $log);
         $this->assertStringContainsString("api_key=unset\n", $log);
+    }
+
+    public function testLooksThingsUpWithWebSearchAndNothingElse(): void
+    {
+        $_ENV['CLAUDE_BINARY'] = __DIR__ . '/../../Fixtures/fake-claude';
+        putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeResult('PHP 8.5.'));
+        $claude = Claude::forLookups(300.0);
+
+        $this->assertSame(['sonnet', 'opus', true, 300.0], [$claude->model, $claude->advisor, $claude->searchesTheWeb, $claude->timeout]);
+        $this->assertSame(sys_get_temp_dir() . '/discord-bot-claude', $claude->workingDirectory, 'The directory of every other request.');
+        $this->assertSame('PHP 8.5.', await($claude->ask('Task: the latest version of PHP.', 'You look things up.')));
+
+        $log = file_get_contents($this->log);
+        $args = $this->arguments($log);
+        $this->assertSame('sonnet', $this->option($args, '--model'));
+        $this->assertSame('opus', $this->option($args, '--advisor'));
+
+        // Web search is the only tool, and may be used without asking: nobody is there to ask.
+        $this->assertSame('WebSearch', $this->option($args, '--tools'));
+        $this->assertSame('WebSearch', $this->option($args, '--allowedTools'));
+        // What it searches for must not depend on the settings, plugins and hooks of whoever runs the bot.
+        $this->assertSame('', $this->option($args, '--setting-sources'));
+        $this->assertStringContainsString("arg=--tools\narg=WebSearch\narg=--allowedTools\narg=WebSearch\narg=--setting-sources\narg=\narg=--strict-mcp-config\narg=--no-session-persistence\n", $log);
+        $this->assertSame([], array_values(array_filter($args, fn (string $arg) => preg_match('/Fetch|Bash|Read|Write|Edit|mcp/i', $arg) === 1 && ! str_starts_with($arg, '--'))), 'No other tool is named.');
+        $this->assertNotContains('--mcp-config', $args);
+        $this->assertNotContains('--add-dir', $args);
+        $this->assertNotContains('--permission-mode', $args);
+        $this->assertNotContains('--dangerously-skip-permissions', $args);
+        $this->assertStringContainsString('cwd=' . sys_get_temp_dir() . "/discord-bot-claude\n", $log);
+        $this->assertStringContainsString("api_key=unset\n", $log);
+    }
+
+    public function testLooksThingsUpWithTheModelAndTheAdvisorInEnv(): void
+    {
+        $_ENV['CLAUDE_LOOKUP_MODEL'] = 'opus';
+        $_ENV['CLAUDE_LOOKUP_ADVISOR'] = ' fable ';
+
+        $claude = Claude::forLookups(300.0);
+
+        $this->assertSame(['opus', 'fable'], [$claude->model, $claude->advisor]);
+        $this->assertSame('haiku', Claude::fromEnv()->model, 'Answers keep their own model.');
+        $this->assertSame(['', false, 120.0], [Claude::fromEnv()->advisor, Claude::fromEnv()->searchesTheWeb, Claude::fromEnv()->timeout]);
+    }
+
+    public function testLooksThingsUpWithoutAnAdvisorWhenItIsEmpty(): void
+    {
+        $_ENV['CLAUDE_BINARY'] = __DIR__ . '/../../Fixtures/fake-claude';
+        $_ENV['CLAUDE_LOOKUP_ADVISOR'] = '';
+        putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeResult('PHP 8.5.'));
+        $claude = Claude::forLookups(300.0);
+
+        $this->assertSame('', $claude->advisor);
+        await($claude->ask('Task: the latest version of PHP.', 'You look things up.'));
+
+        $args = $this->arguments(file_get_contents($this->log));
+        $this->assertNotContains('--advisor', $args);
+        $this->assertSame('WebSearch', $this->option($args, '--tools'));
+    }
+
+    public function testGivesARequestUpAfterItsTimeout(): void
+    {
+        putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeResult('Paris.'));
+        putenv('FAKE_CLAUDE_DELAY=1');
+
+        try {
+            await((new Claude(__DIR__ . '/../../Fixtures/fake-claude', 'haiku', $this->workingDirectory, timeout: 0.2))->ask('Hello'));
+            $this->fail('The question should have timed out.');
+        } catch (CommandFailedException $e) {
+            $this->assertStringEndsWith('fake-claude timed out after 0.2s', $e->getMessage());
+        }
     }
 
     public function testHandsOverTheAnswerWhileClaudeIsWritingIt(): void

@@ -149,6 +149,32 @@ final class ShellTest extends TestCase
         $this->assertLessThan(5, microtime(true) - $started);
     }
 
+    public function testStreamStopsTheCommandWhenItsPromiseIsCancelled(): void
+    {
+        $lines = [];
+        $started = microtime(true);
+        $running = Shell::stream(['sh', '-c', 'echo first; exec sleep 10'], function (string $line) use (&$lines) {
+            $lines[] = $line;
+        });
+
+        for ($i = 0; $i < 100 && $lines === []; $i++) {
+            delay(0.05);
+        }
+
+        // Whoever started it no longer waits for it, e.g. because it took too long.
+        $running->cancel();
+
+        try {
+            await($running);
+            $this->fail('The command should have been stopped.');
+        } catch (CommandFailedException $e) {
+            $this->assertSame('sh was killed by signal 15', $e->getMessage());
+        }
+
+        $this->assertSame(['first'], $lines);
+        $this->assertLessThan(5, microtime(true) - $started);
+    }
+
     public function testStreamStopsTheCommandWhenALineCannotBeHandled(): void
     {
         $lines = [];

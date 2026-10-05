@@ -3,7 +3,7 @@ Discord PHP Framework
 
 This project was made to make it easier to start a bot, without having the clogged index file with the `->on` function & other things.
 
-Requires PHP 8.5. It also includes a voice bot that records calls and lets people talk to Claude: see [Voice calls with Claude](#voice-calls-with-claude). In direct messages, Claude answers in text and remembers who it's talking to: see [Direct messages and memory](#direct-messages-and-memory). It remembers calls too: see [Memory in calls](#memory-in-calls).
+Requires PHP 8.5. It also includes a voice bot that records calls and lets people talk to Claude: see [Voice calls with Claude](#voice-calls-with-claude). In direct messages, Claude answers in text and remembers who it's talking to: see [Direct messages and memory](#direct-messages-and-memory). It remembers calls too: see [Memory in calls](#memory-in-calls). What Claude can't answer well at once, it has looked up on the web in the background: see [Looking things up](#looking-things-up).
 
 ### Basic Example
 
@@ -114,7 +114,27 @@ A call ends with `/stop`, or when someone disconnects the bot from the voice cha
 
 Recordings are kept until you delete them, unless `RECORDINGS_RETENTION_DAYS` is set. The bot then deletes each call's folder, with its recordings, transcript and summary, once the call is older than that many days. It goes by the date in the folder's name, and checks when it starts and every hour after that. The folder of a call that isn't over, including one that stopped and is still being summarized, is never deleted, and a server's folder is removed once it is empty. Everything else in `RECORDINGS_PATH` is left alone, and so are the statistics and the logs, which hold nothing anyone said.
 
-Claude runs with every tool disabled, no MCP servers and from an empty directory, so nothing said in the call can make it read or change anything on your computer. Its answers and summaries do count against your subscription's usage limits, and anyone in the server can use `/record`, `/meet` and `/recall`.
+Claude runs with every tool disabled, no MCP servers and from an empty directory, so nothing said in the call can make it read or change anything on your computer. The one exception is the model that looks things up, which can search the web and do nothing else: see [Looking things up](#looking-things-up). Claude's answers, summaries and lookups do count against your subscription's usage limits, and anyone in the server can use `/record`, `/meet` and `/recall`.
+
+### Looking things up
+
+Claude answers at once: the model that answers has no tools, so the call isn't kept waiting. Some questions can't be answered well that way: the latest version of something, tomorrow's weather, which of two services is cheaper. Claude hands those off. It says one short sentence, such as "Let me look into that.", and the question is looked up in the background while the call goes on.
+
+- **Who looks it up.** A second Claude Code process, with the model in `CLAUDE_LOOKUP_MODEL`, `sonnet` by default. It may think for as long as it takes, and consult the model in `CLAUDE_LOOKUP_ADVISOR`, `opus` by default, which it is told to do when the task is hard or a wrong answer would matter, and not for a simple lookup. Leave `CLAUDE_LOOKUP_ADVISOR` empty for no advisor.
+- **What it gets.** The whole transcript of the call so far, and the task Claude wrote for it. Of a transcript longer than 150,000 characters, it gets the end, and is told the beginning is missing. It never gets what the bot remembers about anyone.
+- **What it can do.** Search the web, and nothing else (`--tools WebSearch`). It can't fetch a page by its address, read or write files, run anything or use MCP servers. It runs from the same empty directory as the bot's other requests, and without the Claude Code settings, plugins and hooks of the user the bot runs as.
+- **When the answer arrives**, it is posted in the call's text channel, whole, under the question it answers, in several messages when it doesn't fit in one. It is added to the transcript as `Looked up for <name>: ...`, so the call's summary has it and later answers can build on it. Claude then tells the call what was found, in a few spoken sentences, which are spoken, posted and added to the transcript like any answer. That waits its turn like something said in the call does, so the bot never talks over one of its own answers.
+- The call goes on meanwhile: everyone is transcribed and answered as usual, also whoever asked.
+- One task is looked up at a time, and up to 3 more wait their turn, in the order they were handed off. When a fourth would wait, the bot says "I'm still looking into other things. Ask me again in a moment." in the place of Claude's sentence, and nothing is handed off.
+- A task that takes more than 5 minutes is given up. When something can't be looked up (it took too long, the usage limit is reached, Claude isn't logged in, ...), the bot posts that it couldn't, and why, and says "Sorry, I couldn't look that up." in the call.
+- When the call is over by the time the answer arrives, it is still posted in the text channel and added to the transcript, and nothing is spoken. A lookup that is running can't be stopped: `/stop` ends the call, not what is being looked up for it.
+- When whoever asked has opted out meanwhile (see [Opting out of being recorded](#opting-out-of-being-recorded)), the answer is dropped: it is not posted, spoken or added to the transcript. What they still had waiting is not looked up.
+- Only a line Claude itself writes at the end of its answer hands a question off. Someone saying "look up" does nothing by itself.
+
+> [!IMPORTANT]
+> Once something is looked up, what was said in the call, or written in the DM, is given to a model that searches the web, so its search queries can hold parts of it. What it finds comes from web pages: every prompt that gets it (answers, the summary, memories and `/recall`) says that it is never instructions.
+
+A lookup uses your Claude subscription like every answer does, and more of it: the model searches, reads and thinks. When it consults its advisor, it takes about three times as long and uses about four times as much, as measured when this was built.
 
 ### Opting out of being recorded
 
@@ -156,6 +176,19 @@ Send the bot a direct message, and Claude answers it there, in text, as your per
 - An answer that doesn't fit in one Discord message is split into several, never in the middle of a sentence.
 - When Claude can't answer (it isn't logged in, the usage limit is reached, ...), the bot replies with the reason.
 - Only text and [voice messages](#voice-messages-in-direct-messages) are read: a message with nothing but a picture or another attachment gets no answer. Messages in servers and messages from other bots are never answered.
+- What Claude can't answer well at once, it has looked up in the background, like in calls: see [Looking things up in direct messages](#looking-things-up-in-direct-messages).
+
+#### Looking things up in direct messages
+
+Claude answers a DM at once too, without tools. A question that needs current or checked information, or more careful work than a quick reply allows, is handed off and looked up as in calls (see [Looking things up](#looking-things-up)): by the same model, with the same advisor, with web search as its only tool, and with the same limits of one task at a time, 3 more waiting, and 5 minutes for each.
+
+- Claude's reply is one short sentence, such as "Let me look into that.". The bot shows it's typing while it looks something up, and the chat goes on meanwhile: your messages are answered as usual.
+- The model that looks it up gets the DM's last 100 messages and the task. It doesn't get what the bot remembers about you.
+- The answer is sent in the DM, whole, in several messages when it doesn't fit in one. Nothing else is said about it: in a DM the answer is the text.
+- From then on it is part of the DM: later answers see it among the DM's last 20 messages, and your memory is updated from it like from any answer, as `Looked up for <name>: ...`, once the conversation has paused for ten minutes after it arrived.
+- A [voice message](#voice-messages-in-direct-messages) that asks for something to be looked up works like a written one.
+- When something can't be looked up, the bot sends that it couldn't, and why.
+- When a fourth task would wait, the bot answers "I'm still looking into other things. Ask me again in a moment." and nothing is handed off.
 
 #### Voice messages in direct messages
 
@@ -173,7 +206,7 @@ From then on it is a message like one you typed: the same prompt, memory, order 
 
 **The memory** is a markdown note that Claude writes about each person, at `MEMORY_PATH/<user id>.md`. It holds what helps Claude help that person later: their projects, plans, decisions, preferences, open questions and the people they mention. Claude is told to leave out passwords, tokens and other secrets. The note stays under 4,000 characters, so it fits in every prompt: when it's full, Claude keeps what's most useful.
 
-The memory is updated when a conversation pauses. Ten minutes after your last message, one Claude request gets the current memory and what was said since its last update, and returns the new memory. If the bot stops before then, that update is lost.
+The memory is updated when a conversation pauses. Ten minutes after your last message, or after the last thing that was looked up for you arrived, one Claude request gets the current memory and what was said since its last update, and returns the new memory. If the bot stops before then, that update is lost.
 
 - `/memory` shows you what the bot remembers about you, and lists the groups you have a memory with (see [Memory in calls](#memory-in-calls)). `/share` lets the bot use it in a call for everyone there, until the call ends (see [Sharing your personal memory with a call](#sharing-your-personal-memory-with-a-call)).
 - `/forget` deletes it, together with what you said since its last update. The messages themselves stay in the DM, where the last 20 are still sent to Claude with your next message.
@@ -183,7 +216,7 @@ Both commands work in DMs and in servers, and only you see their replies.
 > [!IMPORTANT]
 > Memories are kept on the bot's machine, where anyone with access to the machine can read them. The files themselves can only be read by the user the bot runs as (mode 0600).
 
-Claude runs with the same restrictions as in calls: no tools, no MCP servers and an empty directory. Every DM answer and every memory update uses your Claude subscription, and anyone who shares a server with the bot can send it direct messages.
+Claude runs with the same restrictions as in calls: no tools, no MCP servers and an empty directory, except for the model that looks things up, which can search the web and do nothing else. Every DM answer, every lookup and every memory update uses your Claude subscription, and anyone who shares a server with the bot can send it direct messages.
 
 ### Memory in calls
 
@@ -296,6 +329,8 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 | `WHISPER_LANGUAGE` | `auto` | Language spoken in the call, e.g. `en` or `pt`, or `auto` to detect it. |
 | `CLAUDE_BINARY` | `claude` | Path to the Claude Code CLI. |
 | `CLAUDE_MODEL` | `haiku` | `haiku` answers fastest; `sonnet` or `opus` answer better, but slower. |
+| `CLAUDE_LOOKUP_MODEL` | `sonnet` | The model that looks things up in the background, with web search as its only tool: see [Looking things up](#looking-things-up). |
+| `CLAUDE_LOOKUP_ADVISOR` | `opus` | The model the one that looks things up can consult (Claude Code's `--advisor`). Leave it empty for no advisor: lookups are then faster and use less of your subscription. |
 | `PIPER_BINARY` | `piper` | Path to Piper. |
 | `PIPER_MODEL` | | Path to the Piper voice, e.g. `~/piper/voices/en_US-lessac-medium.onnx`. The other voices in its folder can be chosen with `/settings`. |
 | `FFMPEG_BINARY` | `ffmpeg` | Path to ffmpeg, which converts Piper's speech for Discord, and the voice messages sent in DMs for whisper.cpp. The voice library always uses the `ffmpeg` on your `PATH`. |
@@ -343,7 +378,7 @@ Anyone who can use slash commands can use `/recall`, and so ask about any call s
 
 Neither the logs nor the statistics contain what anyone said or what Claude answered: that is only in the call's `transcript.txt` and `summary.md`, and for direct messages in the DM itself and in the person's memory.
 
-**Logs** are printed to the console and written to `logs/<date>.log`, one JSON object per line. Each step of a call is logged with the server (`guild`), a `session` ID for the call, the `user` it concerns, and how long it took in milliseconds: the call starting, each new speaker, each utterance, its transcription, the bot starting to speak, Claude's answer, failures, the call ending with its totals, and its summary. A speaker who opted out is logged once, as `Skipping a speaker who opted out` with their user ID, and nothing else about them is. A speaker the voice library can't name is logged as `Not recording a speaker the voice client cannot name`, a warning, with their SSRC. Slash commands are logged with who used them, and where, and `/settings changed` with the settings that changed and their new values: settings aren't speech. `/recall answered` is logged with how long the answer took (`ms`), how many calls were sent to Claude (`calls`) and the answer's length (`characters`), never with the question or the answer. A meeting made with `/meet` is logged as `Meeting started` and `Meeting ended`, with the server (`guild`), its `channel`, how many people were `invited` and the `session` of its call, but not the channel's name, which holds people's names. Direct messages are logged as `Answered a DM`, with the `user`, how long the answer took and its length in characters, voice messages in them as `Transcribed a voice message`, with the `user`, the message's length in `seconds`, how long transcribing it took (`ms`) and the length of what was said (`characters`), never what was said, and memory updates as `Updated memory`, with the `user` and the memory's length. A memory updated from a call is logged as `Updated memory` too, with the `session`, how many `people` it belongs to and its length (`characters`), and one that can't be updated as the warning `Could not update the memory`. When old recordings are deleted, `Deleted old recordings` is logged with the number of `calls` deleted and the `days` they are kept for. A call's folder that can't be deleted is logged as a warning, and tried again an hour later. A `RECORDINGS_RETENTION_DAYS` that isn't a whole number of days is logged as a warning too, when the bot starts, and nothing is deleted. To search the log with [jq](https://jqlang.org/):
+**Logs** are printed to the console and written to `logs/<date>.log`, one JSON object per line. Each step of a call is logged with the server (`guild`), a `session` ID for the call, the `user` it concerns, and how long it took in milliseconds: the call starting, each new speaker, each utterance, its transcription, the bot starting to speak, Claude's answer, failures, the call ending with its totals, and its summary. A speaker who opted out is logged once, as `Skipping a speaker who opted out` with their user ID, and nothing else about them is. A speaker the voice library can't name is logged as `Not recording a speaker the voice client cannot name`, a warning, with their SSRC. Slash commands are logged with who used them, and where, and `/settings changed` with the settings that changed and their new values: settings aren't speech. `/recall answered` is logged with how long the answer took (`ms`), how many calls were sent to Claude (`calls`) and the answer's length (`characters`), never with the question or the answer. A meeting made with `/meet` is logged as `Meeting started` and `Meeting ended`, with the server (`guild`), its `channel`, how many people were `invited` and the `session` of its call, but not the channel's name, which holds people's names. Direct messages are logged as `Answered a DM`, with the `user`, how long the answer took and its length in characters, voice messages in them as `Transcribed a voice message`, with the `user`, the message's length in `seconds`, how long transcribing it took (`ms`) and the length of what was said (`characters`), never what was said, and memory updates as `Updated memory`, with the `user` and the memory's length. Something handed off to be looked up is logged as `Looking something up`, with the `user`, the call's `session` when it is in a call, the `model`, the `advisor` and the task's length (`characters`), and once it is there as `Looked something up`, with how long it took (`ms`) and the answer's length (`characters`), never with the task, the conversation or the answer. One that fails or is given up is logged as the warning `Could not look something up`, with why. A memory updated from a call is logged as `Updated memory` too, with the `session`, how many `people` it belongs to and its length (`characters`), and one that can't be updated as the warning `Could not update the memory`. When old recordings are deleted, `Deleted old recordings` is logged with the number of `calls` deleted and the `days` they are kept for. A call's folder that can't be deleted is logged as a warning, and tried again an hour later. A `RECORDINGS_RETENTION_DAYS` that isn't a whole number of days is logged as a warning too, when the bot starts, and nothing is deleted. To search the log with [jq](https://jqlang.org/):
 
 ```bash
 # Everything that happened in one call
@@ -356,7 +391,7 @@ jq 'select(.message == "Started speaking") | .context.ms' logs/*.log
 jq -c 'select(.level >= 300) | [.datetime, .message, .context]' logs/*.log
 ```
 
-**Statistics** are kept in `STATS_DATABASE`, one row per event in the `events` table: `call_started`, `call_ended` (with the call's length), `utterance` (with its length), `answered` (with the time from the end of the question to the answer being posted) and `failed` (something said couldn't be transcribed or answered, or the answer couldn't be spoken), each with the server, channel, user and session. `/stats` shows the server it is used in its totals: calls and minutes recorded, utterances and people speaking, questions answered and how long that took on average, and failures. Summaries, `/recall` and direct messages aren't counted. Only whoever used `/stats` sees them. To query the statistics yourself:
+**Statistics** are kept in `STATS_DATABASE`, one row per event in the `events` table: `call_started`, `call_ended` (with the call's length), `utterance` (with its length), `answered` (with the time from the end of the question to the answer being posted) and `failed` (something said couldn't be transcribed or answered, or the answer couldn't be spoken), each with the server, channel, user and session. `/stats` shows the server it is used in its totals: calls and minutes recorded, utterances and people speaking, questions answered and how long that took on average, and failures. Summaries, `/recall`, direct messages and what is looked up aren't counted; telling a call what was looked up is an answer, and counts as one, timed from when it was found. Only whoever used `/stats` sees them. To query the statistics yourself:
 
 ```bash
 sqlite3 databases/stats.sqlite "SELECT guild_id, COUNT(*) AS answers FROM events WHERE type = 'answered' GROUP BY guild_id"
