@@ -48,6 +48,48 @@ final class VoiceSessionTest extends TestCase
         yield 'an accent that belongs to the first word' => ["Jose\u{301} Maria, what time is it?", 'jose maria', false];
         yield 'a word that ends with a vowel sign' => ['राजा, समय क्या है?', 'राजा', true];
         yield 'only part of a word that goes on with a vowel sign' => ['राजा आ गया', 'राज', false];
+
+        // Several spellings, for what whisper writes when it mishears the wake word.
+        yield 'the first of several spellings' => ['Hey Claude, hi', 'claude, cloud, claud', true];
+        yield 'the second of several spellings' => ['Hey Cloud. Hi.', 'claude, cloud, claud', true];
+        yield 'the last of several spellings' => ['Claud, how are you?', 'claude, cloud, claud', true];
+        yield 'none of several spellings' => ['I applaud. Hi.', 'claude, cloud, claud', false];
+        yield 'a spelling inside another word' => ['It is cloudy today', 'claude, cloud', false];
+        yield 'a spelling that starts another word' => ['Cloudflare is down', 'claude, cloud', false];
+        yield 'a spelling that ends another word' => ['ICloud, how are you doing?', 'claude, cloud', false];
+        yield 'a phrase among the spellings, heard with a pause' => ['Okay, computer, hi', 'jarvis, okay computer', true];
+        yield 'the second spelling is a phrase too' => ['Hey, Jarvis', 'claude, hey jarvis', true];
+        yield 'spaces around the commas do not count' => ['Hey Cloud', 'claude ,  cloud', true];
+        yield 'no spaces after the commas' => ['Hey Cloud', 'claude,cloud', true];
+        yield 'an empty spelling is skipped, not a wake word that matches everything' => ['What time is it?', 'claude,, cloud,', false];
+        yield 'only commas leave no spelling: everything is answered' => ['What time is it?', ' , ,', true];
+        yield 'any case in the spellings' => ['hey cloud', 'Claude, CLOUD', true];
+    }
+
+    /**
+     * @param list<string> $expected
+     */
+    #[DataProvider('spellings')]
+    public function testSpellings(string $wakeWord, array $expected): void
+    {
+        $this->assertSame($expected, VoiceSession::spellings($wakeWord));
+        $this->assertSame($expected[0] ?? '', VoiceSession::wakeWordName($wakeWord), 'The first spelling is the name.');
+    }
+
+    /**
+     * @return iterable<string, array{string, list<string>}>
+     */
+    public static function spellings(): iterable
+    {
+        yield 'one' => ['claude', ['claude']];
+        yield 'several' => ['claude, cloud, claud', ['claude', 'cloud', 'claud']];
+        yield 'spaces around the commas' => ['  claude ,cloud  ,   claud ', ['claude', 'cloud', 'claud']];
+        yield 'a phrase keeps its inner spaces' => ['okay computer, hey jarvis', ['okay computer', 'hey jarvis']];
+        yield 'empty spellings' => [',claude,, ,cloud,', ['claude', 'cloud']];
+        yield 'a repeated spelling, in any case, counts once and keeps its first case' => ['Claude, cloud, CLAUDE, Cloud', ['Claude', 'cloud']];
+        yield 'a repeated accented spelling' => ['José, JOSÉ', ['José']];
+        yield 'empty' => ['', []];
+        yield 'only commas and spaces' => [' , , ', []];
     }
 
     /**

@@ -60,6 +60,35 @@ final class TranscriberTest extends TestCase
         unlink($log);
     }
 
+    public function testPassesTheWhisperPromptToWhisper(): void
+    {
+        $log = tempnam(sys_get_temp_dir(), 'fake-whisper-pr23-');
+        putenv("FAKE_WHISPER_LOG={$log}");
+
+        $transcriber = new Transcriber(__DIR__ . '/../../Fixtures/fake-whisper', '/models/ggml-base.bin', 'en', 'A voice call with the assistant Claude.');
+        await($transcriber->transcribe('/recordings/utterance-1.wav'));
+
+        $this->assertSame(
+            "arg=--model\narg=/models/ggml-base.bin\narg=--language\narg=en\narg=--prompt\narg=A voice call with the assistant Claude.\narg=--no-timestamps\narg=--no-prints\narg=--file\narg=/recordings/utterance-1.wav\n",
+            file_get_contents($log),
+        );
+
+        putenv('FAKE_WHISPER_LOG');
+        unlink($log);
+    }
+
+    public function testReadsThePromptFromTheEnvironment(): void
+    {
+        putenv('WHISPER_PROMPT=  Hey Claude.  ');
+        $this->assertSame('Hey Claude.', Transcriber::fromEnv()->prompt);
+
+        putenv('WHISPER_PROMPT=');
+        $this->assertSame('', Transcriber::fromEnv()->prompt, 'Empty means no prompt.');
+
+        putenv('WHISPER_PROMPT');
+        $this->assertSame('', Transcriber::fromEnv()->prompt, 'So does not setting it.');
+    }
+
     #[DataProvider('outputs')]
     public function testClean(string $output, string $expected): void
     {

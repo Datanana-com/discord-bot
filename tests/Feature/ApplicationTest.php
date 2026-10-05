@@ -270,7 +270,7 @@ final class ApplicationTest extends TestCase
             $settings['options'][3]['choices'],
         );
         $this->assertSame('32', $settings['default_member_permissions']);
-        $this->assertSame(32, $settings['options'][0]['max_length'], 'Discord stops a wake word that is too long from being typed.');
+        $this->assertSame(200, $settings['options'][0]['max_length'], 'Discord stops a wake word that is too long from being typed: five spellings of 32, with their commas.');
 
         // /memory and /forget take up to four other people, to pick the memory shared with them.
         foreach (['memory', 'forget'] as $command) {
