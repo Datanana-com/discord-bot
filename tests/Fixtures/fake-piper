@@ -1,14 +1,35 @@
 #!/bin/sh
-# Stands in for piper: logs its arguments, and writes the text it receives on stdin to the --output_file path.
-# It fails on a text that contains FAKE_PIPER_FAILS_ON, and takes FAKE_PIPER_DELAY seconds.
+# Stands in for piper started with --output-dir, which keeps it running: it logs its arguments, then writes each
+# line it reads on stdin to a file of its own in that folder, and says "INFO:__main__:Wrote <path>" on stderr
+# once the file is complete, like Piper. It ends when its stdin is closed.
+# Like Piper too, it says nothing at all about a line that holds nothing but whitespace, no-break spaces included.
+# Of a line that contains FAKE_PIPER_WARNS_ON it first says, on stderr, that it can't say all of it, quoting it,
+# as Piper does with the characters it has no sound for.
+# It takes FAKE_PIPER_DELAY seconds for a line, and fails on one that contains FAKE_PIPER_FAILS_ON: it then
+# ends with code 1, and leaves the file it had started. Its PID is appended to FAKE_PIPER_RUNNING when it starts.
+# A test may set these variables after it started: it reads them again from the file FAKE_ENV, when there is
+# one, for every line.
 for arg in "$@"; do printf 'arg=%s\n' "$arg"; done > "${FAKE_PIPER_LOG:-/dev/null}"
 while [ $# -gt 0 ]; do
-    if [ "$1" = "--output_file" ]; then out="$2"; fi
+    if [ "$1" = "--output-dir" ]; then dir="$2"; fi
     shift
 done
-cat > "$out"
-sleep "${FAKE_PIPER_DELAY:-0}"
-if [ -n "${FAKE_PIPER_FAILS_ON:-}" ] && grep -qF "$FAKE_PIPER_FAILS_ON" "$out"; then
-    echo "The voice model could not be loaded." >&2
-    exit 1
-fi
+if [ -n "${FAKE_PIPER_RUNNING:-}" ]; then printf '%s\n' "$$" >> "$FAKE_PIPER_RUNNING"; fi
+mkdir -p "$dir"
+n=0
+while IFS= read -r line; do
+    if [ -z "$(printf '%s' "$line" | sed 's/\xc2\xa0//g' | tr -d '[:space:]')" ]; then continue; fi
+    if [ -r "${FAKE_ENV:-}" ]; then . "$FAKE_ENV"; fi
+    n=$((n + 1))
+    out="$dir/$$-$n.wav"
+    printf '%s' "$line" > "$out"
+    if [ -n "${FAKE_PIPER_WARNS_ON:-}" ] && grep -qF "$FAKE_PIPER_WARNS_ON" "$out"; then
+        echo "WARNING:piper.phoneme_ids:Missing phoneme from id map in: $line" >&2
+    fi
+    sleep "${FAKE_PIPER_DELAY:-0}"
+    if [ -n "${FAKE_PIPER_FAILS_ON:-}" ] && grep -qF "$FAKE_PIPER_FAILS_ON" "$out"; then
+        echo "The voice model could not be loaded." >&2
+        exit 1
+    fi
+    echo "INFO:__main__:Wrote $out" >&2
+done

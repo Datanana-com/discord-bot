@@ -15,7 +15,26 @@ final class TranscriberTest extends TestCase
 {
     protected function tearDown(): void
     {
-        unset($_ENV['WHISPER_LANGUAGE'], $_ENV['WHISPER_PROMPT']);
+        unset($_ENV['WHISPER_LANGUAGE'], $_ENV['WHISPER_PROMPT'], $_ENV['WHISPER_THREADS']);
+    }
+
+    public function testUsesAsManyThreadsAsEnvSays(): void
+    {
+        // Left to whisper: 4, or as many as the CPU has when that is fewer.
+        $this->assertNull(Transcriber::fromEnv()->threads);
+
+        $_ENV['WHISPER_THREADS'] = '8';
+        $this->assertSame(8, Transcriber::fromEnv()->threads);
+        $this->assertSame(8, Transcriber::fromEnv('pt')->threads, 'Whatever language a server speaks.');
+
+        $_ENV['WHISPER_THREADS'] = '1';
+        $this->assertSame(1, Transcriber::fromEnv()->threads);
+
+        // whisper would refuse anything but a whole number of threads, 1 or more, for every utterance.
+        foreach (['0', '-2', 'many', '2.5', ''] as $threads) {
+            $_ENV['WHISPER_THREADS'] = $threads;
+            $this->assertNull(Transcriber::fromEnv()->threads, "WHISPER_THREADS={$threads}");
+        }
     }
 
     public function testAServersLanguageReplacesTheOneInEnv(): void
@@ -55,7 +74,14 @@ final class TranscriberTest extends TestCase
         $this->assertSame(
             "arg=--model\narg=/models/ggml-base.bin\narg=--language\narg=auto\narg=--no-timestamps\narg=--no-prints\narg=--file\narg=/recordings/utterance-1.wav\n",
             file_get_contents($log),
+            'Without a number of threads, whisper is not told one: it takes as many as it does by itself.',
         );
+
+        // More threads transcribe faster, up to what the CPU has.
+        $transcriber = new Transcriber(__DIR__ . '/../../Fixtures/fake-whisper', '/models/ggml-base.bin', 'en', threads: 8);
+        await($transcriber->transcribe('/recordings/utterance-2.wav'));
+
+        $this->assertStringContainsString("arg=--language\narg=en\narg=--threads\narg=8\n", file_get_contents($log));
 
         putenv('FAKE_WHISPER_LOG');
         unlink($log);

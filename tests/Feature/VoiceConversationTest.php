@@ -27,8 +27,7 @@ final class VoiceConversationTest extends VoiceTestCase
         );
 
         // Claude got the conversation so far and knows who is talking to it.
-        $claudeCall = file_get_contents($this->claudeLog);
-        $this->assertStringContainsString("Alice: Hey Claude, what time is it?\n\nAlice is talking to you.", $claudeCall);
+        $this->assertStringContainsString("Alice: Hey Claude, what time is it?\n\nAlice is talking to you.", $this->claudeCalls()[0]['prompt']);
 
         // The answer is posted in the text chat and spoken into the call.
         $this->assertSame(["> **Alice:** Hey Claude, what time is it?\nIt is a quarter past four."], $this->sent);

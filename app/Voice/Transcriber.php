@@ -32,12 +32,17 @@ final readonly class Transcriber
     /** How long whisper.cpp may take at least, whatever the length of the audio: it has to load its model first. */
     public const float MINIMUM_TIMEOUT = 120.0;
 
+    /**
+     * @param int|null $threads How many threads whisper uses, or null for as many as it takes by itself: 4, or
+     *                          as many as the CPU has when that is fewer.
+     */
     public function __construct(
         public string $binary,
         public string $model,
         public string $language,
         public string $prompt = '',
         public float $minimumTimeout = self::MINIMUM_TIMEOUT,
+        public ?int $threads = null,
     ) {
     }
 
@@ -46,11 +51,15 @@ final readonly class Transcriber
      */
     public static function fromEnv(?string $language = null): self
     {
+        // Anything but a whole number of threads, 1 or more, leaves it to whisper.
+        $threads = filter_var(env('WHISPER_THREADS', ''), FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+
         return new self(
             env('WHISPER_BINARY', 'whisper-cli'),
             env('WHISPER_MODEL', ''),
             $language ?? env('WHISPER_LANGUAGE', 'auto'),
             trim(env('WHISPER_PROMPT', '')),
+            threads: $threads === false ? null : $threads,
         );
     }
 
@@ -68,6 +77,7 @@ final readonly class Transcriber
             $this->binary,
             '--model', $this->model,
             '--language', $this->language,
+            ...($this->threads === null ? [] : ['--threads', (string) $this->threads]),
             ...($this->prompt === '' ? [] : ['--prompt', $this->prompt]),
             '--no-timestamps',
             '--no-prints',

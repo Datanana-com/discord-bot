@@ -4,10 +4,8 @@ declare(strict_types=1);
 
 namespace App\Voice;
 
-use App\Support\CommandFailedException;
 use App\Support\Shell;
 use React\Promise\PromiseInterface;
-use RuntimeException;
 
 /**
  * Asks Claude through the Claude Code CLI, so replies use the Claude subscription
@@ -97,96 +95,111 @@ final readonly class Claude
      * @param string $systemPrompt What Claude is asked to do; by default, to answer in a voice call.
      * @param (callable(string $text): void)|null $onText Called with each piece of the answer while Claude is
      *                                                    writing it. Together, the pieces are the whole answer.
+     * @param bool $thinks Whether Claude may think before it answers. In a call it doesn't: thinking takes
+     *                     seconds before the first word of a one-line answer.
      * @return PromiseInterface<string> Claude's answer.
      */
-    public function ask(string $prompt, string $systemPrompt = self::SYSTEM_PROMPT, ?callable $onText = null): PromiseInterface
+    public function ask(string $prompt, string $systemPrompt = self::SYSTEM_PROMPT, ?callable $onText = null, bool $thinks = true): PromiseInterface
     {
-        // An empty directory keeps Claude Code from picking up a CLAUDE.md or project settings.
-        if (! is_dir($this->workingDirectory)) {
-            mkdir($this->workingDirectory, 0700, true);
-        }
+        $answer = new ClaudeAnswer($onText === null ? null : $onText(...));
 
+        return $answer->after(Shell::stream(
+            $this->command($systemPrompt),
+            $answer->read(...),
+            $prompt,
+            $this->directory(),
+            $this->environment($thinks),
+            $this->timeout,
+        ));
+    }
+
+    /**
+     * Starts a Claude Code process that waits for its prompt, so that asking it doesn't wait for Claude Code
+     * to start. It is run like one that ask() starts, and answers one prompt.
+     *
+     * @param string $systemPrompt What Claude is asked to do; by default, to answer in a voice call.
+     * @param bool $thinks Whether Claude may think before it answers.
+     */
+    public function wait(string $systemPrompt = self::SYSTEM_PROMPT, bool $thinks = true): WaitingClaude
+    {
+        return new WaitingClaude(
+            [...$this->command($systemPrompt), '--input-format', 'stream-json'],
+            $this->directory(),
+            $this->environment($thinks),
+        );
+    }
+
+    /**
+     * The command that starts Claude Code to answer one prompt, which it reads from its stdin.
+     *
+     * @return list<string>
+     */
+    private function command(string $systemPrompt): array
+    {
+        return [
+            $this->binary,
+            '--print',
+            // One JSON event per line while Claude answers. --print only streams with --verbose,
+            // and only sends the text while it is being written with --include-partial-messages.
+            '--output-format', 'stream-json',
+            '--verbose',
+            '--include-partial-messages',
+            '--model', $this->model,
+            ...($this->advisor === '' ? [] : ['--advisor', $this->advisor]),
+            '--system-prompt', $systemPrompt,
+            // The prompt is built from whatever anyone says in the call,
+            // so Claude gets no tools and no MCP servers on this machine.
+            '--tools', $this->searchesTheWeb ? 'WebSearch' : '',
+            // To look something up, it gets web search and nothing else. A search only takes a query: it can't
+            // fetch a page by its address, read or write files, or run anything. Claude Code asks before it
+            // searches unless that is allowed, and nobody is there to ask.
+            ...($this->searchesTheWeb ? ['--allowedTools', 'WebSearch'] : []),
+            '--strict-mcp-config',
+            '--no-session-persistence',
+            // Nor the settings of the user the bot runs as: their plugins, skills and hooks would be loaded
+            // for every prompt, which takes seconds, and a plugin can change how Claude answers.
+            '--setting-sources', '',
+        ];
+    }
+
+    /**
+     * The environment Claude Code runs in.
+     *
+     * @return array<string, string>
+     */
+    private function environment(bool $thinks): array
+    {
         // ANTHROPIC_API_KEY takes precedence over the subscription login, so it is never passed on.
         $env = getenv();
         unset($env['ANTHROPIC_API_KEY']);
 
-        $result = null;
-        $streamed = false;
+        // Claude Code is ready sooner when it doesn't look for updates, nor sends what it can do without.
+        $env['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'] = '1';
+        $env['DISABLE_AUTOUPDATER'] = '1';
 
-        return Shell::stream(
-            [
-                $this->binary,
-                '--print',
-                // One JSON event per line while Claude answers. --print only streams with --verbose,
-                // and only sends the text while it is being written with --include-partial-messages.
-                '--output-format', 'stream-json',
-                '--verbose',
-                '--include-partial-messages',
-                '--model', $this->model,
-                ...($this->advisor === '' ? [] : ['--advisor', $this->advisor]),
-                '--system-prompt', $systemPrompt,
-                // The prompt is built from whatever anyone says in the call,
-                // so Claude gets no tools and no MCP servers on this machine.
-                '--tools', $this->searchesTheWeb ? 'WebSearch' : '',
-                // To look something up, it gets web search and nothing else. A search only takes a query: it can't
-                // fetch a page by its address, read or write files, or run anything. Claude Code asks before it
-                // searches unless that is allowed, and what it searches for must not depend on the settings,
-                // plugins and hooks of whoever runs the bot, so those aren't loaded.
-                ...($this->searchesTheWeb ? ['--allowedTools', 'WebSearch', '--setting-sources', ''] : []),
-                '--strict-mcp-config',
-                '--no-session-persistence',
-            ],
-            // Most events are about the session, hooks, rate limits or Claude's thinking: only two matter here.
-            function (string $line) use (&$result, &$streamed, $onText) {
-                $event = json_decode($line, true);
-                $type = is_array($event) ? $event['type'] ?? null : null;
+        // Without that traffic, Claude Code 2.1.289 offers no advisor, whatever --advisor says, and searches
+        // the web another way. Looking something up takes long anyway, so it does without the faster start,
+        // also when the bot itself was started with that variable.
+        if ($this->searchesTheWeb) {
+            unset($env['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC']);
+        }
 
-                if ($type === 'result') {
-                    $result = $event;
-                } elseif ($onText !== null && $type === 'stream_event' && ($event['event']['delta']['type'] ?? null) === 'text_delta') {
-                    $streamed = true;
-                    $onText($event['event']['delta']['text']);
-                }
-            },
-            $prompt,
-            $this->workingDirectory,
-            $env,
-            $this->timeout,
-        )->then(function () use (&$result, &$streamed, $onText) {
-            $answer = self::answer($result);
+        if (! $thinks) {
+            $env['MAX_THINKING_TOKENS'] = '0';
+        }
 
-            // A Claude Code that doesn't send the text while it is written still hands over its answer.
-            if ($onText !== null && ! $streamed) {
-                $onText($answer);
-            }
-
-            return $answer;
-        })->catch(function (CommandFailedException $e) use (&$result) {
-            // Claude Code exits with code 1 on errors (not logged in, usage limit reached, ...)
-            // and explains why in its result. A result that isn't an error is the answer, which
-            // must not end up in the logs, e.g. when Claude Code hangs after giving it.
-            throw is_string($result['result'] ?? null) && ($result['is_error'] ?? false) === true
-                ? new RuntimeException('Claude Code: ' . $result['result'])
-                : $e;
-        });
+        return $env;
     }
 
     /**
-     * Extracts the answer from the `result` event, the last one Claude Code prints.
-     *
-     * @param array<string, mixed>|null $result
+     * The directory Claude Code runs in: an empty one keeps it from picking up a CLAUDE.md or project settings.
      */
-    private static function answer(?array $result): string
+    private function directory(): string
     {
-        // Without quoting the output: it may hold the answer, and this message is logged.
-        if (! is_string($result['result'] ?? null)) {
-            throw new RuntimeException('Unexpected output from Claude Code: no result.');
+        if (! is_dir($this->workingDirectory)) {
+            mkdir($this->workingDirectory, 0700, true);
         }
 
-        if ($result['is_error'] ?? false) {
-            throw new RuntimeException('Claude Code: ' . $result['result']);
-        }
-
-        return trim($result['result']);
+        return $this->workingDirectory;
     }
 }

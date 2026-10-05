@@ -66,6 +66,12 @@ abstract class VoiceTestCase extends TestCase
     /** Every time Claude's stand-in ran, one after the other: see {@see claudeCalls()}. */
     protected string $claudeCalls;
 
+    /** The PID of every stand-in of Claude that was started to wait for a question: see {@see waitingClaudes()}. */
+    protected string $claudeWaiting;
+
+    /** The PID of every stand-in of Piper that was started: see {@see pipers()}. */
+    protected string $piperRunning;
+
     /** While this file exists, Claude's stand-in doesn't answer when it is asked for a new memory. */
     protected string $claudeHold;
 
@@ -88,6 +94,9 @@ abstract class VoiceTestCase extends TestCase
     /** @var list<string> Files played into the call. */
     protected array $played = [];
 
+    /** @var list<string> The files among them that were being played when the voice client was told to stop. */
+    protected array $cutOff = [];
+
     /** When set, posting in the text channel fails with this error. */
     protected ?\Throwable $sendError = null;
 
@@ -106,6 +115,9 @@ abstract class VoiceTestCase extends TestCase
     /** @var array<string, string|false> */
     private array $originalEnv = [];
 
+    /** @var array<string, string|false> */
+    private array $originalProcessEnv = [];
+
     protected function setUp(): void
     {
         $fixtures = dirname(__DIR__) . '/Fixtures';
@@ -116,6 +128,8 @@ abstract class VoiceTestCase extends TestCase
         $this->claudeLog = "{$this->recordings}/claude.log";
         $this->claudeResume = "{$this->recordings}/claude.resume";
         $this->claudeCalls = "{$this->recordings}/claude.calls";
+        $this->claudeWaiting = "{$this->recordings}/claude.waiting";
+        $this->piperRunning = "{$this->recordings}/piper.running";
         $this->claudeHold = "{$this->recordings}/claude.hold";
         $this->whisperHold = "{$this->recordings}/whisper.hold";
         $this->memories = "{$this->recordings}/memories";
@@ -134,12 +148,15 @@ abstract class VoiceTestCase extends TestCase
             'FFMPEG_BINARY' => "{$fixtures}/fake-ffmpeg",
         ]);
         $this->setProcessEnv([
+            'FAKE_ENV' => "{$this->recordings}/fake.env",
             'FAKE_CLAUDE_LOG' => $this->claudeLog,
             'FAKE_CLAUDE_CALLS' => $this->claudeCalls,
+            'FAKE_CLAUDE_WAITING' => $this->claudeWaiting,
             'FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is a quarter', ' past four.'),
             'FAKE_CLAUDE_EXIT' => '0',
             'FAKE_CLAUDE_PAUSE' => '0',
             'FAKE_CLAUDE_RESUME' => $this->claudeResume,
+            'FAKE_PIPER_RUNNING' => $this->piperRunning,
             'FAKE_CLAUDE_HOLD' => $this->claudeHold,
             'FAKE_WHISPER_OUTPUT' => 'Hey Claude, what time is it?',
             'FAKE_WHISPER_HOLD' => $this->whisperHold,
@@ -169,10 +186,12 @@ abstract class VoiceTestCase extends TestCase
         // A call a test left starting, as when the bot never got to join, is not starting in the next test.
         (new ReflectionProperty(VoiceSession::class, 'starting'))->setValue(null, []);
 
+        foreach ($this->originalProcessEnv as $name => $value) {
+            putenv($value === false ? $name : "{$name}={$value}");
+        }
+
         foreach ($this->originalEnv as $name => $value) {
-            if (str_starts_with($name, 'FAKE_')) {
-                putenv($value === false ? $name : "{$name}={$value}");
-            } elseif ($value === false) {
+            if ($value === false) {
                 unset($_ENV[$name]);
             } else {
                 $_ENV[$name] = $value;
@@ -211,9 +230,17 @@ abstract class VoiceTestCase extends TestCase
     protected function setProcessEnv(array $values): void
     {
         foreach ($values as $name => $value) {
-            $this->originalEnv[$name] ??= getenv($name);
+            $this->originalProcessEnv[$name] ??= getenv($name);
             putenv("{$name}={$value}");
         }
+
+        // A program that keeps running, like the Claude Code process that waits for a question, has the environment
+        // it was started with. The fake ones read from this file what a test sets after they started.
+        $set = array_filter(array_keys($this->originalProcessEnv), fn (string $name) => str_starts_with($name, 'FAKE_'));
+        file_put_contents("{$this->recordings}/fake.env", implode('', array_map(
+            fn (string $name) => sprintf("%s='%s'\n", $name, str_replace("'", "'\\''", getenv($name))),
+            $set,
+        )));
     }
 
     /**
@@ -329,8 +356,10 @@ abstract class VoiceTestCase extends TestCase
     }
 
     /**
-     * @return list<array{prompt: string, system: string}> What Claude Code was given each time it ran:
-     *                                                       the prompt on its standard input, and the system prompt on one line.
+     * @return list<array{prompt: string, system: string, thinking: string, arguments: string, waited: bool, pid: int}>
+     *         What Claude Code was given each time it was asked: the prompt, the system prompt on one line,
+     *         MAX_THINKING_TOKENS in its environment ("unset" without it), and its arguments, one per line. Also
+     *         whether the process had been waiting for its prompt, or was started with it, and the process's ID.
      */
     protected function claudeCalls(): array
     {
@@ -343,10 +372,46 @@ abstract class VoiceTestCase extends TestCase
         foreach (array_slice(explode("=== call ===\n", file_get_contents($this->claudeCalls)), 1) as $call) {
             preg_match('/^stdin=(.*)\n\z/ms', $call, $prompt);
             preg_match('/^arg=--system-prompt\narg=(.*?)\narg=--tools$/ms', $call, $system);
-            $calls[] = ['prompt' => $prompt[1] ?? '', 'system' => preg_replace('/\s+/', ' ', $system[1] ?? '')];
+            preg_match('/^thinking=(.*)$/m', $call, $thinking);
+            preg_match('/^arg=.*(?=^stdin=)/ms', $call, $arguments);
+            preg_match('/^pid=(\d+)$/m', $call, $pid);
+            // A process that waits gets its prompt as a message, a JSON object on one line.
+            $waited = str_contains($arguments[0] ?? '', "arg=--input-format\narg=stream-json\n");
+            $calls[] = [
+                'prompt' => $waited ? json_decode($prompt[1] ?? '', true)['message']['content'] ?? '' : $prompt[1] ?? '',
+                'system' => preg_replace('/\s+/', ' ', $system[1] ?? ''),
+                'thinking' => $thinking[1] ?? '',
+                'arguments' => $arguments[0] ?? '',
+                'waited' => $waited,
+                'pid' => (int) ($pid[1] ?? 0),
+            ];
         }
 
         return $calls;
+    }
+
+    /**
+     * @return list<int> The process ID of every Claude Code that was started to wait for a question, oldest first.
+     */
+    protected function waitingClaudes(): array
+    {
+        return is_file($this->claudeWaiting) ? array_map(intval(...), file($this->claudeWaiting, FILE_IGNORE_NEW_LINES)) : [];
+    }
+
+    /**
+     * @return list<int> The process ID of every Piper that was started, oldest first.
+     */
+    protected function pipers(): array
+    {
+        return is_file($this->piperRunning) ? array_map(intval(...), file($this->piperRunning, FILE_IGNORE_NEW_LINES)) : [];
+    }
+
+    /**
+     * Whether a process is still there: running, or ended without the bot having noticed.
+     */
+    protected function isRunning(int $pid): bool
+    {
+        return posix_kill($pid, 0);
     }
 
     /**
@@ -400,7 +465,7 @@ abstract class VoiceTestCase extends TestCase
      */
     protected function voiceClient(Channel $channel, bool $connected = false, bool $findsReceiveStreams = true): VoiceClient
     {
-        $methods = ['createDecoder', 'playFile', 'isReady', 'close', ...($findsReceiveStreams ? [] : ['getReceiveStream'])];
+        $methods = ['createDecoder', 'playFile', 'stop', 'isReady', 'close', ...($findsReceiveStreams ? [] : ['getReceiveStream'])];
 
         if ($connected) {
             $vc = $this->getMockBuilder(VoiceClient::class)->disableOriginalConstructor()->onlyMethods($methods)->getMock();
@@ -424,19 +489,39 @@ abstract class VoiceTestCase extends TestCase
             $vc->method('getReceiveStream')->willReturn(null);
         }
 
-        $busy = false;
-        $vc->method('playFile')->willReturnCallback(function (string $file) use (&$busy): PromiseInterface {
+        // The file being played, when one is, and what is resolved when it has been.
+        $busy = $finished = null;
+        $vc->method('playFile')->willReturnCallback(function (string $file) use (&$busy, &$finished): PromiseInterface {
             // Like the voice library, which plays one file at a time.
-            if ($busy) {
+            if ($busy !== null) {
                 return reject(new AudioAlreadyPlayingException());
             }
 
-            $busy = true;
+            $busy = $file;
             $this->played[] = $file;
+            $played = $finished = new Deferred();
 
-            return ($this->playing ?? $this->after($this->playSeconds))->then(function () use (&$busy) {
-                $busy = false;
+            ($this->playing ?? $this->after($this->playSeconds))->then(function () use (&$busy, $file, $played) {
+                // Like the voice library, which never says a file finished once it was told to stop playing it.
+                if ($busy === $file) {
+                    $busy = null;
+                    $played->resolve(null);
+                }
             });
+
+            return $played->promise();
+        });
+        $vc->method('stop')->willReturnCallback(function () use (&$busy, &$finished): void {
+            // Like the voice library.
+            if ($busy === null) {
+                throw new \RuntimeException('Audio must be playing to stop it.');
+            }
+
+            $this->cutOff[] = $busy;
+            $busy = null;
+            // Like the voice library when it is stopped before it has read the start of the file: mostly it
+            // never says anything more about the file, but then it says that playing it failed.
+            $finished->reject(new \RuntimeException('Buffer closed'));
         });
         // The ffmpeg decoder process is not needed: PCM comes from the Opus decoder below.
         $vc->method('createDecoder')->willReturnCallback(function (object $ss) use ($vc): void {

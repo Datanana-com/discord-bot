@@ -47,7 +47,7 @@ final class VoiceLookupGivenUpTest extends VoiceTestCase
     protected function waitUntil(callable $condition, string $what, float $timeout = 10.0): void
     {
         parent::waitUntil(function () use ($condition) {
-            $this->timers->elapse(0.25);
+            $this->timers->elapse(0.05);
 
             return $condition();
         }, $what, $timeout);

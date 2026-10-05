@@ -8,14 +8,41 @@
 # waits for as long as the file FAKE_CLAUDE_HOLD exists, for 10 seconds at most.
 # A call to look something up prints FAKE_CLAUDE_OUTPUT_LOOKUP, when it is set, instead. When FAKE_CLAUDE_LOOKUP_GO
 # is set, it first waits until that file exists, and deletes it: each time the file is made, one lookup goes on.
+#
+# With --input-format stream-json it waits for its prompt, like Claude Code then does: it prints and logs
+# nothing until a line arrives on its stdin, answers it, and ends once its stdin is closed. Its PID is
+# appended to FAKE_CLAUDE_WAITING when it starts. With FAKE_CLAUDE_WAITING_LEAVES it ends at once instead
+# of waiting, and with FAKE_CLAUDE_WAITING_FAILS it ends with code 1 when its prompt arrives, having
+# printed nothing. With FAKE_CLAUDE_WAITING_GREETS it prints that line when it starts, as a Claude Code that
+# says something about its session before it is asked anything would. A test may set these variables after
+# the process started: it reads them again from the file FAKE_ENV, when there is one, once its prompt is there.
+waits=
+for arg in "$@"; do
+    if [ "$arg" = --input-format ]; then waits=1; fi
+done
+if [ -n "$waits" ]; then
+    if [ -n "${FAKE_CLAUDE_WAITING:-}" ]; then printf '%s\n' "$$" >> "$FAKE_CLAUDE_WAITING"; fi
+    if [ -n "${FAKE_CLAUDE_WAITING_LEAVES:-}" ]; then exit 0; fi
+    if [ -n "${FAKE_CLAUDE_WAITING_GREETS:-}" ]; then printf '%s\n' "$FAKE_CLAUDE_WAITING_GREETS"; fi
+    # Without a prompt, Claude Code ends quietly once its stdin is closed.
+    IFS= read -r input || exit 0
+    if [ -r "${FAKE_ENV:-}" ]; then . "$FAKE_ENV"; fi
+    if [ -n "${FAKE_CLAUDE_WAITING_FAILS:-}" ]; then exit 1; fi
+else
+    input=$(cat)
+fi
 # Written to a file of its own first: a lookup and an answer can start at the same moment.
 call=$(mktemp)
 {
     printf '=== call ===\n'
+    printf 'pid=%s\n' "$$"
     printf 'cwd=%s\n' "$PWD"
     printf 'api_key=%s\n' "${ANTHROPIC_API_KEY-unset}"
+    printf 'thinking=%s\n' "${MAX_THINKING_TOKENS-unset}"
+    printf 'nonessential_traffic=%s\n' "${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC-unset}"
+    printf 'autoupdater=%s\n' "${DISABLE_AUTOUPDATER-unset}"
     for arg in "$@"; do printf 'arg=%s\n' "$arg"; done
-    printf 'stdin=%s\n' "$(cat)"
+    printf 'stdin=%s\n' "$input"
 } > "$call"
 tail -n +2 "$call" > "${FAKE_CLAUDE_LOG:-/dev/null}"
 if [ -n "${FAKE_CLAUDE_CALLS:-}" ]; then
@@ -36,18 +63,16 @@ for arg in "$@"; do
             done
             ;;
         esac
-    fi
-    if [ "$previous" = --system-prompt ]; then
         case "$arg" in "You look things up"*) lookup=1; output=${FAKE_CLAUDE_OUTPUT_LOOKUP:-$output} ;; esac
     fi
     previous=$arg
 done
 if [ -n "$lookup" ] && [ -n "${FAKE_CLAUDE_LOOKUP_GO:-}" ]; then
     # At most 30 seconds, so a test that never lets it go on doesn't leave it running.
-    waits=600
-    while [ ! -e "$FAKE_CLAUDE_LOOKUP_GO" ] && [ "$waits" -gt 0 ]; do
+    held=600
+    while [ ! -e "$FAKE_CLAUDE_LOOKUP_GO" ] && [ "$held" -gt 0 ]; do
         sleep 0.05
-        waits=$((waits - 1))
+        held=$((held - 1))
     done
     rm -f "$FAKE_CLAUDE_LOOKUP_GO"
 fi
@@ -61,4 +86,6 @@ printf '%s' "$output" | while IFS= read -r line || [ -n "$line" ]; do
     done
     ticks=0
 done
+# Claude Code keeps reading messages until its stdin is closed.
+if [ -n "$waits" ]; then cat > /dev/null; fi
 exit "${FAKE_CLAUDE_EXIT:-0}"
