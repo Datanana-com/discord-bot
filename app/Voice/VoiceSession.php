@@ -26,9 +26,9 @@ use function React\Promise\resolve;
  * Records a voice channel and lets the people in it talk to Claude.
  *
  * Every speaker is recorded to their own WAV file. Meanwhile each utterance is transcribed
- * with whisper.cpp, and when it mentions the wake word, Claude's answer is posted in the
- * text channel and spoken back into the call with Piper. When the call ends, Claude's summary
- * of it is posted in the text channel as well.
+ * with whisper.cpp, and when it mentions the wake word, Claude's answer is spoken back into
+ * the call with Piper, sentence by sentence while Claude is writing it, and then posted in the
+ * text channel. When the call ends, Claude's summary of it is posted in the text channel as well.
  *
  * Nothing is kept of people who opted out with /optout: they aren't recorded, transcribed or
  * answered. The voice client still receives and decodes their audio, like everyone's.
@@ -448,45 +448,68 @@ final class VoiceSession
                     return null;
                 }
 
-                $asking = microtime(true);
-
-                return $this->claude->ask($this->prompt($name))->then(
-                    function (string $answer) use ($userId, $name, $text, $endedAt, $asking) {
-                        $this->log('info', 'Claude answered', ['user' => $userId, 'ms' => $this->msSince($asking), 'characters' => mb_strlen($answer)]);
-
-                        return $this->reply($userId, $name, $text, $answer, $endedAt);
-                    },
-                    function (Throwable $e) {
-                        $this->post("Sorry, I couldn't get an answer from Claude. ({$e->getMessage()})");
-
-                        throw $e;
-                    },
-                );
+                return $this->answer($userId, $name, $text, $endedAt);
             });
     }
 
-    private function reply(string $userId, string $name, string $question, string $answer, float $endedAt): PromiseInterface
+    /**
+     * Asks Claude, and speaks its answer sentence by sentence while Claude is still writing it.
+     *
+     * @return PromiseInterface<mixed> Resolves once the answer is posted and the bot has stopped speaking.
+     */
+    private function answer(string $userId, string $name, string $question, float $endedAt): PromiseInterface
     {
-        $this->remember("Claude: {$answer}");
-        $this->post("> **{$name}:** {$question}\n{$answer}");
-        $this->counts['answers']++;
-        $this->track(Usage::ANSWERED, ['user' => $userId, 'duration_ms' => $this->msSince($endedAt)]);
+        $asking = microtime(true);
+        // What the last sentence so far waits for: Piper to be done with it, and the bot to have said it.
+        $synthesized = $spoken = resolve(null);
+        $speaking = false;
 
-        if ($this->stopped) {
-            return resolve(null);
-        }
+        $sentences = new SentenceSplitter(function (string $sentence) use (&$synthesized, &$spoken, &$speaking, $userId, $endedAt) {
+            if ($this->stopped) {
+                return;
+            }
 
-        // Replies are kept next to the recordings, so the bot's side of the call is saved too.
-        $oggPath = sprintf('%s/claude-%d.ogg', $this->directory, ++$this->files);
-        $synthesizing = microtime(true);
+            // Sentences are kept next to the recordings, so the bot's side of the call is saved too.
+            $oggPath = sprintf('%s/claude-%d.ogg', $this->directory, ++$this->files);
+            $before = $spoken;
 
-        return $this->speech->synthesize($answer, $oggPath)
-            ->then(function () use ($userId, $oggPath, $synthesizing) {
-                $this->log('info', 'Speaking the answer', ['user' => $userId, 'synthesis_ms' => $this->msSince($synthesizing)]);
+            // A sentence is synthesized as soon as Piper is free, while the ones before it are spoken. It is
+            // spoken once they are over: the voice client refuses to play a file while it is playing another.
+            $synthesized = $synthesized->then(fn () => $this->speech->synthesize($sentence, $oggPath));
+            $spoken = $synthesized->finally(fn () => $before)->then(function () use (&$speaking, $userId, $oggPath, $endedAt) {
+                if ($this->stopped) {
+                    return null;
+                }
 
-                // The voice client never says the answer finished when it is closed while speaking it.
+                if (! $speaking) {
+                    $speaking = true;
+                    $this->log('info', 'Started speaking', ['user' => $userId, 'ms' => $this->msSince($endedAt)]);
+                }
+
+                // The voice client never says the sentence finished when it is closed while speaking it.
                 return race([$this->vc->playFile($oggPath), $this->left->promise()]);
             });
+        });
+
+        return $this->claude->ask($this->prompt($name), onText: $sentences->push(...))->then(
+            function (string $answer) use ($sentences, &$spoken, $userId, $name, $question, $endedAt, $asking) {
+                $this->log('info', 'Claude answered', ['user' => $userId, 'ms' => $this->msSince($asking), 'characters' => mb_strlen($answer)]);
+                $sentences->flush();
+
+                $this->remember("Claude: {$answer}");
+                $this->post("> **{$name}:** {$question}\n{$answer}");
+                $this->counts['answers']++;
+                $this->track(Usage::ANSWERED, ['user' => $userId, 'duration_ms' => $this->msSince($endedAt)]);
+
+                return $spoken;
+            },
+            function (Throwable $e) use (&$spoken) {
+                $this->post("Sorry, I couldn't get an answer from Claude. ({$e->getMessage()})");
+
+                // The sentences Claude finished are still spoken, and the next answer waits for them.
+                return $spoken->finally(fn () => throw $e);
+            },
+        );
     }
 
     /**

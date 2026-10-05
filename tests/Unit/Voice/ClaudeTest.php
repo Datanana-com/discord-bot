@@ -8,19 +8,30 @@ use App\Support\CommandFailedException;
 use App\Voice\Claude;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
+use Tests\FakesClaudeOutput;
 
 use function React\Async\await;
+use function React\Async\delay;
 
 final class ClaudeTest extends TestCase
 {
+    use FakesClaudeOutput;
+
     private string $log;
 
     private string $workingDirectory;
+
+    /** Claude's stand-in pauses after its first line until this file exists. */
+    private string $resume;
+
+    /** @var list<string> The pieces of its answer Claude handed over while writing it. */
+    private array $pieces = [];
 
     protected function setUp(): void
     {
         $this->log = tempnam(sys_get_temp_dir(), 'fake-claude-');
         $this->workingDirectory = sys_get_temp_dir() . '/claude-test-' . uniqid();
+        $this->resume = "{$this->log}.resume";
         putenv("FAKE_CLAUDE_LOG={$this->log}");
         putenv('FAKE_CLAUDE_EXIT');
         putenv('ANTHROPIC_API_KEY=sk-should-not-be-used');
@@ -30,9 +41,13 @@ final class ClaudeTest extends TestCase
     {
         putenv('FAKE_CLAUDE_LOG');
         putenv('FAKE_CLAUDE_OUTPUT');
+        putenv('FAKE_CLAUDE_EXIT');
+        putenv('FAKE_CLAUDE_PAUSE');
+        putenv('FAKE_CLAUDE_RESUME');
         putenv('ANTHROPIC_API_KEY');
         unset($_ENV['CLAUDE_MODEL']);
         unlink($this->log);
+        @unlink($this->resume);
         @rmdir($this->workingDirectory);
     }
 
@@ -49,7 +64,7 @@ final class ClaudeTest extends TestCase
 
     public function testAsksClaudeCodeWithoutToolsOrAnApiKey(): void
     {
-        putenv('FAKE_CLAUDE_OUTPUT=' . json_encode(['type' => 'result', 'is_error' => false, 'result' => " Paris.\n"]));
+        putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeStream(" Paris.\n"));
 
         $answer = await($this->claude()->ask('Alice: Claude, what is the capital of France?'));
 
@@ -62,7 +77,9 @@ final class ClaudeTest extends TestCase
 
         $args = $this->arguments($log);
         $this->assertContains('--print', $args);
-        $this->assertSame('json', $this->option($args, '--output-format'));
+        $this->assertSame('stream-json', $this->option($args, '--output-format'));
+        $this->assertContains('--verbose', $args, '--print only streams with --verbose.');
+        $this->assertContains('--include-partial-messages', $args, 'Without it, the text only comes once it is all written.');
         $this->assertSame('haiku', $this->option($args, '--model'));
         $this->assertSame('', $this->option($args, '--tools'));
         $this->assertContains('--strict-mcp-config', $args);
@@ -73,7 +90,7 @@ final class ClaudeTest extends TestCase
 
     public function testAsksWithAnotherSystemPromptUnderTheSameSafetyMeasures(): void
     {
-        putenv('FAKE_CLAUDE_OUTPUT=' . json_encode(['type' => 'result', 'is_error' => false, 'result' => 'They agreed to meet on Friday.']));
+        putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeResult('They agreed to meet on Friday.'));
 
         $answer = await($this->claude()->ask("Alice: Let's meet on Friday.", 'You summarize voice calls.'));
 
@@ -91,49 +108,183 @@ final class ClaudeTest extends TestCase
         $this->assertStringContainsString("api_key=unset\n", $log);
     }
 
+    public function testHandsOverTheAnswerWhileClaudeIsWritingIt(): void
+    {
+        putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeStream('It is a quarter', ' past four.', ' Time for tea.'));
+        putenv('FAKE_CLAUDE_PAUSE=10');
+        putenv("FAKE_CLAUDE_RESUME={$this->resume}");
+        $answer = null;
+
+        $asked = $this->claude()->ask('What time is it?', onText: $this->collect(...))->then(function (string $text) use (&$answer) {
+            $answer = $text;
+        });
+
+        // Claude stops writing after the first piece: it is handed over without waiting for the rest.
+        for ($i = 0; $i < 100 && $this->pieces === []; $i++) {
+            delay(0.05);
+        }
+        $this->assertSame(['It is a quarter'], $this->pieces);
+        $this->assertNull($answer, 'Claude has not finished yet.');
+
+        touch($this->resume);
+        await($asked);
+
+        $this->assertSame(['It is a quarter', ' past four.', ' Time for tea.'], $this->pieces, 'Each piece once, in order.');
+        $this->assertSame('It is a quarter past four. Time for tea.', $answer);
+    }
+
+    public function testReadsWhatClaudeCodeReallyPrints(): void
+    {
+        // Recorded from Claude Code 2.1.285 and shortened: besides the answer's text, it has events for hooks,
+        // the session, rate limits and Claude's thinking, and the answer once more as a whole message.
+        putenv('FAKE_CLAUDE_OUTPUT=' . file_get_contents(__DIR__ . '/../../Fixtures/claude-stream.jsonl'));
+
+        $answer = await($this->claude()->ask('Tell me about the sea.', onText: $this->collect(...)));
+
+        $this->assertSame(
+            'Sea waves break endless against stone, swallow light, pull back to try again. Salt air stings. '
+                . 'Horizon stretches forever—deep, cold, full of things that move in dark.',
+            $answer,
+        );
+        $this->assertSame($answer, implode('', $this->pieces), 'Only the text of the answer is handed over.');
+        $this->assertSame(['Sea', ' waves break endless', ' against'], array_slice($this->pieces, 0, 3));
+    }
+
+    public function testIgnoresLinesItDoesNotUnderstand(): void
+    {
+        putenv('FAKE_CLAUDE_OUTPUT=' . implode("\n", [
+            'A warning that is not JSON',
+            '"text"',
+            '{"type":"stream_event"}',
+            '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"Hm."}}}',
+            '{"type":"something_new","event":{"delta":{"type":"text_delta","text":"Not the answer."}}}',
+            self::claudeStream('Paris.'),
+            '',
+        ]));
+
+        $this->assertSame('Paris.', await($this->claude()->ask('Hello', onText: $this->collect(...))));
+        $this->assertSame(['Paris.'], $this->pieces);
+    }
+
+    public function testHandsOverAnAnswerThatWasNotStreamedOnceItIsWhole(): void
+    {
+        // A Claude Code that doesn't send the text while it is written must not leave the bot silent.
+        putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeResult(" Paris.\n"));
+
+        $this->assertSame('Paris.', await($this->claude()->ask('Hello', onText: $this->collect(...))));
+        $this->assertSame(['Paris.'], $this->pieces);
+    }
+
     public function testRejectsWhenClaudeCodeReportsAnError(): void
     {
-        putenv('FAKE_CLAUDE_OUTPUT=' . json_encode(['is_error' => true, 'result' => 'Not logged in · Please run /login']));
+        // What Claude Code prints when it is not logged in: no text, an error result, and exit code 1.
+        putenv('FAKE_CLAUDE_OUTPUT=' . implode("\n", [
+            '{"type":"system","subtype":"api_retry","attempt":1,"max_retries":10,"error_status":401,"error":"authentication_failed"}',
+            '{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"Not logged in"}]},"error":"authentication_failed"}',
+            self::claudeResult('Not logged in · Please run /login', isError: true),
+        ]));
         putenv('FAKE_CLAUDE_EXIT=1');
 
         try {
-            await($this->claude()->ask('Hello'));
+            await($this->claude()->ask('Hello', onText: $this->collect(...)));
             $this->fail('The question should have failed.');
         } catch (RuntimeException $e) {
             $this->assertSame('Claude Code: Not logged in · Please run /login', $e->getMessage());
         }
+
+        $this->assertSame([], $this->pieces, 'The error is not handed over as if it were the answer.');
     }
 
-    public function testRejectsWithTheProcessErrorWhenThereIsNoJsonOutput(): void
+    public function testRejectsWhenAnErrorResultComesWithASuccessfulExitCode(): void
+    {
+        putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeResult('Usage limit reached', isError: true));
+
+        try {
+            await($this->claude()->ask('Hello', onText: $this->collect(...)));
+            $this->fail('The question should have failed.');
+        } catch (RuntimeException $e) {
+            $this->assertSame('Claude Code: Usage limit reached', $e->getMessage());
+        }
+
+        $this->assertSame([], $this->pieces);
+    }
+
+    public function testRejectsWhenClaudeFailsWhileWritingItsAnswer(): void
+    {
+        putenv('FAKE_CLAUDE_OUTPUT=' . implode("\n", [
+            self::claudeText('It is a quarter past four.'),
+            self::claudeText(' Time for'),
+            self::claudeResult('API Error: Connection error.', isError: true),
+        ]));
+        putenv('FAKE_CLAUDE_EXIT=1');
+
+        try {
+            await($this->claude()->ask('Hello', onText: $this->collect(...)));
+            $this->fail('The question should have failed.');
+        } catch (RuntimeException $e) {
+            $this->assertSame('Claude Code: API Error: Connection error.', $e->getMessage());
+        }
+
+        $this->assertSame(['It is a quarter past four.', ' Time for'], $this->pieces);
+    }
+
+    public function testRejectsWithTheProcessErrorWhenThereIsNoResult(): void
     {
         putenv('FAKE_CLAUDE_OUTPUT=');
         putenv('FAKE_CLAUDE_EXIT=2');
 
         $this->expectException(CommandFailedException::class);
-        $this->expectExceptionMessageMatches('/fake-claude exited with code 2/');
+        $this->expectExceptionMessageMatches('/fake-claude exited with code 2$/');
 
         await($this->claude()->ask('Hello'));
     }
 
-    public function testParseRejectsUnexpectedOutput(): void
+    public function testNeverQuotesTheAnswerWhenClaudeCodeCrashesWhileWritingIt(): void
     {
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('Unexpected output from Claude Code');
+        putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeText('It is a quarter past four.'));
+        putenv('FAKE_CLAUDE_EXIT=3');
 
-        Claude::parse('not json');
+        try {
+            await($this->claude()->ask('Hello', onText: $this->collect(...)));
+            $this->fail('The question should have failed.');
+        } catch (CommandFailedException $e) {
+            // The error is logged and posted, and logs never contain what Claude answered.
+            $this->assertStringEndsWith('fake-claude exited with code 3', $e->getMessage());
+            $this->assertSame('', $e->stdout);
+        }
     }
 
-    public function testParseRejectsErrorResults(): void
+    public function testRejectsWhenClaudeCodeEndsWithoutAResult(): void
     {
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('Claude Code: Usage limit reached');
+        putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeText('It is a quarter past four.'));
 
-        Claude::parse(json_encode(['is_error' => true, 'result' => 'Usage limit reached']));
+        try {
+            await($this->claude()->ask('Hello'));
+            $this->fail('The question should have failed.');
+        } catch (RuntimeException $e) {
+            $this->assertSame('Unexpected output from Claude Code: no result.', $e->getMessage());
+        }
+    }
+
+    public function testRejectsAResultWithoutAnAnswer(): void
+    {
+        // E.g. the result of a run that was cut short, which has no text.
+        putenv('FAKE_CLAUDE_OUTPUT={"type":"result","subtype":"error_during_execution","is_error":false}');
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('Unexpected output from Claude Code: no result.');
+
+        await($this->claude()->ask('Hello'));
     }
 
     private function claude(): Claude
     {
         return new Claude(__DIR__ . '/../../Fixtures/fake-claude', 'haiku', $this->workingDirectory);
+    }
+
+    private function collect(string $text): void
+    {
+        $this->pieces[] = $text;
     }
 
     /**

@@ -145,13 +145,15 @@ final class VoiceRoundTripTest extends TestCase
             'The bot received ' . json_encode($received) . '; the speaker reported ' . json_encode($speaker) . '.',
         );
 
-        // It answered, in the text chat and out loud.
-        $this->assertStringContainsString('Claude: It is a quarter past four.', $transcript);
+        // It answered, in the text chat and out loud: one sentence after the other, each from its own file.
+        $this->assertStringContainsString('Claude: It is a quarter past four. The meeting starts at five.', $transcript);
         $this->assertEmpty(preg_grep('/^(Voice reply failed|Could not post)/', $logged), 'Answering did not fail.');
+        $this->assertCount(2, glob("{$session->directory}/claude-*.ogg"), 'Each sentence was synthesized on its own.');
+        $this->assertCount(1, array_keys($logged, 'Started speaking', true), 'The bot started speaking the answer.');
 
         // When the call ended, it was summarized. Claude's stand-in gives the summary the same text as the answer.
         $this->assertContains('Summarized the call', $logged);
-        $this->assertStringEqualsFile("{$session->directory}/summary.md", "It is a quarter past four.\n");
+        $this->assertStringEqualsFile("{$session->directory}/summary.md", "It is a quarter past four. The meeting starts at five.\n");
         $this->assertEmpty(preg_grep('/^Could not summarize/', $logged), 'Summarizing did not fail.');
 
         // The call and its answer were counted for /stats.
@@ -163,7 +165,7 @@ final class VoiceRoundTripTest extends TestCase
         $this->assertTrue($speaker['answered'], 'The speaker heard an answer.');
         $this->assertCount(1, $speaker['recordings'], 'Only the bot spoke to the speaker.');
         $heard = await(Transcriber::fromEnv()->transcribe($speaker['recordings'][0]));
-        $this->assertStringContainsStringIgnoringCase('quarter', $heard, "The speaker heard: {$heard}");
+        $this->assertMatchesRegularExpression('/quarter.+meeting/is', $heard, "The speaker heard both sentences, in order: {$heard}");
     }
 
     protected function tearDown(): void
