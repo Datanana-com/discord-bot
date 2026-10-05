@@ -51,9 +51,23 @@ final class RecordCommandTest extends CommandTestCase
         $this->assertStringStartsWith("{$this->recordings}/" . self::GUILD_ID . '/', $session->directory);
     }
 
+    public function testTellsPeopleToSayTheFirstSpellingOnly(): void
+    {
+        $this->setEnv(['VOICE_WAKE_WORD' => 'claude, cloud, claud']);
+        $channel = $this->voiceChannel();
+        $this->joinsWith(resolve($this->voiceClient($channel)));
+
+        $this->record($this->interaction($channel));
+
+        // The stop phrase has a spelling for each of the wake word's, and people are told the first.
+        $this->assertStringContainsString('Say "claude" to talk to me, and "stop claude" when you\'re done. Use /stop', $this->updates[0]);
+        $this->assertStringNotContainsString('cloud', $this->updates[0]);
+    }
+
     public function testAnnouncesTheStopPhraseThatReplacesTheDefault(): void
     {
-        $this->setEnv(['VOICE_STOP_PHRASE' => 'para claude']);
+        // Its first spelling is the one people are told.
+        $this->setEnv(['VOICE_STOP_PHRASE' => 'para claude, parar claude']);
         $channel = $this->voiceChannel();
         $this->joinsWith(resolve($this->voiceClient($channel)));
 

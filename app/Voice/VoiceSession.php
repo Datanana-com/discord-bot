@@ -225,12 +225,21 @@ final class VoiceSession
     }
 
     /**
-     * The phrase that ends a conversation, for a server with this wake word: "stop <wake word>", unless
-     * VOICE_STOP_PHRASE replaces it. Empty when there is no wake word, as there are no conversations then.
+     * The phrase that ends a conversation, for a server with this wake word: "stop <spelling>" for each of
+     * its spellings, unless VOICE_STOP_PHRASE replaces it. Empty when there is no wake word, as there are no
+     * conversations then.
      */
     public static function defaultStopPhrase(string $wakeWord): string
     {
-        return $wakeWord === '' ? '' : (trim(env('VOICE_STOP_PHRASE', '')) ?: "stop {$wakeWord}");
+        $spellings = self::spellings($wakeWord);
+
+        if ($spellings === []) {
+            return '';
+        }
+
+        // The stop phrase can have several spellings too, and the default has one for each of the wake word's.
+        return implode(', ', self::spellings(env('VOICE_STOP_PHRASE', '')))
+            ?: implode(', ', array_map(fn (string $spelling) => "stop {$spelling}", $spellings));
     }
 
     public static function forGuild(string $guildId): ?self
@@ -407,21 +416,59 @@ final class VoiceSession
     }
 
     /**
-     * Whether the text mentions the wake word. An empty wake word matches everything.
+     * The spellings of a wake word: whisper often writes it differently from how it was said, so
+     * several can be listed, separated by commas ("claude, cloud, claud"). The first is its name.
+     * Spaces around a comma don't count, empty spellings are skipped and a repeated one, in any case, counts once.
      *
-     * Whisper punctuates what it hears, so what it puts between the words of a wake word doesn't
+     * @return list<string>
+     */
+    public static function spellings(string $wakeWord): array
+    {
+        $spellings = [];
+
+        foreach (explode(',', $wakeWord) as $spelling) {
+            $spelling = trim($spelling);
+
+            if ($spelling !== '' && ! in_array(mb_strtolower($spelling), array_map(mb_strtolower(...), $spellings), true)) {
+                $spellings[] = $spelling;
+            }
+        }
+
+        return $spellings;
+    }
+
+    /**
+     * The spelling of the wake word that people are told to say: the first. Empty when there is no wake word.
+     */
+    public static function wakeWordName(string $wakeWord): string
+    {
+        return self::spellings($wakeWord)[0] ?? '';
+    }
+
+    /**
+     * Whether the text mentions any spelling of the wake word. An empty wake word matches everything.
+     *
+     * Whisper punctuates what it hears, so what it puts between the words of a spelling doesn't
      * count: "Okay, computer" mentions "okay computer".
      */
     public static function mentions(string $text, string $wakeWord): bool
     {
-        $words = array_map(
-            fn (string $word) => preg_quote($word, '/'),
-            preg_split('/\s+/u', $wakeWord, flags: PREG_SPLIT_NO_EMPTY),
-        );
+        $spellings = self::spellings($wakeWord);
 
-        // Between two of its words: anything but letters, their accents, and numbers. Around it too:
-        // \b would also end a word before a vowel sign, which is how Hindi or Bengali write vowels.
-        return $words === [] || preg_match('/(?<![\p{L}\p{M}\p{N}])' . implode('[^\p{L}\p{M}\p{N}]+', $words) . '(?![\p{L}\p{M}\p{N}])/iu', $text) === 1;
+        foreach ($spellings as $spelling) {
+            $words = array_map(
+                fn (string $word) => preg_quote($word, '/'),
+                preg_split('/\s+/u', $spelling, flags: PREG_SPLIT_NO_EMPTY),
+            );
+
+            // Between two of its words: anything but letters, their accents, and numbers. Around it too:
+            // \b would also end a word before a vowel sign, which is how Hindi or Bengali write vowels.
+            if (preg_match('/(?<![\p{L}\p{M}\p{N}])' . implode('[^\p{L}\p{M}\p{N}]+', $words) . '(?![\p{L}\p{M}\p{N}])/iu', $text) === 1) {
+                return true;
+            }
+        }
+
+        return $spellings === [];
     }
 
     /**
@@ -712,7 +759,7 @@ final class VoiceSession
                 }
 
                 // Without a wake word, everything is answered already.
-                if ($this->wakeWord !== '') {
+                if (self::wakeWordName($this->wakeWord) !== '') {
                     $this->openConversation($userId);
                 }
 

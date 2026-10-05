@@ -170,6 +170,24 @@ final class VoiceOpenConversationTest extends VoiceTestCase
         $this->assertSame([['user' => '555', 'reason' => 'stop phrase']], $this->contexts('Conversation closed'));
     }
 
+    public function testTheDefaultStopPhraseIsHeardForEverySpellingOfTheWakeWord(): void
+    {
+        $this->setEnv(['VOICE_WAKE_WORD' => 'claude, cloud, claud']);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->assertSame('stop claude, stop cloud, stop claud', $session->stopPhrase);
+
+        // Whisper writes "Claude" as "Cloud" and "Claud" when it mishears it, in the stop phrase too.
+        $this->ask($vc, '555', 'Hey Cloud, what time is it?');
+        $this->say($vc, '555', 'Stop, cloud.');
+        $this->waitUntil(fn () => count($this->played) === 2, 'okay to be spoken');
+        $this->assertSame([['user' => '555', 'reason' => 'stop phrase']], $this->contexts('Conversation closed'));
+
+        $this->ask($vc, '555', 'Claud, are you there?');
+        $this->say($vc, '555', 'Stop Claud.');
+        $this->waitUntil(fn () => count($this->played) === 4, 'okay to be spoken');
+        $this->assertCount(2, $this->logged('Conversation closed'));
+    }
+
     public function testTheStopPhraseInTheEnvReplacesTheDefaultForEveryServer(): void
     {
         $this->setEnv(['VOICE_STOP_PHRASE' => ' para claude ']);
