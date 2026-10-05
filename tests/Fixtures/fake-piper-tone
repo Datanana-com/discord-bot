@@ -1,9 +1,16 @@
 #!/bin/sh
-# Stands in for piper with real audio: writes a one-second 660 Hz tone to the --output_file path,
-# as a 22,050 Hz mono WAV like Piper's voices. Needs ffmpeg.
+# Stands in for piper with real audio: for each line it reads on stdin, it writes a one-second 660 Hz tone to a
+# file in the --output-dir folder, as a 22,050 Hz mono WAV like Piper's voices, and says so on stderr like Piper.
+# Needs ffmpeg.
 while [ $# -gt 0 ]; do
-    if [ "$1" = "--output_file" ]; then out="$2"; fi
+    if [ "$1" = "--output-dir" ]; then dir="$2"; fi
     shift
 done
-cat > /dev/null
-exec ffmpeg -loglevel error -y -f lavfi -i sine=frequency=660:duration=1 -ar 22050 -ac 1 "$out"
+mkdir -p "$dir"
+n=0
+while IFS= read -r line; do
+    n=$((n + 1))
+    # Not from stdin, which holds the next lines.
+    ffmpeg -loglevel error -y -f lavfi -i sine=frequency=660:duration=1 -ar 22050 -ac 1 "$dir/$$-$n.wav" < /dev/null
+    echo "INFO:__main__:Wrote $dir/$$-$n.wav" >&2
+done

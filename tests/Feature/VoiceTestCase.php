@@ -66,6 +66,9 @@ abstract class VoiceTestCase extends TestCase
     /** The PID of every stand-in of Claude that was started to wait for a question: see {@see waitingClaudes()}. */
     protected string $claudeWaiting;
 
+    /** The PID of every stand-in of Piper that was started: see {@see pipers()}. */
+    protected string $piperRunning;
+
     /** Where the bot keeps its memories. */
     protected string $memories;
 
@@ -114,6 +117,7 @@ abstract class VoiceTestCase extends TestCase
         $this->claudeResume = "{$this->recordings}/claude.resume";
         $this->claudeCalls = "{$this->recordings}/claude.calls";
         $this->claudeWaiting = "{$this->recordings}/claude.waiting";
+        $this->piperRunning = "{$this->recordings}/piper.running";
         $this->memories = "{$this->recordings}/memories";
         $this->voiceStates = new \ArrayObject();
 
@@ -138,6 +142,7 @@ abstract class VoiceTestCase extends TestCase
             'FAKE_CLAUDE_EXIT' => '0',
             'FAKE_CLAUDE_PAUSE' => '0',
             'FAKE_CLAUDE_RESUME' => $this->claudeResume,
+            'FAKE_PIPER_RUNNING' => $this->piperRunning,
             'FAKE_WHISPER_OUTPUT' => 'Hey Claude, what time is it?',
         ]);
 
@@ -363,6 +368,14 @@ abstract class VoiceTestCase extends TestCase
     protected function waitingClaudes(): array
     {
         return is_file($this->claudeWaiting) ? array_map(intval(...), file($this->claudeWaiting, FILE_IGNORE_NEW_LINES)) : [];
+    }
+
+    /**
+     * @return list<int> The process ID of every Piper that was started, oldest first.
+     */
+    protected function pipers(): array
+    {
+        return is_file($this->piperRunning) ? array_map(intval(...), file($this->piperRunning, FILE_IGNORE_NEW_LINES)) : [];
     }
 
     /**

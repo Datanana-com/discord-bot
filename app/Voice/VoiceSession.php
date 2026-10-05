@@ -296,6 +296,8 @@ final class VoiceSession
         );
         $session->listen();
         $session->wait();
+        // Piper loads its voice now, and keeps running: the first sentence of an answer doesn't wait for that.
+        $session->speech->start("{$directory}/piper");
         $session->log('info', 'Voice session started', ['channel' => $vc->channel->id, 'directory' => $directory]);
         $session->track(Usage::CALL_STARTED, ['channel' => $vc->channel->id]);
 
@@ -442,6 +444,8 @@ final class VoiceSession
         // No question is coming for the Claude Code process that waited for one. One that is answering ends once it has.
         $this->waiting?->stop();
         $this->waiting = null;
+        // Piper ends too, once it has spoken the sentence it may be working on.
+        $piperEnded = $this->speech->stop();
 
         // Speech still in progress is transcribed for the transcript, but no longer answered.
         $this->splitter->flushAll();
@@ -477,6 +481,8 @@ final class VoiceSession
             })
             // Whatever happened to the summary: the memories only need the transcript.
             ->then($this->updateMemories(...))
+            // Piper's folder, in the call's own, is gone once Piper has ended: only then is the call over.
+            ->then(fn () => $piperEnded)
             ->finally(function () {
                 unset(self::$unfinished[$this->id]);
             });
@@ -685,7 +691,7 @@ final class VoiceSession
             // A sentence is synthesized as soon as Piper is free, while the ones before it are spoken. It is
             // spoken once they are over: the voice client refuses to play a file while it is playing another.
             // Once the call stops, or they opt out, the sentences still waiting for Piper are no longer synthesized either.
-            $synthesized = $synthesized->then(fn () => $this->stillAnswering($userId, $sharers) ? $this->speech->synthesize($sentence, $oggPath) : null);
+            $synthesized = $synthesized->then(fn () => $this->stillAnswering($userId, $sharers) ? $this->synthesize($sentence, $oggPath) : null);
             $spoken = $synthesized->finally(fn () => $before)->then(function () use (&$speaking, $userId, $sharers, $oggPath, $endedAt) {
                 if (! $this->stillAnswering($userId, $sharers)) {
                     return null;
@@ -799,6 +805,21 @@ final class VoiceSession
         }
 
         return $answer->finally($this->wait(...));
+    }
+
+    /**
+     * Has Piper speak a sentence into a file. Piper keeps running for the whole call. When it stopped by
+     * itself, as when the sentence before this one made it fail, it is started again.
+     *
+     * @return PromiseInterface<string> The path of the file.
+     */
+    private function synthesize(string $sentence, string $oggPath): PromiseInterface
+    {
+        if (! $this->speech->isRunning()) {
+            $this->log('warning', 'Piper had stopped: starting it again');
+        }
+
+        return $this->speech->synthesize($sentence, $oggPath);
     }
 
     /**

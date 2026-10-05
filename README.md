@@ -120,6 +120,8 @@ Claude Code never loads the settings of the user the bot runs as (`--setting-sou
 
 During a call, a Claude Code process is already running and waiting for the next question, so a question doesn't wait for Claude Code to start. It answers that one question and ends, and another one is started for the next: every question still gets its own process and its own prompt, so nothing is carried over from one question to the next but what the transcript holds. Claude Code ends by itself when it waits for some minutes, and is then replaced. When no process is waiting, or the one that was ends without writing anything, the question is asked the way it was before, by a process started for it, and a warning is logged. The waiting process is ended when the call ends, and with the bot.
 
+Piper keeps running for the whole call as well, so its voice is loaded once, when the call starts, and not for every sentence. It writes each sentence into a `piper` folder next to the recordings, from where the sentence is converted into its `claude-<n>.ogg`; the folder is removed when Piper ends. When Piper stops by itself, the sentence it was working on isn't spoken, which is logged like any sentence that can't be, and Piper is started again for the next sentence, with a warning. It is ended when the call ends, once it has spoken the sentence it may be working on, and with the bot.
+
 ### Opting out of being recorded
 
 Anyone can use `/optout`, in any server the bot is in or in a direct message with it. From then on, in every server:
