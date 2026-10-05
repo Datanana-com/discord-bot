@@ -116,20 +116,27 @@ final class VoiceRoundTripTest extends TestCase
             $result = "{$speakerRecordings}/result.json";
             $speaker = is_file($result) ? json_decode(file_get_contents($result), true) : null;
         } finally {
-            if (isset($session)) {
-                $logger->info('The bot received', $received ?? []);
-                $session->stop();
+            try {
+                if (isset($session)) {
+                    $logger->info('The bot received', $received ?? []);
+                    // The call's summary is posted after it stopped, while the bot is still connected to Discord.
+                    $this->within(60, $session->stop(), 'the call to be summarized');
+                }
+            } finally {
+                $app->discord->close(false);
             }
-
-            $app->discord->close(false);
         }
 
         $logged = array_map(fn ($record) => $record->message, $logs->getRecords());
         $transcriptPath = "{$session->directory}/transcript.txt";
         $transcript = is_file($transcriptPath) ? file_get_contents($transcriptPath) : '';
 
-        // The slash commands were registered with Discord on startup.
+        // The slash commands were registered with Discord on startup. Discord refuses a command
+        // whose options it doesn't accept, which nothing but the real Discord can tell.
         $this->assertNotEmpty(preg_grep('/^Command record (has been saved|already exists)\.$/', $logged), 'The /record command was registered.');
+        $this->assertNotEmpty(preg_grep('/^Command settings (has been saved|already exists)\.$/', $logged), 'The /settings command was registered, with its options.');
+        $this->assertNotEmpty(preg_grep('/^Command recall (has been saved|already exists)\.$/', $logged), 'The /recall command was registered, with its required question.');
+        $this->assertEmpty(preg_grep('/^Could not (save command|fetch the registered commands)/', $logged), 'Discord accepted every command.');
 
         // The bot heard the question through Discord, and whisper understood it.
         $this->assertMatchesRegularExpression(
@@ -138,9 +145,16 @@ final class VoiceRoundTripTest extends TestCase
             'The bot received ' . json_encode($received) . '; the speaker reported ' . json_encode($speaker) . '.',
         );
 
-        // It answered, in the text chat and out loud.
-        $this->assertStringContainsString('Claude: It is a quarter past four.', $transcript);
+        // It answered, in the text chat and out loud: one sentence after the other, each from its own file.
+        $this->assertStringContainsString('Claude: It is a quarter past four. The meeting starts at five.', $transcript);
         $this->assertEmpty(preg_grep('/^(Voice reply failed|Could not post)/', $logged), 'Answering did not fail.');
+        $this->assertCount(2, glob("{$session->directory}/claude-*.ogg"), 'Each sentence was synthesized on its own.');
+        $this->assertCount(1, array_keys($logged, 'Started speaking', true), 'The bot started speaking the answer.');
+
+        // When the call ended, it was summarized. Claude's stand-in gives the summary the same text as the answer.
+        $this->assertContains('Summarized the call', $logged);
+        $this->assertStringEqualsFile("{$session->directory}/summary.md", "It is a quarter past four. The meeting starts at five.\n");
+        $this->assertEmpty(preg_grep('/^Could not summarize/', $logged), 'Summarizing did not fail.');
 
         // The call and its answer were counted for /stats.
         $usage = (new Usage($logger))->summary((string) $voiceClient->channel->guild_id);
@@ -151,7 +165,7 @@ final class VoiceRoundTripTest extends TestCase
         $this->assertTrue($speaker['answered'], 'The speaker heard an answer.');
         $this->assertCount(1, $speaker['recordings'], 'Only the bot spoke to the speaker.');
         $heard = await(Transcriber::fromEnv()->transcribe($speaker['recordings'][0]));
-        $this->assertStringContainsStringIgnoringCase('quarter', $heard, "The speaker heard: {$heard}");
+        $this->assertMatchesRegularExpression('/quarter.+meeting/is', $heard, "The speaker heard both sentences, in order: {$heard}");
     }
 
     protected function tearDown(): void

@@ -4,8 +4,12 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Settings\GuildSettings;
 use App\Voice\VoiceSession;
+use Monolog\Logger;
 use RuntimeException;
+
+use function React\Async\await;
 
 final class VoiceConversationTest extends VoiceTestCase
 {
@@ -32,7 +36,7 @@ final class VoiceConversationTest extends VoiceTestCase
         $this->assertSame('It is a quarter past four.', file_get_contents($this->played[0]), 'Piper was given the answer.');
 
         // Alice's speech is recorded, and the temporary utterance file is gone.
-        $session->stop();
+        await($session->stop());
         $this->assertWavDuration(1.0, "{$session->directory}/555-1.wav");
         $this->assertSame([], glob("{$session->directory}/utterances/*"));
         $this->assertSame([], $this->loggedProblems());
@@ -54,6 +58,19 @@ final class VoiceConversationTest extends VoiceTestCase
         $this->assertSame(['user' => '555', 'reason' => 'Claude was not addressed'], array_slice($this->logged('Not answering')[0], 2));
     }
 
+    public function testAnswersAWakePhraseThatWhisperPunctuated(): void
+    {
+        $this->setEnv(['VOICE_WAKE_WORD' => 'okay computer']);
+        // Whisper writes a comma where Alice paused.
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => 'Okay, computer, what time is it?']);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');
+
+        $this->assertSame(["> **Alice:** Okay, computer, what time is it?\nIt is a quarter past four."], $this->sent);
+    }
+
     public function testAnswersEverythingWithoutAWakeWord(): void
     {
         $this->setEnv(['VOICE_WAKE_WORD' => '']);
@@ -64,6 +81,34 @@ final class VoiceConversationTest extends VoiceTestCase
         $this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');
 
         $this->assertSame(["> **Alice:** What time is it?\nIt is a quarter past four."], $this->sent);
+    }
+
+    public function testStartsWithTheServersSettings(): void
+    {
+        // This server answers everything, although .env has a wake word.
+        (new GuildSettings(new Logger('test')))->save(self::GUILD_ID, [...GuildSettings::DEFAULTS, 'wake_word' => ''], '555');
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => 'What time is it?']);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');
+
+        $this->assertSame(["> **Alice:** What time is it?\nIt is a quarter past four."], $this->sent);
+    }
+
+    public function testKeepsItsSettingsWhenTheyChangeDuringTheCall(): void
+    {
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        // Someone uses /settings while the call is running.
+        (new GuildSettings(new Logger('test')))->save(self::GUILD_ID, [...GuildSettings::DEFAULTS, 'wake_word' => 'jarvis', 'model' => 'opus'], '555');
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');
+
+        // The call still answers to "Claude", with the model it started with.
+        $this->assertSame(["> **Alice:** Hey Claude, what time is it?\nIt is a quarter past four."], $this->sent);
+        $this->assertStringContainsString("arg=--model\narg=haiku\n", file_get_contents($this->claudeLog));
     }
 
     public function testIgnoresSpeechThatIsTooShort(): void
@@ -89,9 +134,27 @@ final class VoiceConversationTest extends VoiceTestCase
         $this->assertStringContainsString('] Alice: Sounds good.', $this->transcript($session));
         $this->assertStringContainsString('] Bob: Sounds good.', $this->transcript($session));
 
-        $session->stop();
+        await($session->stop());
         $this->assertWavDuration(1.0, "{$session->directory}/555-1.wav");
         $this->assertWavDuration(2.0, "{$session->directory}/666-2.wav");
+    }
+
+    public function testDeletesTheCopiesTheVoiceClientMadeOfWhatWasSaidWhenTheCallEnds(): void
+    {
+        // The voice client's decoders copy each speaker's audio to the temp folder, named after when
+        // they started and the speaker's SSRC. A decoder that is restarted starts a new copy.
+        // SSRC 666003 is someone in another call, whose copy that call deletes when it ends.
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => 'Sounds good.']);
+        $copies = array_map(fn (string $name) => sys_get_temp_dir() . "/{$name}", [date('Y-m-d_H-i') . '-1.ogg', '2026-10-04_21-07-2.ogg', date('Y-m-d_H-i') . '-2.ogg', date('Y-m-d_H-i') . '-666003.ogg']);
+        array_map(touch(...), $copies);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->speak($vc, ssrc: 2, userId: '666', seconds: 1.0);
+        await($session->stop());
+
+        $this->assertSame([false, false, false, true], array_map(is_file(...), $copies));
+        unlink($copies[3]);
     }
 
     public function testTellsTheChannelWhenClaudeCannotAnswer(): void
@@ -115,21 +178,26 @@ final class VoiceConversationTest extends VoiceTestCase
 
     public function testStopLeavesAndStillTranscribesUnfinishedSpeech(): void
     {
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => json_encode(['type' => 'result', 'is_error' => false, 'result' => 'Alice asked what time it was.'])]);
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);
 
         // Alice is still talking when the recording is stopped.
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
-        $session->stop();
+        $ended = $session->stop();
 
         $this->assertNull(VoiceSession::forGuild(self::GUILD_ID));
         $this->assertWavDuration(1.0, "{$session->directory}/555-1.wav");
+        $this->assertSame('', $this->transcript($session));
 
         // What she said makes it into the transcript, but Claude no longer answers.
-        $this->waitUntil(fn () => $this->transcript($session) !== '', 'the transcript');
-        $this->runFor(0.5);
+        await($ended);
         $this->assertStringEndsWith("] Alice: Hey Claude, what time is it?\n", $this->transcript($session));
-        $this->assertFileDoesNotExist($this->claudeLog);
-        $this->assertSame([], $this->sent);
+        $this->assertSame('the session stopped', $this->logged('Not answering')[0]['reason']);
+        $this->assertSame([], $this->played);
+
+        // The call's summary waited for it: Claude was only asked to summarize, with what she said.
+        $this->assertStringContainsString("] Alice: Hey Claude, what time is it?\n\nSummarize the call.\n", file_get_contents($this->claudeLog));
+        $this->assertSame(['Alice asked what time it was.'], $this->sent);
     }
 
     public function testStopsWhenDisconnectedFromTheCall(): void
@@ -162,11 +230,14 @@ final class VoiceConversationTest extends VoiceTestCase
 
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
         $this->waitUntil(fn () => is_file($this->claudeLog), 'Claude to be asked');
-        $session->stop();
-        $this->waitUntil(fn () => $this->sent !== [], 'the answer');
+        // Only the answer is slow, not the call's summary.
+        $this->setProcessEnv(['FAKE_CLAUDE_DELAY' => '0']);
+        await($session->stop());
 
-        $this->assertSame(["> **Alice:** Hey Claude, what time is it?\nIt is a quarter past four."], $this->sent);
+        // The answer is followed by the summary, which includes it. Claude's stand-in gives both the same text.
+        $this->assertSame(["> **Alice:** Hey Claude, what time is it?\nIt is a quarter past four.", 'It is a quarter past four.'], $this->sent);
         $this->assertSame([], $this->played);
+        $this->assertStringContainsString("] Claude: It is a quarter past four.\n\nSummarize the call.\n", file_get_contents($this->claudeLog));
     }
 
     public function testStillSpeaksAnswersThatCannotBePosted(): void
@@ -203,12 +274,12 @@ final class VoiceConversationTest extends VoiceTestCase
 
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
         $this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');
-        $session->stop();
+        await($session->stop());
 
         // Each step is logged with the call's server and session, so one call can be followed in the log.
         $steps = array_filter($this->logs->getRecords(), fn ($record) => ($record->context['session'] ?? null) === $session->id);
         $this->assertSame(
-            ['Voice session started', 'Recording a speaker', 'Utterance ended', 'Transcribed', 'Claude answered', 'Speaking the answer', 'Voice session stopped'],
+            ['Voice session started', 'Recording a speaker', 'Utterance ended', 'Transcribed', 'Claude answered', 'Started speaking', 'Voice session stopped', 'Summarized the call'],
             array_values(array_map(fn ($record) => $record->message, $steps)),
         );
         $this->assertSame(self::GUILD_ID, $this->logged('Voice session started')[0]['guild']);
@@ -216,8 +287,10 @@ final class VoiceConversationTest extends VoiceTestCase
         $this->assertSame(28, $this->logged('Transcribed')[0]['characters']);
         $this->assertSame(26, $this->logged('Claude answered')[0]['characters']);
         $this->assertSame(['speakers' => 1, 'utterances' => 1, 'answers' => 1, 'failures' => 0], array_slice($this->logged('Voice session stopped')[0], 3));
+        $this->assertSame(['guild', 'session', 'ms', 'characters'], array_keys($this->logged('Summarized the call')[0]));
+        $this->assertSame(26, $this->logged('Summarized the call')[0]['characters']);
 
-        // What was said stays in transcript.txt: it is never logged.
+        // What was said stays in transcript.txt, and the summary in summary.md: neither is ever logged.
         foreach ($this->logs->getRecords() as $record) {
             $this->assertDoesNotMatchRegularExpression('/what time|quarter past/i', json_encode([$record->message, $record->context]));
         }
