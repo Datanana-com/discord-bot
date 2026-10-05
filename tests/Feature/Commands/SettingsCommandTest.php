@@ -138,6 +138,7 @@ final class SettingsCommandTest extends CommandTestCase
     public static function wakeWords(): iterable
     {
         yield 'one letter' => ['k', 'K, what time is it?'];
+        yield 'a phrase, heard with a pause' => ['okay computer', 'Okay, computer, what time is it?'];
         yield 'a hyphen inside' => ['Jean-Luc', 'Hey Jean-Luc, what time is it?'];
         yield 'an apostrophe inside' => ["d'Artagnan", "What do you think, d'Artagnan?"];
         yield 'numbers' => ['r2d2', 'R2D2, what time is it?'];
@@ -151,7 +152,7 @@ final class SettingsCommandTest extends CommandTestCase
         $this->settings(['wake_word' => '  okay   computer ', 'language' => ' PT ']);
 
         $settings = $this->store->find(self::GUILD_ID);
-        $this->assertSame('okay computer', $settings['wake_word'], 'Transcripts have single spaces, so the wake word must too.');
+        $this->assertSame('okay computer', $settings['wake_word'], 'It is announced and shown as it is saved.');
         $this->assertSame('pt', $settings['language']);
     }
 

@@ -58,6 +58,19 @@ final class VoiceConversationTest extends VoiceTestCase
         $this->assertSame(['user' => '555', 'reason' => 'Claude was not addressed'], array_slice($this->logged('Not answering')[0], 2));
     }
 
+    public function testAnswersAWakePhraseThatWhisperPunctuated(): void
+    {
+        $this->setEnv(['VOICE_WAKE_WORD' => 'okay computer']);
+        // Whisper writes a comma where Alice paused.
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => 'Okay, computer, what time is it?']);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');
+
+        $this->assertSame(["> **Alice:** Okay, computer, what time is it?\nIt is a quarter past four."], $this->sent);
+    }
+
     public function testAnswersEverythingWithoutAWakeWord(): void
     {
         $this->setEnv(['VOICE_WAKE_WORD' => '']);
