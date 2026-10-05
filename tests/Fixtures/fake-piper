@@ -1,7 +1,12 @@
 #!/bin/sh
 # Stands in for piper: writes the text it receives on stdin to the --output_file path.
+# It fails on a text that contains FAKE_PIPER_FAILS_ON.
 while [ $# -gt 0 ]; do
     if [ "$1" = "--output_file" ]; then out="$2"; fi
     shift
 done
 cat > "$out"
+if [ -n "${FAKE_PIPER_FAILS_ON:-}" ] && grep -qF "$FAKE_PIPER_FAILS_ON" "$out"; then
+    echo "The voice model could not be loaded." >&2
+    exit 1
+fi

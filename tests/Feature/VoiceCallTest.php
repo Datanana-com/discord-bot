@@ -128,6 +128,36 @@ final class VoiceCallTest extends VoiceTestCase
         $this->assertSame([], $this->loggedProblems());
     }
 
+    public function testSpeaksEachSentenceOfAnAnswerOverTheNetwork(): void
+    {
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is a quarter past four. ', 'Time for a cup of tea.')]);
+        $session = VoiceSession::start($vc = $this->connectedVoiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->announceSpeaker($vc, self::ALICE_SSRC, '555');
+        $this->sendAudio($this->opusFrames(440), from: self::ALICE_SSRC, to: $this->udp->getLocalAddress());
+        $this->waitUntil(
+            fn () => count(array_keys(array_column(array_column($this->gatewayPayloads, 'd'), 'speaking'), VoiceClient::NOT_SPEAKING, true)) === 2,
+            'both sentences to finish playing',
+            timeout: 30.0,
+        );
+        await($session->stop());
+
+        // The real voice client was given the second sentence once it had finished the first one, and played both.
+        $this->assertSame(
+            [VoiceClient::MICROPHONE, VoiceClient::NOT_SPEAKING, VoiceClient::MICROPHONE, VoiceClient::NOT_SPEAKING],
+            array_column(array_column($this->gatewayPayloads, 'd'), 'speaking'),
+        );
+        $this->assertFileExists("{$session->directory}/claude-2.ogg");
+        $this->assertFileExists("{$session->directory}/claude-3.ogg");
+
+        // Piper's stand-in makes a second of its 660 Hz tone for each sentence.
+        $answer = $this->decodeSentAudio();
+        $this->assertEqualsWithDelta(2.0, $this->seconds($answer), 0.1, 'Length of the answer.');
+        $this->assertEqualsWithDelta(660, $this->frequency($answer), 20, 'Pitch of the answer.');
+
+        $this->assertSame([], $this->loggedProblems());
+    }
+
     /**
      * A voice client connected to the stand-in media server. Its voice gateway connection is faked:
      * what it sends there is collected in {@see $gatewayPayloads}.
