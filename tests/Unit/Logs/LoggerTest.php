@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Unit\Logs;
 
 use App\Logs\Logger;
+use Monolog\Handler\RotatingFileHandler;
 use Monolog\Handler\StreamHandler;
 use Monolog\Level;
 use PHPUnit\Framework\Attributes\RunInSeparateProcess;
@@ -28,6 +29,7 @@ final class LoggerTest extends TestCase
             [['php://stdout', Level::Debug], [$directory . '/logs/' . date('Y-m-d') . '.log', Level::Debug]],
             array_map(fn (StreamHandler $handler) => [$handler->getUrl(), $handler->getLevel()], $logger->getHandlers()),
         );
+        $this->assertInstanceOf(RotatingFileHandler::class, $logger->getHandlers()[1], 'The next day starts a new file, also while the bot runs.');
 
         $lines = array_map(
             fn (string $line) => json_decode($line, true, flags: JSON_THROW_ON_ERROR),
