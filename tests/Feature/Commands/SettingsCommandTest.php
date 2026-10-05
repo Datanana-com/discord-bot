@@ -148,6 +148,81 @@ final class SettingsCommandTest extends CommandTestCase
         yield 'as long as it can be' => [str_repeat('a', 32), 'Hey ' . str_repeat('a', 32) . '!'];
     }
 
+    public function testSavesSeveralSpellingsOfTheWakeWordAndShowsThem(): void
+    {
+        $reply = $this->settings(['wake_word' => ' Jarvis ,service,  Hey   Jarvis, jarvis,, ']);
+
+        $this->assertSame('Jarvis, service, Hey Jarvis', $this->store->find(self::GUILD_ID)['wake_word'], 'One space after each comma, and a repeated spelling once.');
+        $this->assertStringContainsString("
+Wake word: `Jarvis`, `service`, `Hey Jarvis`
+", $reply, 'The name first.');
+        $this->assertTrue(VoiceSession::mentions('Hey, Service, what time is it?', $this->store->for(self::GUILD_ID)['wake_word']));
+        $this->assertSame(['wake_word' => 'Jarvis, service, Hey Jarvis'], $this->logged('/settings changed')[0]['settings']);
+    }
+
+    public function testShowsEverySpellingOfTheDefaultWakeWord(): void
+    {
+        $this->setEnv(['VOICE_WAKE_WORD' => ' claude ,cloud, claud']);
+
+        $this->assertStringContainsString("
+Wake word: `claude`, `cloud`, `claud` (default)
+", $this->settings([]));
+    }
+
+    public function testTakesUpToFiveSpellings(): void
+    {
+        $this->settings(['wake_word' => 'one, two, three, four, five']);
+
+        $this->assertSame('one, two, three, four, five', $this->store->find(self::GUILD_ID)['wake_word']);
+    }
+
+    public function testRefusesASixthSpellingWithoutChangingAnything(): void
+    {
+        $this->settings(['wake_word' => 'jarvis, service', 'language' => 'pt']);
+
+        $reply = $this->settings(['wake_word' => 'one, two, three, four, five, six', 'language' => 'en']);
+
+        $this->assertStringContainsString('up to 5 of them separated by commas', $reply);
+        $this->assertSame('jarvis, service', $this->store->find(self::GUILD_ID)['wake_word']);
+        $this->assertSame('pt', $this->store->find(self::GUILD_ID)['language']);
+    }
+
+    public function testASpellingRepeatedInAnotherCaseDoesNotCountTowardsTheFive(): void
+    {
+        $this->settings(['wake_word' => 'one, two, three, four, five, FIVE, One']);
+
+        $this->assertSame('one, two, three, four, five', $this->store->find(self::GUILD_ID)['wake_word']);
+    }
+
+    public function testNoneWithCommasAroundItStillMeansNoWakeWord(): void
+    {
+        $this->settings(['wake_word' => 'claude']);
+
+        $this->settings(['wake_word' => ' None , ']);
+
+        $this->assertSame('', $this->store->find(self::GUILD_ID)['wake_word']);
+    }
+
+    public function testNoneIsAWakeWordWhenAmongOthers(): void
+    {
+        $this->settings(['wake_word' => 'claude, none']);
+
+        $this->assertSame('claude, none', $this->store->find(self::GUILD_ID)['wake_word']);
+    }
+
+    public function testACallKeepsTheSpellingsItStartedWith(): void
+    {
+        $this->store->save(self::GUILD_ID, [...GuildSettings::DEFAULTS, 'wake_word' => 'claude, cloud'], '777');
+        $channel = $this->voiceChannel();
+        $session = VoiceSession::start($this->voiceClient($channel), $channel, $this->discord);
+
+        $this->settings(['wake_word' => 'jarvis']);
+
+        $this->assertSame('claude, cloud', $session->wakeWord);
+        $this->assertTrue(VoiceSession::mentions('Hey Cloud', $session->wakeWord));
+        $this->assertFalse(VoiceSession::mentions('Hey Jarvis', $session->wakeWord));
+    }
+
     public function testTidiesWhatWasTyped(): void
     {
         $this->settings(['wake_word' => '  okay   computer ', 'language' => ' PT ']);
@@ -175,13 +250,20 @@ final class SettingsCommandTest extends CommandTestCase
      */
     public static function invalidValues(): iterable
     {
-        $wakeWord = 'The wake word must be a word or short phrase: at most 32 letters, numbers, spaces, apostrophes and hyphens, starting and ending with a letter or number. Use `none` to answer everything.';
+        $wakeWord = 'The wake word must be a word or short phrase, or up to 5 of them separated by commas for the ways whisper may write it. Each is at most 32 letters, numbers, spaces, apostrophes and hyphens, starting and ending with a letter or number. Use `none` to answer everything.';
         $voice = 'The voice must be one of the installed Piper voices: `pt_BR-faber-medium`, `voice`.';
 
         yield 'a wake word that is too long' => [['wake_word' => str_repeat('a', 33)], $wakeWord];
         yield 'a wake word that pings everyone when /record announces it' => [['wake_word' => '@everyone'], $wakeWord];
         yield 'a wake word that is formatted' => [['wake_word' => '**claude**'], $wakeWord];
         yield 'a wake word of spaces' => [['wake_word' => '   '], $wakeWord];
+        yield 'a wake word of commas' => [['wake_word' => ' , ,'], $wakeWord];
+        yield 'a sixth spelling' => [['wake_word' => 'claude, cloud, claud, clod, clawed, clowd'], $wakeWord];
+        yield 'a spelling that is too long' => [['wake_word' => 'claude, ' . str_repeat('a', 33)], $wakeWord];
+        yield 'a spelling that pings everyone' => [['wake_word' => 'claude, @everyone'], $wakeWord];
+        yield 'a spelling that is formatted' => [['wake_word' => 'claude, **cloud**'], $wakeWord];
+        yield 'a spelling that ends with a hyphen' => [['wake_word' => 'claude, cloud-'], $wakeWord];
+        yield 'a spelling that starts with an apostrophe' => [['wake_word' => "claude, 'cloud"], $wakeWord];
         // A wake word is looked for as whole words, so these would be found inside "well-known" and "don't".
         yield 'a wake word that is only a hyphen' => [['wake_word' => '-'], $wakeWord];
         yield 'a wake word that is only an apostrophe' => [['wake_word' => "'"], $wakeWord];

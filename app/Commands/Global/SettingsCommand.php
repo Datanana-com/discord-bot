@@ -23,8 +23,8 @@ final class SettingsCommand extends CommandAbstract
         [
             'type' => Option::STRING,
             'name' => 'wake_word',
-            'description' => 'What to say to talk to Claude: a word or short phrase, or "none" to answer everything.',
-            'max_length' => 32,
+            'description' => 'What to say to talk to Claude: a word or phrase, up to 5 spellings separated by commas, or "none".',
+            'max_length' => 200,
         ],
         [
             'type' => Option::STRING,
@@ -105,9 +105,10 @@ final class SettingsCommand extends CommandAbstract
             return implode("\n", $problems);
         }
 
-        // "none" stands for no wake word, as Discord doesn't let an option be empty.
-        if (strcasecmp($values['wake_word'] ?? '', 'none') === 0) {
-            $values['wake_word'] = '';
+        if (isset($values['wake_word'])) {
+            // "none" stands for no wake word, as Discord doesn't let an option be empty.
+            $spellings = implode(', ', VoiceSession::spellings($values['wake_word']));
+            $values['wake_word'] = strcasecmp($spellings, 'none') === 0 ? '' : $spellings;
         }
 
         $settings = [...($reset ? GuildSettings::DEFAULTS : $current), ...$values];
@@ -160,9 +161,10 @@ final class SettingsCommand extends CommandAbstract
 
         return array_values(array_filter([
             // Only what can be said: /record announces the wake word, where anything else could ping or format.
-            // It is looked for as whole words, so it starts and ends with a letter or number.
-            isset($values['wake_word']) && preg_match('/^[\p{L}\p{N}]([\p{L}\p{M}\p{N}\' -]{0,30}[\p{L}\p{M}\p{N}])?$/u', $values['wake_word']) !== 1
-                ? 'The wake word must be a word or short phrase: at most 32 letters, numbers, spaces, apostrophes and hyphens, starting and ending with a letter or number. Use `none` to answer everything.'
+            // Each spelling is looked for as whole words, so it starts and ends with a letter or number.
+            // A comma only separates spellings, so it can't ping or format either.
+            isset($values['wake_word']) && ! self::validSpellings($values['wake_word'])
+                ? 'The wake word must be a word or short phrase, or up to 5 of them separated by commas for the ways whisper may write it. Each is at most 32 letters, numbers, spaces, apostrophes and hyphens, starting and ending with a letter or number. Use `none` to answer everything.'
                 : null,
             isset($values['language']) && ! in_array($values['language'], ['auto', ...Transcriber::LANGUAGES], true)
                 ? "The language must be `auto` or one of whisper's language codes: " . implode(', ', Transcriber::LANGUAGES) . '.'
@@ -180,15 +182,28 @@ final class SettingsCommand extends CommandAbstract
     }
 
     /**
+     * Whether a wake word is one to five spellings that can each be said.
+     */
+    private static function validSpellings(string $wakeWord): bool
+    {
+        $spellings = VoiceSession::spellings($wakeWord);
+
+        return $spellings !== [] && count($spellings) <= 5 && array_all(
+            $spellings,
+            fn (string $spelling) => preg_match('/^[\p{L}\p{N}]([\p{L}\p{M}\p{N}\' -]{0,30}[\p{L}\p{M}\p{N}])?$/u', $spelling) === 1,
+        );
+    }
+
+    /**
      * A server's settings as its calls use them, one per line, saying which are the default.
      *
      * @param array{wake_word: ?string, language: ?string, voice: ?string, model: ?string} $settings
      */
     private static function describe(array $settings): string
     {
-        $wakeWord = $settings['wake_word'] ?? VoiceSession::defaultWakeWord();
+        $spellings = VoiceSession::spellings($settings['wake_word'] ?? VoiceSession::defaultWakeWord());
         $inUse = [
-            'wake_word' => 'Wake word: ' . ($wakeWord === '' ? 'none, I answer everything that is said' : "`{$wakeWord}`"),
+            'wake_word' => 'Wake word: ' . ($spellings === [] ? 'none, I answer everything that is said' : '`' . implode('`, `', $spellings) . '`'),
             'language' => 'Language: `' . Transcriber::fromEnv($settings['language'])->language . '`',
             'voice' => 'Voice: `' . basename(Speech::fromEnv($settings['voice'])->model, '.onnx') . '`',
             'model' => 'Claude model: `' . Claude::fromEnv($settings['model'])->model . '`',
