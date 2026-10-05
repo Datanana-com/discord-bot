@@ -23,6 +23,9 @@ abstract class CommandTestCase extends VoiceTestCase
     /** @var list<string> Edits of the deferred response. */
     protected array $updates = [];
 
+    /** @var list<array{content: string, ephemeral: bool}> Messages sent after the response. */
+    protected array $followUps = [];
+
     /**
      * A slash command used by a member who is in the given voice channel, or in none.
      *
@@ -36,10 +39,11 @@ abstract class CommandTestCase extends VoiceTestCase
 
         $interaction = static::getStubBuilder(Interaction::class)
             ->disableOriginalConstructor()
-            ->onlyMethods(['__get', '__isset', 'respondWithMessage', 'acknowledgeWithResponse', 'updateOriginalResponse'])
+            ->onlyMethods(['__get', '__isset', 'respondWithMessage', 'acknowledgeWithResponse', 'updateOriginalResponse', 'sendFollowUpMessage'])
             ->getStub();
         $attributes = fn (string $name) => match ($name) {
-            'member' => $member,
+            // Discord only sends the member for commands used in a server.
+            'member' => $guildId === null ? null : $member,
             'user' => (object) ['id' => $userId],
             'guild_id' => $guildId,
             default => null,
@@ -63,6 +67,13 @@ abstract class CommandTestCase extends VoiceTestCase
 
             return resolve(null);
         });
+        $interaction->method('sendFollowUpMessage')->willReturnCallback(
+            function (MessageBuilder $message, bool $ephemeral = false): PromiseInterface {
+                $this->followUps[] = ['content' => $message->getContent(), 'ephemeral' => $ephemeral];
+
+                return resolve(null);
+            }
+        );
 
         return $interaction;
     }

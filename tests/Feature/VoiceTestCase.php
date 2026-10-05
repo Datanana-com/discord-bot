@@ -19,6 +19,7 @@ use Monolog\Level;
 use Monolog\Logger;
 use PHPUnit\Framework\TestCase;
 use React\EventLoop\Loop;
+use React\EventLoop\LoopInterface;
 use React\Promise\Deferred;
 use React\Promise\PromiseInterface;
 use ReflectionClass;
@@ -108,7 +109,7 @@ abstract class VoiceTestCase extends TestCase
             ->onlyMethods(['getLogger', 'getLoop', 'joinVoiceChannel'])
             ->getStub();
         $discord->method('getLogger')->willReturn($logger);
-        $discord->method('getLoop')->willReturn(Loop::get());
+        $discord->method('getLoop')->willReturn($this->loop());
         $this->discord = $discord;
     }
 
@@ -129,6 +130,14 @@ abstract class VoiceTestCase extends TestCase
         }
 
         exec('rm -rf ' . escapeshellarg($this->recordings));
+    }
+
+    /**
+     * The event loop the bot runs its timers on.
+     */
+    protected function loop(): LoopInterface
+    {
+        return Loop::get();
     }
 
     /**
