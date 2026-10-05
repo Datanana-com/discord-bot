@@ -7,8 +7,8 @@ namespace Tests;
 use PHPUnit\Event\Facade as EventFacade;
 use PHPUnit\Event\Test\Finished;
 use PHPUnit\Event\Test\FinishedSubscriber;
-use PHPUnit\Event\Test\Prepared;
-use PHPUnit\Event\Test\PreparedSubscriber;
+use PHPUnit\Event\Test\PreparationStarted;
+use PHPUnit\Event\Test\PreparationStartedSubscriber;
 use PHPUnit\Event\TestRunner\ExecutionFinished;
 use PHPUnit\Event\TestRunner\ExecutionFinishedSubscriber;
 use PHPUnit\Runner\Extension\Extension;
@@ -29,7 +29,7 @@ use PHPUnit\TextUI\Configuration\Configuration;
  */
 final class EventLoopCheck implements Extension
 {
-    /** @var array<string, string> What was waiting in the loop before the test that is running. */
+    /** @var array<string, string> What was waiting in the loop before the test that is running, and before its setUp(). */
     private array $before = [];
 
     /** @var array<string, string> Key of a thing in the loop => the test that left it there. */
@@ -38,12 +38,12 @@ final class EventLoopCheck implements Extension
     public function bootstrap(Configuration $configuration, Facade $facade, ParameterCollection $parameters): void
     {
         $facade->registerSubscribers(
-            new class ($this) implements PreparedSubscriber {
+            new class ($this) implements PreparationStartedSubscriber {
                 public function __construct(private readonly EventLoopCheck $check)
                 {
                 }
 
-                public function notify(Prepared $event): void
+                public function notify(PreparationStarted $event): void
                 {
                     $this->check->testStarted();
                 }

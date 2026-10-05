@@ -32,6 +32,11 @@ final class EventLoopCheckTest extends TestCase
             '/^- timer once after 3600s, callback LeakyTest\.php:\d+, left by Tests\\\\Fixtures\\\\EventLoopCheck\\\\LeakyTest::testLeavesATimer$/m',
             $output,
         );
+        // A server started in setUp(), as on #11, is blamed on the test that needed it as well.
+        $this->assertMatchesRegularExpression(
+            '/^- reading stream tcp_socket\S* local 127\.0\.0\.1:\d+, left by Tests\\\\Fixtures\\\\EventLoopCheck\\\\LeakyInSetUpTest::testNeedsAServer$/m',
+            $output,
+        );
         $this->assertStringNotContainsString('testLeavesNothing', $output, 'A test that closed what it opened is not blamed.');
         $this->assertStringContainsString('PHPUnit Warnings: 1', $output);
     }

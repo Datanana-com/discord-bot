@@ -101,10 +101,10 @@ final class VoiceMessageTest extends TestCase
     {
         $cdn = new FakeCdn();
         $cdn->install();
-        // 5 seconds of 16 kHz mono 16-bit audio, which whisper takes 1 second to transcribe: more than the 0.1 second
-        // it is given at least, less than the 15 it is given for 5 seconds of audio.
-        putenv('FAKE_FFMPEG_BYTES=' . 5 * 32000);
-        putenv('FAKE_WHISPER_DELAY=1');
+        // 1 second of 16 kHz mono 16-bit audio, which whisper takes 2 seconds to transcribe: more than the 0.1 second
+        // it is given at least, less than the 3 it is given for 1 second of audio.
+        putenv('FAKE_FFMPEG_BYTES=32000');
+        putenv('FAKE_WHISPER_DELAY=2');
 
         try {
             $voiceMessage = new VoiceMessage(
@@ -113,7 +113,7 @@ final class VoiceMessageTest extends TestCase
                 $this->folder,
             );
 
-            $this->assertSame('Hey Claude, what time is it?', await($voiceMessage->transcribe($this->message(attachments: [(object) ['url' => 'https://cdn.discordapp.com/voice.ogg', 'duration_secs' => 5.0]]))));
+            $this->assertSame('Hey Claude, what time is it?', await($voiceMessage->transcribe($this->message(attachments: [(object) ['url' => 'https://cdn.discordapp.com/voice.ogg', 'duration_secs' => 1.0]]))));
         } finally {
             putenv('FAKE_FFMPEG_BYTES');
             putenv('FAKE_WHISPER_DELAY');
