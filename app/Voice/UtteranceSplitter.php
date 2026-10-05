@@ -17,13 +17,13 @@ use Discord\Voice\Recording\WavWriter;
 final class UtteranceSplitter
 {
     /** Bytes per second of 48 kHz, 16-bit stereo PCM. */
-    private const int BYTES_PER_SECOND = 48000 * 2 * 2;
+    public const int BYTES_PER_SECOND = 48000 * 2 * 2;
 
-    /** Gap in a speaker's audio that ends their utterance. */
-    public const float SILENCE_SECONDS = 1.0;
+    /** Gap in a speaker's audio that ends their utterance, unless the splitter is given another. */
+    public const float SILENCE_SECONDS = 0.6;
 
     /** Shorter utterances (coughs, clicks, "hm") are dropped. */
-    private const float MIN_SECONDS = 0.5;
+    public const float MIN_SECONDS = 0.5;
 
     /** Longer utterances are cut, so long monologues still get handled. */
     private const float MAX_SECONDS = 30.0;
@@ -36,10 +36,12 @@ final class UtteranceSplitter
     /**
      * @param string $directory Where utterance WAV files are written.
      * @param Closure(string $userId, string $wavPath, float $seconds): void $onUtterance Called with each finished utterance.
+     * @param float $silenceSeconds Gap in a speaker's audio that ends their utterance: longer for people who pause in the middle of a sentence.
      */
     public function __construct(
         private readonly string $directory,
         private readonly Closure $onUtterance,
+        private readonly float $silenceSeconds = self::SILENCE_SECONDS,
     ) {
     }
 
@@ -77,7 +79,7 @@ final class UtteranceSplitter
     public function flushSilent(float $now): void
     {
         foreach ($this->utterances as $userId => $utterance) {
-            if ($now - $utterance['lastAudioAt'] >= self::SILENCE_SECONDS) {
+            if ($now - $utterance['lastAudioAt'] >= $this->silenceSeconds) {
                 $this->finish((string) $userId);
             }
         }

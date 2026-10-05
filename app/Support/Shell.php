@@ -65,6 +65,29 @@ final class Shell
     }
 
     /**
+     * Starts a program that keeps running, to give it its input later, and more than once.
+     *
+     * @param list<string> $command Program followed by its arguments; each one is shell-escaped.
+     * @param (callable(string $line): void)|null $onLine Called with each line of stdout, without its line ending.
+     *                                                    When it throws, the program is stopped.
+     * @param (callable(string $line): mixed)|null $onErrorLine Called with each line of stderr, likewise. It returns
+     *                                                          true for a line it expected. The end of what the
+     *                                                          program said since the last such line is kept, to
+     *                                                          say why it failed.
+     * @param string|null $cwd Working directory, or null for the bot's own.
+     * @param array<string, string>|null $env Environment variables, or null to inherit the bot's.
+     */
+    public static function open(
+        array $command,
+        ?callable $onLine = null,
+        ?callable $onErrorLine = null,
+        ?string $cwd = null,
+        ?array $env = null,
+    ): Program {
+        return new Program($command, $onLine === null ? null : $onLine(...), $onErrorLine === null ? null : $onErrorLine(...), $cwd, $env);
+    }
+
+    /**
      * @param list<string> $command
      * @param (callable(string): void)|null $onLine Gets stdout line by line; without it, stdout is collected.
      * @param array<string, string>|null $env
