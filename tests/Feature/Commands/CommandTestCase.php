@@ -30,7 +30,7 @@ abstract class CommandTestCase extends VoiceTestCase
      * A slash command used by a member who is in the given voice channel, or in none.
      *
      * @param string|null $guildId The server it was used in, or null for a direct message.
-     * @param string      $userId  Who used it.
+     * @param string      $userId  Who used it: Alice, unless told otherwise.
      */
     protected function interaction(?Channel $voiceChannel, ?string $guildId = self::GUILD_ID, string $userId = '555'): Interaction
     {
