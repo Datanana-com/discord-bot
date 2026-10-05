@@ -210,7 +210,7 @@ final class MemoryUpdateTest extends VoiceTestCase
         $this->assertSame($temporaryFiles, glob(sys_get_temp_dir() . '/memory-*'), 'Nothing was left in the system\'s temporary folder.');
     }
 
-    public function testKeepsTheMemoryWhenClaudeCannotUpdateIt(): void
+    public function testKeepsTheMemoryAndWhatWasSaidWhenClaudeCannotUpdateIt(): void
     {
         $this->memory()->save('555', self::MEMORY);
         $this->chat('We ship the beta on Friday.');
@@ -231,6 +231,16 @@ final class MemoryUpdateTest extends VoiceTestCase
         $this->chat('Are you still there?');
 
         $this->assertCount(2, $this->sent);
+
+        // The next update is given what the failed one was, too.
+        $this->pause(self::NEW_MEMORY);
+
+        $this->assertStringContainsString(
+            "What was said since it was last updated:\n\nAlice: We ship the beta on Friday.\nClaude: " . self::ANSWER
+            . "\nAlice: Are you still there?\nClaude: " . self::ANSWER . "\n\n",
+            $this->lastPrompt(),
+        );
+        $this->assertSame(self::NEW_MEMORY, $this->memory()->read('555'));
     }
 
     /**

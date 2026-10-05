@@ -146,7 +146,7 @@ Send the bot a direct message, and Claude answers it there, in text, as your per
 
 **The memory** is a markdown note that Claude writes about each person, at `MEMORY_PATH/<user id>.md`. It holds what helps Claude help that person later: their projects, plans, decisions, preferences, open questions and the people they mention. Claude is told to leave out passwords, tokens and other secrets. The note stays under 4,000 characters, so it fits in every prompt: when it's full, Claude keeps what's most useful.
 
-The memory is updated when a conversation pauses. Ten minutes after your last message, one Claude request gets the current memory and what was said since its last update, and returns the new memory. If the bot stops before then, that update is lost.
+The memory is updated when a conversation pauses. Ten minutes after your last message, one Claude request gets the current memory and what was said since its last update, and returns the new memory. When that fails (the usage limit is reached, ...), the next update gets what was said, too. If the bot stops before then, that update is lost.
 
 - `/memory` shows you what the bot remembers about you.
 - `/forget` deletes it, together with what you said since its last update. The messages themselves stay in the DM, where the last 20 are still sent to Claude with your next message.

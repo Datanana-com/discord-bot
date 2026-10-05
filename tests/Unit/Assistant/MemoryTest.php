@@ -84,6 +84,24 @@ final class MemoryTest extends TestCase
         $this->assertSame($saved, (new Memory($this->directory))->read('555'));
     }
 
+    public function testCutsALongParagraphAfterItsLastSentenceThatFits(): void
+    {
+        $paragraph = trim(str_repeat('Alex is building a game called Bananas with two friends. ', 85));
+        $tooLong = "## About Alex\n{$paragraph}";
+
+        $saved = (new Memory($this->directory))->save('555', $tooLong);
+
+        // Not only the heading: the paragraph is kept up to its last sentence that fits.
+        $this->assertSame(mb_substr($tooLong, 0, mb_strlen($saved)), $saved);
+        $this->assertStringEndsWith('two friends.', $saved);
+        $this->assertSame(3946, mb_strlen($saved));
+    }
+
+    public function testCutsAWordThatIsTooLongAtTheLimit(): void
+    {
+        $this->assertSame(str_repeat('a', Memory::LIMIT), (new Memory($this->directory))->save('555', str_repeat('a', Memory::LIMIT + 10)));
+    }
+
     public function testKeepsAMemoryThatIsExactlyAsLongAsTheLimit(): void
     {
         // Counted in characters, not bytes.
@@ -134,5 +152,10 @@ final class MemoryTest extends TestCase
         $_ENV['MEMORY_PATH'] = '/var/lib/bot/memories/';
 
         $this->assertSame('/var/lib/bot/memories', Memory::fromEnv()->directory);
+
+        // Not the root of the disk.
+        $_ENV['MEMORY_PATH'] = '';
+
+        $this->assertSame('memories', Memory::fromEnv()->directory);
     }
 }

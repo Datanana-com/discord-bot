@@ -278,7 +278,7 @@ final class DirectChat
 
     /**
      * Has Claude rewrite the person's memory with what was said since its last update.
-     * When that fails, what was said is not remembered.
+     * When that fails, the next update is given what was said, too.
      */
     private function updateMemory(): PromiseInterface
     {
@@ -307,6 +307,13 @@ final class DirectChat
 
             $memory = $this->memory->save($this->userId, $memory);
             $this->log('info', 'Updated memory', ['characters' => mb_strlen($memory)]);
+        })->catch(function (Throwable $e) use ($said, $forgotten) {
+            // Unless the person asked to be forgotten meanwhile.
+            if ($forgotten === $this->forgotten) {
+                $this->unremembered = [...$said, ...$this->unremembered];
+            }
+
+            throw $e;
         });
     }
 

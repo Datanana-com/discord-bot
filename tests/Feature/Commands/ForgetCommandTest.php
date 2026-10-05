@@ -152,4 +152,30 @@ final class ForgetCommandTest extends CommandTestCase
         $this->assertSame([], $this->logged('Updated memory'));
         $this->assertSame([], $this->loggedProblems());
     }
+
+    public function testDoesNotKeepWhatAFailedUpdateWasGivenOnceForgotten(): void
+    {
+        $this->chat('My cat is called Whiskers.');
+
+        // The update fails while the person asks to be forgotten.
+        $this->setProcessEnv([
+            'FAKE_CLAUDE_DELAY' => '0.3',
+            'FAKE_CLAUDE_OUTPUT' => json_encode(['type' => 'result', 'is_error' => true, 'result' => 'Usage limit reached']),
+            'FAKE_CLAUDE_EXIT' => '1',
+        ]);
+        $this->assertSame(1, $this->timers->elapse(600.0));
+        $this->waitUntil(fn () => str_starts_with($this->lastPrompt(), 'The current memory'), 'Claude to be asked for the new memory');
+        (new ForgetCommand($this->discord))->handle($this->interaction(null));
+        $this->waitUntil(fn () => $this->loggedProblems() !== [], 'the update to fail');
+
+        // The next update only gets what was said after /forget.
+        $this->setProcessEnv(['FAKE_CLAUDE_DELAY' => '0', 'FAKE_CLAUDE_OUTPUT' => $this->claudeSays(self::ANSWER), 'FAKE_CLAUDE_EXIT' => '0']);
+        $this->chat('I live in Lisbon.');
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => $this->claudeSays('- Lives in Lisbon.')]);
+        $this->assertSame(1, $this->timers->elapse(600.0));
+        $this->waitUntil(fn () => $this->logged('Updated memory') !== [], 'the next update');
+
+        $this->assertStringNotContainsString('Whiskers', $this->lastPrompt());
+        $this->assertStringContainsString('Alice: I live in Lisbon.', $this->lastPrompt());
+    }
 }
