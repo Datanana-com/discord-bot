@@ -121,11 +121,15 @@ final class PrivacyCommandTest extends CommandTestCase
         $this->breakStatsDatabase();
 
         $this->assertSame('Your privacy settings are not available right now. Check the bot logs.', $this->privacy());
-        // Nothing is changed blindly either: it isn't known what is there.
-        $this->assertSame('Your privacy settings are not available right now. Check the bot logs.', $this->privacy(UserSettings::AFTER_SHARE));
+        // A choice is saved without reading what is there, which also can't be done now.
+        $this->assertSame('Your privacy settings could not be saved. Check the bot logs.', $this->privacy(UserSettings::AFTER_SHARE));
 
         $this->assertSame(
-            array_fill(0, 2, 'Could not read the user settings: Database connection [stats] not configured.'),
+            [
+                'Could not read the user settings: Database connection [stats] not configured.',
+                'Could not read the user settings: Database connection [stats] not configured.',
+                'Could not save the user settings: Database connection [stats] not configured.',
+            ],
             $this->loggedProblems(),
         );
         $this->assertSame([], $this->logged('/privacy changed'));
@@ -138,6 +142,20 @@ final class PrivacyCommandTest extends CommandTestCase
 
         $this->assertSame('Your privacy settings are not available right now. Check the bot logs.', $this->privacy());
         $this->assertSame(['The user settings hold a value that is not a choice.'], $this->loggedProblems());
+    }
+
+    public function testAChoiceRepairsSettingsThatCannotBeRead(): void
+    {
+        $this->store->save('555', ['personal_memory_in_calls' => UserSettings::WHEN_ASKED]);
+        DB::connection(Usage::CONNECTION)->table('user_settings')->update(['personal_memory_in_calls' => 'whenever']);
+
+        // Until then calls keep the memory out, so being able to choose again matters.
+        $reply = $this->privacy(UserSettings::AFTER_SHARE);
+
+        $this->assertSame(self::ONLY_AFTER_SHARE, $reply);
+        $this->assertSame(['personal_memory_in_calls' => 'after_share'], $this->store->find('555'));
+        $this->assertSame([['user' => '555', 'personal_memory_in_calls' => 'after_share']], $this->logged('/privacy changed'));
+        $this->assertSame(self::SHOWN_AFTER_SHARE, $this->privacy());
     }
 
     public function testSaysWhenTheSettingCannotBeSaved(): void

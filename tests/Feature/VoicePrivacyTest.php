@@ -255,6 +255,28 @@ final class VoicePrivacyTest extends CommandTestCase
         await($session->stop());
     }
 
+    public function testSomeoneLeavingWhileTheQuestionWaitsForItsTurnDoesNotMakeThemAlone(): void
+    {
+        $this->inCall('555', '666');
+        $this->setProcessEnv(['FAKE_CLAUDE_PAUSE' => '10']);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->privacy('555', UserSettings::AFTER_SHARE);
+
+        // The second question is asked with Bob in the call, and waits behind the first one.
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => self::QUESTION]);
+        $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->claudeCalls() !== [], 'Claude to be asked');
+        $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => count($this->logged('Utterance ended')) === 2, 'the second question to end');
+        $this->leaves('666');
+        touch($this->claudeResume);
+        $this->waitUntil(fn () => count($this->claudeCalls()) === 2, 'Claude to be asked again');
+
+        // Bob heard the question, and was there when it was asked: leaving before it is answered doesn't make it private.
+        $this->assertStringNotContainsString('Bananas', $this->claudeCalls()[1]['prompt']);
+        await($session->stop());
+    }
+
     public function testAnAnswerBeingWrittenIsDroppedWhenSomeoneJoinsACallItWasMadeForAloneSomeoneIn(): void
     {
         $this->inCall('555');
@@ -297,6 +319,7 @@ final class VoicePrivacyTest extends CommandTestCase
         $this->askAndPause($vc, '555');
         $this->joins('666');
         $this->finishTheAnswer();
+        $this->waitUntil(fn () => count($this->played) === 2, 'the second sentence to be spoken');
         $this->waitUntil(fn () => $this->usage()['answers'] === 1, 'the answer to be posted');
 
         $this->assertCount(2, $this->played);
@@ -329,6 +352,7 @@ final class VoicePrivacyTest extends CommandTestCase
         $this->askAndPause($vc, '555');
         $this->joins('777');
         $this->finishTheAnswer();
+        $this->waitUntil(fn () => count($this->played) === 2, 'the second sentence to be spoken');
         $this->waitUntil(fn () => $this->usage()['answers'] === 1, 'the answer to be posted');
 
         $this->assertStringNotContainsString('Bananas', $this->claudeCalls()[0]['prompt']);

@@ -42,11 +42,6 @@ final class PrivacyCommand extends CommandAbstract
         $userId = (string) $interaction->user?->id;
         $store = new UserSettings($this->log);
         $current = $store->find($userId);
-
-        if ($current === null) {
-            return 'Your privacy settings are not available right now. Check the bot logs.';
-        }
-
         $given = null;
 
         foreach ($interaction->data?->options ?? [] as $option) {
@@ -56,7 +51,9 @@ final class PrivacyCommand extends CommandAbstract
         }
 
         if ($given === null) {
-            return "**Your privacy settings**\n" . self::describe($current);
+            return $current === null
+                ? 'Your privacy settings are not available right now. Check the bot logs.'
+                : "**Your privacy settings**\n" . self::describe($current);
         }
 
         // Discord can still offer a choice of another version of the command.
@@ -64,7 +61,8 @@ final class PrivacyCommand extends CommandAbstract
             return 'Personal memory in calls can be `' . implode('` or `', array_values(self::NAMES)) . '`.';
         }
 
-        $settings = [...$current, 'personal_memory_in_calls' => $given];
+        // A choice replaces what is saved, so it also repairs settings that can't be read: until then, calls keep this person's memory out.
+        $settings = [...($current ?? UserSettings::DEFAULTS), 'personal_memory_in_calls' => $given];
 
         if (! $store->save($userId, $settings)) {
             return 'Your privacy settings could not be saved. Check the bot logs.';
