@@ -110,6 +110,7 @@ final class MeetCommand extends CommandAbstract
                         "🔴 Recording the meeting in <#{$channel->id}>. "
                         . $this->howToTalk($session)
                         . ' It ends when everyone has left, and its channel is deleted. Use /optout if you don\'t want to be recorded.'
+                        . self::REMEMBERED
                     ))
                     // In a message of its own: Discord doesn't notify the people mentioned in a response that was edited.
                     ->then(fn () => $invited === [] ? null : $interaction->sendFollowUpMessage(

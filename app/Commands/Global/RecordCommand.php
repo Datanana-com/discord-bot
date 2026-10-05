@@ -40,6 +40,7 @@ final class RecordCommand extends CommandAbstract
                     "🔴 Recording <#{$voiceChannel->id}>. "
                     . $this->howToTalk($session)
                     . ' Use /stop to end the recording, or /optout if you don\'t want to be recorded.'
+                    . self::REMEMBERED
                 )),
                 fn (Throwable $e) => $interaction->updateOriginalResponse(MessageBuilder::new()->setContent($e->getMessage())),
             ));

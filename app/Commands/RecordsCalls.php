@@ -20,6 +20,9 @@ use Throwable;
  */
 trait RecordsCalls
 {
+    /** What the announcement of a recording says about what the bot remembers of it. */
+    private const string REMEMBERED = ' I remember each group\'s calls: see what I remember with /memory, and delete it with /forget.';
+
     /**
      * Why a call can't be recorded in the server right now, or null when one can.
      *

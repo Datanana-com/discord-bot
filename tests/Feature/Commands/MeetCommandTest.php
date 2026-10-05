@@ -50,8 +50,6 @@ use function React\Promise\resolve;
  */
 final class MeetCommandTest extends CommandTestCase
 {
-    private const string BOT_ID = '999';
-
     /** The channel /meet makes. */
     private const string MEETING = '200';
 
@@ -70,7 +68,7 @@ final class MeetCommandTest extends CommandTestCase
     /** The names people have on Discord. The bot only knows what Bob goes by in the server: Spartan. */
     private const array USERS = ['555' => 'Alice', '666' => 'Bob', '777' => 'Carol', '888' => 'Dave', '999' => 'Claude', '1234' => 'Jukebox'];
 
-    private const string RECORDING = '🔴 Recording the meeting in <#200>. Say "claude" to talk to me. It ends when everyone has left, and its channel is deleted. Use /optout if you don\'t want to be recorded.';
+    private const string RECORDING = '🔴 Recording the meeting in <#200>. Say "claude" to talk to me. It ends when everyone has left, and its channel is deleted. Use /optout if you don\'t want to be recorded. I remember each group\'s calls: see what I remember with /memory, and delete it with /forget.';
 
     private const string MISSING_PERMISSION = 'I can\'t make the meeting\'s channel: I need the Manage Channels permission, besides View Channels, Connect and Speak. Ask a server admin to give it to me.';
 
@@ -100,8 +98,6 @@ final class MeetCommandTest extends CommandTestCase
 
         // Voice is available: DiscordPHP created its voice manager.
         $this->discord->voice = (new ReflectionClass(Manager::class))->newInstanceWithoutConstructor();
-        // The bot knows who it is once it is connected.
-        (new ReflectionProperty(Discord::class, 'client'))->setValue($this->discord, (object) ['id' => self::BOT_ID]);
         $this->app = new Application(['token' => 'test-token', 'loop' => new StreamSelectLoop(), 'logger' => new Logger('discord', [new NullHandler()])]);
         $this->client = $this->app->discord;
 
@@ -278,9 +274,9 @@ final class MeetCommandTest extends CommandTestCase
         // The answers and the summary are posted in the thread: it is where the command was used.
         $session = VoiceSession::forGuild(self::GUILD_ID);
         $this->assertSame($thread, $this->textChannelOf($session));
-        $this->joins('666');
+        $this->joinsVoice('666');
         $this->speak($vc, ssrc: 2, userId: '666', seconds: 1.0);
-        $this->leaves('666');
+        $this->leavesVoice('666');
         await($session->stop());
 
         $this->assertSame(['It is a quarter past four.'], $this->sent, 'The summary of the meeting.');
@@ -326,9 +322,9 @@ final class MeetCommandTest extends CommandTestCase
             $this->logged('Meeting started'),
         );
 
-        $this->joins('666');
+        $this->joinsVoice('666');
         $this->speak($vc, ssrc: 2, userId: '666', seconds: 1.0);
-        $this->leaves('666');
+        $this->leavesVoice('666');
         await($session->stop());
 
         // What Bob said was recorded and transcribed, and the meeting summarized.
@@ -346,7 +342,7 @@ final class MeetCommandTest extends CommandTestCase
         $this->meet(['666']);
 
         $this->assertSame(
-            ['🔴 Recording the meeting in <#200>. I answer everything that is said. It ends when everyone has left, and its channel is deleted. Use /optout if you don\'t want to be recorded.'],
+            ['🔴 Recording the meeting in <#200>. I answer everything that is said. It ends when everyone has left, and its channel is deleted. Use /optout if you don\'t want to be recorded. I remember each group\'s calls: see what I remember with /memory, and delete it with /forget.'],
             $this->updates,
         );
     }
@@ -378,17 +374,17 @@ final class MeetCommandTest extends CommandTestCase
         $this->meet(['666']);
         $session = VoiceSession::forGuild(self::GUILD_ID);
 
-        $this->joins('555');
-        $this->joins('666');
+        $this->joinsVoice('555');
+        $this->joinsVoice('666');
         // Muting, or anything else that changes while they stay in the channel.
-        $this->joins('666');
-        $this->leaves('666');
+        $this->joinsVoice('666');
+        $this->leavesVoice('666');
 
         $this->assertSame([], $this->channels->deleted, 'Alice is still in the meeting.');
         $this->assertSame($session, VoiceSession::forGuild(self::GUILD_ID));
 
         // Moving to another channel is leaving too.
-        $this->joins('555', channel: '201');
+        $this->joinsVoice('555', channel: '201');
 
         // The recording stopped as with /stop, and the channel is gone.
         $this->assertNull(VoiceSession::forGuild(self::GUILD_ID));
@@ -401,7 +397,7 @@ final class MeetCommandTest extends CommandTestCase
         $this->assertSame([], $this->loggedProblems());
 
         // It is over: nothing happens when someone leaves the channel that is gone.
-        $this->leaves('555');
+        $this->leavesVoice('555');
         $this->assertSame([self::MEETING], $this->channels->deleted);
         $this->assertCount(1, $this->logged('Meeting ended'));
     }
@@ -431,13 +427,13 @@ final class MeetCommandTest extends CommandTestCase
         $this->joinsWith(resolve($this->voiceClient($this->channels->channel)));
         $this->meet(['666']);
 
-        $this->joins('666');
+        $this->joinsVoice('666');
         $this->timers->elapse(Meeting::JOIN_SECONDS);
 
         $this->assertSame([], $this->channels->deleted);
         $this->assertNotNull(VoiceSession::forGuild(self::GUILD_ID));
 
-        $this->leaves('666');
+        $this->leavesVoice('666');
 
         $this->assertSame([self::MEETING], $this->channels->deleted);
     }
@@ -447,8 +443,8 @@ final class MeetCommandTest extends CommandTestCase
         $this->joinsWith(resolve($this->voiceClient($this->channels->channel)));
         $this->meet(['666']);
 
-        $this->joins('666');
-        $this->leaves('666');
+        $this->joinsVoice('666');
+        $this->leavesVoice('666');
 
         $this->assertSame([self::MEETING], $this->channels->deleted);
         // Nothing is left to happen once the time to join would have been up.
@@ -462,7 +458,7 @@ final class MeetCommandTest extends CommandTestCase
         $this->meet(['666']);
 
         // Discord says that the bot joined, without saying that it is a bot.
-        $this->joins(self::BOT_ID, bot: null);
+        $this->joinsVoice(self::BOT_ID, bot: null);
         $this->timers->elapse(Meeting::JOIN_SECONDS);
 
         $this->assertSame([self::MEETING], $this->channels->deleted, 'Nobody joined: the bot doesn\'t count.');
@@ -474,9 +470,9 @@ final class MeetCommandTest extends CommandTestCase
         $this->meet(['666']);
 
         // A bot a server admin moved in: admins see every channel.
-        $this->joins('1234', bot: true);
-        $this->joins('666');
-        $this->leaves('666');
+        $this->joinsVoice('1234', bot: true);
+        $this->joinsVoice('666');
+        $this->leavesVoice('666');
 
         $this->assertSame([self::MEETING], $this->channels->deleted, 'The last person left: a bot staying behind doesn\'t count.');
     }
@@ -487,15 +483,15 @@ final class MeetCommandTest extends CommandTestCase
         $this->meet(['666']);
 
         // While nobody is in the meeting yet, Carol joins and leaves another voice channel.
-        $this->joins('777', channel: '201');
-        $this->leaves('777');
+        $this->joinsVoice('777', channel: '201');
+        $this->leavesVoice('777');
 
         $this->assertSame([], $this->channels->deleted, 'Bob still has time to join.');
 
         // And while Bob is in it, so does Dave in another server.
-        $this->joins('666');
-        $this->joins('888', channel: '202', guild: '101');
-        $this->leaves('888', guild: '101');
+        $this->joinsVoice('666');
+        $this->joinsVoice('888', channel: '202', guild: '101');
+        $this->leavesVoice('888', guild: '101');
 
         $this->assertSame([], $this->channels->deleted);
         $this->assertNotNull(VoiceSession::forGuild(self::GUILD_ID));
@@ -508,13 +504,13 @@ final class MeetCommandTest extends CommandTestCase
         $this->meet(['666']);
 
         // The people invited see the channel as soon as it is made.
-        $this->joins('666');
+        $this->joinsVoice('666');
         $joining->resolve($this->voiceClient($this->channels->channel));
         $this->timers->elapse(Meeting::JOIN_SECONDS);
 
         $this->assertSame([], $this->channels->deleted, 'Bob is in the meeting.');
 
-        $this->leaves('666');
+        $this->leavesVoice('666');
 
         $this->assertSame([self::MEETING], $this->channels->deleted);
     }
@@ -525,8 +521,8 @@ final class MeetCommandTest extends CommandTestCase
         $this->joinsWith($joining->promise());
         $this->meet(['666', '777']);
 
-        $this->joins('666');
-        $this->leaves('666');
+        $this->joinsVoice('666');
+        $this->leavesVoice('666');
 
         $this->assertSame([], $this->channels->deleted, 'Carol can still join.');
 
@@ -567,12 +563,12 @@ final class MeetCommandTest extends CommandTestCase
         $this->joinsWith($joining->promise());
         $this->meet(['666']);
 
-        $this->joins('666');
+        $this->joinsVoice('666');
         $this->timers->elapse(Meeting::JOIN_SECONDS);
 
         $this->assertSame([], $this->channels->deleted, 'Bob is in the channel.');
 
-        $this->leaves('666');
+        $this->leavesVoice('666');
 
         // Nobody has time left to join, and nothing else would ever end the meeting.
         $this->assertSame([self::MEETING], $this->channels->deleted);
@@ -593,9 +589,9 @@ final class MeetCommandTest extends CommandTestCase
         $other->method('__get')->willReturnCallback(fn (string $name) => $name === 'id' ? '201' : null);
         Meeting::open($other, $this->guild(), $this->discord, 1);
 
-        $this->joins('666');
-        $this->joins('777', channel: '201');
-        $this->leaves('666');
+        $this->joinsVoice('666');
+        $this->joinsVoice('777', channel: '201');
+        $this->leavesVoice('666');
 
         $this->assertSame([self::MEETING], $this->channels->deleted, 'Carol is still in the other meeting.');
 
@@ -603,7 +599,7 @@ final class MeetCommandTest extends CommandTestCase
 
         $this->assertSame([self::MEETING], $this->channels->deleted);
 
-        $this->leaves('777');
+        $this->leavesVoice('777');
 
         $this->assertSame([self::MEETING, '201'], $this->channels->deleted);
     }
@@ -625,14 +621,14 @@ final class MeetCommandTest extends CommandTestCase
     {
         $this->joinsWith(resolve($this->voiceClient($this->channels->channel, connected: true)));
         $this->meet(['666']);
-        $this->joins('666');
+        $this->joinsVoice('666');
 
         (new StopCommand($this->discord))->handle($this->interaction($this->channels->channel));
 
         $this->assertNull(VoiceSession::forGuild(self::GUILD_ID));
         $this->assertSame([], $this->channels->deleted, 'Bob is still in the channel.');
 
-        $this->leaves('666');
+        $this->leavesVoice('666');
 
         $this->assertSame([self::MEETING], $this->channels->deleted);
         $this->assertCount(1, $this->logged('Meeting ended'));
@@ -755,8 +751,8 @@ final class MeetCommandTest extends CommandTestCase
             (new Deferred())->promise(),
         );
         $this->meet(['666']);
-        $this->joins('666');
-        $this->leaves('666');
+        $this->joinsVoice('666');
+        $this->leavesVoice('666');
 
         $this->meet(['777']);
 
@@ -769,7 +765,7 @@ final class MeetCommandTest extends CommandTestCase
         // It expects to be closed exactly once.
         $this->joinsWith(resolve($this->voiceClient($this->channels->channel, connected: true)));
         $this->meet(['666']);
-        $this->joins('666');
+        $this->joinsVoice('666');
         // The disk is full: stopping the call fails when it logs that it stopped.
         $this->discord->getLogger()->pushHandler(new class () extends AbstractHandler {
             public function handle(LogRecord $record): bool
@@ -990,7 +986,7 @@ final class MeetCommandTest extends CommandTestCase
      *
      * @param bool|null $bot Whether Discord says they are a bot, or null when it doesn't say.
      */
-    private function joins(string $userId, ?string $channel = self::MEETING, ?bool $bot = false, string $guild = self::GUILD_ID): void
+    private function joinsVoice(string $userId, ?string $channel = self::MEETING, ?bool $bot = false, string $guild = self::GUILD_ID): void
     {
         $this->voiceState($userId, $channel, $bot, $guild);
         $this->assertSame([], preg_grep('/^(Event "|Error while handling event)/', $this->loggedProblems()), 'The event was handled.');
@@ -1011,9 +1007,9 @@ final class MeetCommandTest extends CommandTestCase
     /**
      * Discord says that someone left the voice channel they were in.
      */
-    private function leaves(string $userId, string $guild = self::GUILD_ID): void
+    private function leavesVoice(string $userId, string $guild = self::GUILD_ID): void
     {
-        $this->joins($userId, channel: null, guild: $guild);
+        $this->joinsVoice($userId, channel: null, guild: $guild);
     }
 
     private function joinsWith(PromiseInterface $promise): void
