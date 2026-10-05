@@ -58,39 +58,17 @@ final readonly class Claude
      * @param string $systemPrompt What Claude is asked to do; by default, to answer in a voice call.
      * @param (callable(string $text): void)|null $onText Called with each piece of the answer while Claude is
      *                                                    writing it. Together, the pieces are the whole answer.
+     * @param bool $thinks Whether Claude may think before it answers. In a call it doesn't: thinking takes
+     *                     seconds before the first word of a one-line answer.
      * @return PromiseInterface<string> Claude's answer.
      */
-    public function ask(string $prompt, string $systemPrompt = self::SYSTEM_PROMPT, ?callable $onText = null): PromiseInterface
+    public function ask(string $prompt, string $systemPrompt = self::SYSTEM_PROMPT, ?callable $onText = null, bool $thinks = true): PromiseInterface
     {
-        // An empty directory keeps Claude Code from picking up a CLAUDE.md or project settings.
-        if (! is_dir($this->workingDirectory)) {
-            mkdir($this->workingDirectory, 0700, true);
-        }
-
-        // ANTHROPIC_API_KEY takes precedence over the subscription login, so it is never passed on.
-        $env = getenv();
-        unset($env['ANTHROPIC_API_KEY']);
-
         $result = null;
         $streamed = false;
 
         return Shell::stream(
-            [
-                $this->binary,
-                '--print',
-                // One JSON event per line while Claude answers. --print only streams with --verbose,
-                // and only sends the text while it is being written with --include-partial-messages.
-                '--output-format', 'stream-json',
-                '--verbose',
-                '--include-partial-messages',
-                '--model', $this->model,
-                '--system-prompt', $systemPrompt,
-                // The prompt is built from whatever anyone says in the call,
-                // so Claude gets no tools and no MCP servers on this machine.
-                '--tools', '',
-                '--strict-mcp-config',
-                '--no-session-persistence',
-            ],
+            $this->command($systemPrompt),
             // Most events are about the session, hooks, rate limits or Claude's thinking: only two matter here.
             function (string $line) use (&$result, &$streamed, $onText) {
                 $event = json_decode($line, true);
@@ -104,8 +82,8 @@ final readonly class Claude
                 }
             },
             $prompt,
-            $this->workingDirectory,
-            $env,
+            $this->directory(),
+            $this->environment($thinks),
         )->then(function () use (&$result, &$streamed, $onText) {
             $answer = self::answer($result);
 
@@ -123,6 +101,68 @@ final readonly class Claude
                 ? new RuntimeException('Claude Code: ' . $result['result'])
                 : $e;
         });
+    }
+
+    /**
+     * The command that starts Claude Code to answer one prompt, which it reads from its stdin.
+     *
+     * @return list<string>
+     */
+    private function command(string $systemPrompt): array
+    {
+        return [
+            $this->binary,
+            '--print',
+            // One JSON event per line while Claude answers. --print only streams with --verbose,
+            // and only sends the text while it is being written with --include-partial-messages.
+            '--output-format', 'stream-json',
+            '--verbose',
+            '--include-partial-messages',
+            '--model', $this->model,
+            '--system-prompt', $systemPrompt,
+            // The prompt is built from whatever anyone says in the call,
+            // so Claude gets no tools and no MCP servers on this machine.
+            '--tools', '',
+            '--strict-mcp-config',
+            '--no-session-persistence',
+            // Nor the settings of the user the bot runs as: their plugins, skills and hooks would be loaded
+            // for every prompt, which takes seconds, and a plugin can change how Claude answers.
+            '--setting-sources', '',
+        ];
+    }
+
+    /**
+     * The environment Claude Code runs in.
+     *
+     * @return array<string, string>
+     */
+    private function environment(bool $thinks): array
+    {
+        // ANTHROPIC_API_KEY takes precedence over the subscription login, so it is never passed on.
+        $env = getenv();
+        unset($env['ANTHROPIC_API_KEY']);
+
+        // Claude Code is ready sooner when it doesn't look for updates, nor sends what it can do without.
+        $env['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'] = '1';
+        $env['DISABLE_AUTOUPDATER'] = '1';
+
+        if (! $thinks) {
+            $env['MAX_THINKING_TOKENS'] = '0';
+        }
+
+        return $env;
+    }
+
+    /**
+     * The directory Claude Code runs in: an empty one keeps it from picking up a CLAUDE.md or project settings.
+     */
+    private function directory(): string
+    {
+        if (! is_dir($this->workingDirectory)) {
+            mkdir($this->workingDirectory, 0700, true);
+        }
+
+        return $this->workingDirectory;
     }
 
     /**

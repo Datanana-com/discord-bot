@@ -687,7 +687,7 @@ final class VoiceSession
             });
         });
 
-        return $this->claude->ask($this->prompt($userId, $name, $people, $sharers), onText: $sentences->push(...))->then(
+        return $this->claude->ask($this->prompt($userId, $name, $people, $sharers), onText: $sentences->push(...), thinks: false)->then(
             function (string $answer) use ($sentences, &$spoken, $userId, $sharers, $name, $question, $endedAt, $asking, $people) {
                 $this->log('info', 'Claude answered', ['user' => $userId, 'ms' => $this->msSince($asking), 'characters' => mb_strlen($answer)]);
                 $sentences->flush();

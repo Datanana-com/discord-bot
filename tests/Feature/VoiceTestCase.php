@@ -97,6 +97,9 @@ abstract class VoiceTestCase extends TestCase
     /** @var array<string, string|false> */
     private array $originalEnv = [];
 
+    /** @var array<string, string|false> */
+    private array $originalProcessEnv = [];
+
     protected function setUp(): void
     {
         $fixtures = dirname(__DIR__) . '/Fixtures';
@@ -156,10 +159,12 @@ abstract class VoiceTestCase extends TestCase
         // A call a test left starting, as when the bot never got to join, is not starting in the next test.
         (new ReflectionProperty(VoiceSession::class, 'starting'))->setValue(null, []);
 
+        foreach ($this->originalProcessEnv as $name => $value) {
+            putenv($value === false ? $name : "{$name}={$value}");
+        }
+
         foreach ($this->originalEnv as $name => $value) {
-            if (str_starts_with($name, 'FAKE_')) {
-                putenv($value === false ? $name : "{$name}={$value}");
-            } elseif ($value === false) {
+            if ($value === false) {
                 unset($_ENV[$name]);
             } else {
                 $_ENV[$name] = $value;
@@ -198,7 +203,7 @@ abstract class VoiceTestCase extends TestCase
     protected function setProcessEnv(array $values): void
     {
         foreach ($values as $name => $value) {
-            $this->originalEnv[$name] ??= getenv($name);
+            $this->originalProcessEnv[$name] ??= getenv($name);
             putenv("{$name}={$value}");
         }
     }
@@ -304,8 +309,9 @@ abstract class VoiceTestCase extends TestCase
     }
 
     /**
-     * @return list<array{prompt: string, system: string}> What Claude Code was given each time it ran:
-     *                                                       the prompt on its standard input, and the system prompt on one line.
+     * @return list<array{prompt: string, system: string, thinking: string, arguments: string}>
+     *         What Claude Code was given each time it ran: the prompt on its standard input, the system prompt
+     *         on one line, MAX_THINKING_TOKENS in its environment ("unset" without it), and its arguments, one per line.
      */
     protected function claudeCalls(): array
     {
@@ -318,7 +324,14 @@ abstract class VoiceTestCase extends TestCase
         foreach (array_slice(explode("=== call ===\n", file_get_contents($this->claudeCalls)), 1) as $call) {
             preg_match('/^stdin=(.*)\n\z/ms', $call, $prompt);
             preg_match('/^arg=--system-prompt\narg=(.*?)\narg=--tools$/ms', $call, $system);
-            $calls[] = ['prompt' => $prompt[1] ?? '', 'system' => preg_replace('/\s+/', ' ', $system[1] ?? '')];
+            preg_match('/^thinking=(.*)$/m', $call, $thinking);
+            preg_match('/^arg=.*(?=^stdin=)/ms', $call, $arguments);
+            $calls[] = [
+                'prompt' => $prompt[1] ?? '',
+                'system' => preg_replace('/\s+/', ' ', $system[1] ?? ''),
+                'thinking' => $thinking[1] ?? '',
+                'arguments' => $arguments[0] ?? '',
+            ];
         }
 
         return $calls;

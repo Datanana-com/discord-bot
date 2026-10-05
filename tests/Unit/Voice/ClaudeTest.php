@@ -27,8 +27,13 @@ final class ClaudeTest extends TestCase
     /** @var list<string> The pieces of its answer Claude handed over while writing it. */
     private array $pieces = [];
 
+    /** How much Claude thinks, when whoever runs the tests has set it. */
+    private string|false $thinking;
+
     protected function setUp(): void
     {
+        $this->thinking = getenv('MAX_THINKING_TOKENS');
+        putenv('MAX_THINKING_TOKENS');
         $this->log = tempnam(sys_get_temp_dir(), 'fake-claude-');
         $this->workingDirectory = sys_get_temp_dir() . '/claude-test-' . uniqid();
         $this->resume = "{$this->log}.resume";
@@ -45,6 +50,7 @@ final class ClaudeTest extends TestCase
         putenv('FAKE_CLAUDE_PAUSE');
         putenv('FAKE_CLAUDE_RESUME');
         putenv('ANTHROPIC_API_KEY');
+        putenv($this->thinking === false ? 'MAX_THINKING_TOKENS' : "MAX_THINKING_TOKENS={$this->thinking}");
         unset($_ENV['CLAUDE_MODEL']);
         unlink($this->log);
         @unlink($this->resume);
@@ -86,6 +92,40 @@ final class ClaudeTest extends TestCase
         $this->assertContains('--no-session-persistence', $args);
         $this->assertStringContainsString('Discord voice call', $this->option($args, '--system-prompt'));
         $this->assertNotContains('--bare', $args, '--bare ignores the subscription login.');
+    }
+
+    public function testNeverLoadsTheSettingsOfTheUserTheBotRunsAs(): void
+    {
+        putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeResult('Paris.'));
+
+        await($this->claude()->ask('Hello', 'You summarize voice calls.'));
+
+        // Their plugins, skills and hooks would be loaded for every prompt, and can change how Claude answers.
+        $log = file_get_contents($this->log);
+        $this->assertSame('', $this->option($this->arguments($log), '--setting-sources'));
+
+        // Claude Code is ready sooner without its update check and the requests it can do without.
+        $this->assertStringContainsString("nonessential_traffic=1\n", $log);
+        $this->assertStringContainsString("autoupdater=1\n", $log);
+    }
+
+    public function testThinksAsMuchAsItIsSetToUnlessToldNotTo(): void
+    {
+        putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeResult('Paris.'));
+
+        await($this->claude()->ask('Hello'));
+        $this->assertStringContainsString("thinking=unset\n", file_get_contents($this->log));
+
+        putenv('MAX_THINKING_TOKENS=4000');
+        await($this->claude()->ask('Hello'));
+        $this->assertStringContainsString("thinking=4000\n", file_get_contents($this->log));
+
+        // An answer in a call can't wait for it.
+        await($this->claude()->ask('Hello', thinks: false));
+        $log = file_get_contents($this->log);
+        $this->assertStringContainsString("thinking=0\n", $log);
+        $this->assertSame('', $this->option($this->arguments($log), '--setting-sources'));
+        $this->assertStringContainsString("nonessential_traffic=1\nautoupdater=1\n", $log);
     }
 
     public function testAsksWithAnotherSystemPromptUnderTheSameSafetyMeasures(): void

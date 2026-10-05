@@ -116,6 +116,8 @@ Recordings are kept until you delete them, unless `RECORDINGS_RETENTION_DAYS` is
 
 Claude runs with every tool disabled, no MCP servers and from an empty directory, so nothing said in the call can make it read or change anything on your computer. Its answers and summaries do count against your subscription's usage limits, and anyone in the server can use `/record`, `/meet` and `/recall`.
 
+Claude Code never loads the settings of the user the bot runs as (`--setting-sources ""`), in calls, summaries, `/recall`, direct messages and memory updates: their plugins, skills and hooks would be loaded for every question, which takes seconds, and a plugin can change how Claude answers. The subscription login still works. Answers in a call are written without thinking first (`MAX_THINKING_TOKENS=0`), as thinking takes seconds before the first word of a one-line answer. Everything else thinks as much as Claude Code does by default, or as `MAX_THINKING_TOKENS` says when it is set for the bot.
+
 ### Opting out of being recorded
 
 Anyone can use `/optout`, in any server the bot is in or in a direct message with it. From then on, in every server:

@@ -8,6 +8,9 @@
 {
     printf 'cwd=%s\n' "$PWD"
     printf 'api_key=%s\n' "${ANTHROPIC_API_KEY-unset}"
+    printf 'thinking=%s\n' "${MAX_THINKING_TOKENS-unset}"
+    printf 'nonessential_traffic=%s\n' "${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC-unset}"
+    printf 'autoupdater=%s\n' "${DISABLE_AUTOUPDATER-unset}"
     for arg in "$@"; do printf 'arg=%s\n' "$arg"; done
     printf 'stdin=%s\n' "$(cat)"
 } > "${FAKE_CLAUDE_LOG:-/dev/null}"
