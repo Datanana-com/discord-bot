@@ -152,4 +152,46 @@ final class ForgetCommandTest extends CommandTestCase
         $this->assertSame([], $this->logged('Updated memory'));
         $this->assertSame([], $this->loggedProblems());
     }
+
+    #[TestWith([self::GUILD_ID], 'in a server')]
+    #[TestWith([null], 'in a direct message')]
+    public function testDeletesTheMemoryYouShareWithThePeopleYouName(?string $guildId): void
+    {
+        $this->memory()->save('555', self::MEMORY);
+        $this->memory()->save(['555', '666'], '- Plan a trip.');
+        $this->memory()->save(['555', '666', '777'], '- Run a chess club.');
+        $this->memory()->save(['666', '777'], '- Share a flat.');
+
+        (new ForgetCommand($this->discord))->handle($this->interaction(null, $guildId, users: ['with' => '666']));
+
+        $this->assertSame([['content' => 'Done: I forgot what I remembered about you and Bob.', 'ephemeral' => true]], $this->responses);
+        $this->assertSame('', $this->memory()->read(['555', '666']));
+        // Nothing else is forgotten: not Alice's own memory, nor another group's.
+        $this->assertSame(self::MEMORY, $this->memory()->read('555'));
+        $this->assertSame('- Run a chess club.', $this->memory()->read(['555', '666', '777']));
+        $this->assertSame('- Share a flat.', $this->memory()->read(['666', '777']));
+    }
+
+    public function testSaysWhenThereIsNothingToForgetWithThePeopleYouName(): void
+    {
+        $this->memory()->save('555', self::MEMORY);
+
+        (new ForgetCommand($this->discord))->handle($this->interaction(null, users: ['with' => '666', 'with2' => '777']));
+
+        $this->assertSame(
+            [['content' => "I don't remember anything about you and Bob and Carol together, so there is nothing to forget.", 'ephemeral' => true]],
+            $this->responses,
+        );
+        $this->assertSame(self::MEMORY, $this->memory()->read('555'));
+    }
+
+    public function testForgettingAGroupKeepsWhatWasSaidInYourDirectMessages(): void
+    {
+        $this->chat('My cat is called Whiskers.');
+
+        (new ForgetCommand($this->discord))->handle($this->interaction(null, users: ['with' => '666']));
+
+        // Your personal memory is still waiting to be updated with it.
+        $this->assertSame([600.0], $this->timers->pending());
+    }
 }
