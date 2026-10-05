@@ -87,6 +87,68 @@ final class VoiceConversationTest extends VoiceTestCase
         $this->assertSame(["> **Alice:** Okay, computer, what time is it?\nIt is a quarter past four."], $this->sent);
     }
 
+    public function testAnswersASpellingOfTheWakeWordThatWhisperWrote(): void
+    {
+        $this->setEnv(['VOICE_WAKE_WORD' => 'claude, cloud']);
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => 'Hey Cloud, what time is it?']);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');
+
+        $this->assertSame(["> **Alice:** Hey Cloud, what time is it?\nIt is a quarter past four."], $this->sent);
+    }
+
+    public function testDoesNotAnswerThatSpellingWhenOnlyTheNameIsTheWakeWord(): void
+    {
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => 'Hey Cloud, what time is it?']);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->transcript($session) !== '', 'the transcript');
+        $this->runFor(0.5);
+
+        $this->assertFileDoesNotExist($this->claudeLog, 'Claude was not asked.');
+        $this->assertSame([], $this->sent);
+    }
+
+    public function testGivesWhisperThePromptInEnvForEveryCall(): void
+    {
+        $this->setEnv(['WHISPER_PROMPT' => 'A voice call with the assistant Claude.']);
+        $this->setProcessEnv(['FAKE_WHISPER_LOG' => "{$this->recordings}/whisper.log"]);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->ask($vc, '555', 'Hey Claude, what time is it?');
+
+        $this->assertStringContainsString("arg=--prompt
+arg=A voice call with the assistant Claude.
+", file_get_contents("{$this->recordings}/whisper.log"));
+    }
+
+    public function testGivesWhisperNoPromptByDefault(): void
+    {
+        $this->setProcessEnv(['FAKE_WHISPER_LOG' => "{$this->recordings}/whisper.log"]);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->ask($vc, '555', 'Hey Claude, what time is it?');
+
+        $this->assertStringNotContainsString('--prompt', file_get_contents("{$this->recordings}/whisper.log"));
+    }
+
+    public function testAnswersEverySpellingOfAServersWakeWord(): void
+    {
+        (new GuildSettings(new Logger('test')))->save(self::GUILD_ID, [...GuildSettings::DEFAULTS, 'wake_word' => 'jarvis, service, jarbas'], '555');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        foreach (['Hey Jarvis, hi', 'Service, hi', 'Hello Jarbas, hi'] as $said) {
+            $this->ask($vc, '555', $said);
+        }
+
+        $this->assertCount(3, $this->sent);
+        $this->assertCount(3, $this->claudeCalls());
+        $this->assertSame('jarvis, service, jarbas', $session->wakeWord);
+    }
+
     public function testAnswersEverythingWithoutAWakeWord(): void
     {
         $this->setEnv(['VOICE_WAKE_WORD' => '']);
@@ -295,7 +357,7 @@ final class VoiceConversationTest extends VoiceTestCase
         // Each step is logged with the call's server and session, so one call can be followed in the log.
         $steps = array_filter($this->logs->getRecords(), fn ($record) => ($record->context['session'] ?? null) === $session->id);
         $this->assertSame(
-            ['Voice session started', 'Recording a speaker', 'Utterance ended', 'Transcribed', 'Claude answered', 'Started speaking', 'Voice session stopped', 'Summarized the call'],
+            ['Voice session started', 'Recording a speaker', 'Utterance ended', 'Transcribed', 'Conversation opened', 'Claude answered', 'Started speaking', 'Voice session stopped', 'Summarized the call'],
             array_values(array_map(fn ($record) => $record->message, $steps)),
         );
         $this->assertSame(self::GUILD_ID, $this->logged('Voice session started')[0]['guild']);

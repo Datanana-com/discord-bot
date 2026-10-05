@@ -94,12 +94,23 @@ final class DirectChat
     }
 
     /**
+     * A person's chat, with the memory and the Claude that the bot's settings say.
+     */
+    private static function start(string $userId, Discord $discord): self
+    {
+        $memory = Memory::fromEnv();
+        $claude = Claude::fromEnv();
+
+        return new self($userId, $discord, $memory, $claude, VoiceMessage::fromEnv(), new MemoryWriter($memory, $claude));
+    }
+
+    /**
      * Answers a direct message, after the ones the person sent before it.
      */
     public static function receive(Message $message, Discord $discord): void
     {
         $userId = (string) $message->author->id;
-        $chat = self::$chats[$userId] ??= new self($userId, $discord, $memory = Memory::fromEnv(), $claude = Claude::fromEnv(), VoiceMessage::fromEnv(), new MemoryWriter($memory, $claude));
+        $chat = self::$chats[$userId] ??= self::start($userId, $discord);
         $receivedAt = microtime(true);
 
         // Taken now: a message still waiting for its answer when the person uses /forget is forgotten too.
