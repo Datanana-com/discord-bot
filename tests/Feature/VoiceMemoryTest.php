@@ -51,7 +51,7 @@ final class VoiceMemoryTest extends VoiceTestCase
         );
         // It is told whose memory is whose, and that the whole call hears its answer.
         $this->assertStringContainsString('what you remember about the person talking to you, and what you remember about everyone in the call together', $answering['system']);
-        $this->assertStringContainsString('the other people in the call have memories of their own, which you don\'t get', $answering['system']);
+        $this->assertStringContainsString('other people in the call have memories of their own, which you only get when they shared them with the call', $answering['system']);
         $this->assertStringContainsString('Everyone in the call hears your answer, so only bring up from a memory what the question needs', $answering['system']);
         $this->assertSame(self::ALICE, $this->memory()->read('555'), 'Nothing is remembered while the call goes on.');
 
