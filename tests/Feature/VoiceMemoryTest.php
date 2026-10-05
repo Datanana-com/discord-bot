@@ -7,7 +7,6 @@ namespace Tests\Feature;
 use App\Assistant\MemoryGroup;
 use App\Privacy\OptOuts;
 use App\Voice\VoiceSession;
-
 use PHPUnit\Framework\Attributes\TestWith;
 
 use function React\Async\await;

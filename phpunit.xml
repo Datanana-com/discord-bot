@@ -19,6 +19,10 @@
             <directory>tests/Live</directory>
         </testsuite>
     </testsuites>
+    <extensions>
+        <!-- Fails the run when a test leaves a socket or a timer in the event loop, which would hang PHP at shutdown. -->
+        <bootstrap class="Tests\EventLoopCheck"/>
+    </extensions>
     <source ignoreIndirectDeprecations="true" restrictNotices="true" restrictWarnings="true">
         <include>
             <directory>app</directory>

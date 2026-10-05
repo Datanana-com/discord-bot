@@ -166,6 +166,7 @@ From then on it is a message like one you typed: the same prompt, memory, order 
 - The answer starts with a quote of what the bot heard, `> 🎤 <what you said>`, so you can tell when whisper misheard. Discord shows voice messages without text, so this quote is also what keeps your words in the DM's last 20 messages that Claude gets with your next message.
 - When nothing could be heard, the bot says so and doesn't ask Claude.
 - A voice message longer than 5 minutes is refused with a short explanation, as transcribing it would take too long. That is checked against the length Discord reports and against the audio itself, as the former comes from the sender's app.
+- whisper.cpp is given 3 seconds for each second of the message, and at least 2 minutes, before it is stopped: a message of 5 minutes can take up to 15, for a big model or a slow CPU. If it still takes longer, the bot says it couldn't transcribe the message and logs that whisper timed out. (The short utterances of a call get the 2 minutes.)
 - The audio is only downloaded from Discord's own attachment hosts (`cdn.discordapp.com` and `media.discordapp.net`, over https), with a timeout and a size limit, without following redirects and without blocking the bot. Anything else is refused.
 - The downloaded and converted files are kept in the `discord-bot-voice-messages` folder of the system's temp folder, and deleted once the message is transcribed, whether that worked or not.
 - When a voice message can't be transcribed, the bot says so, and logs why. The logs never include what was said: a voice message is logged as `Transcribed a voice message`, with the `user`, its length in `seconds`, how long it took in `ms` and the `characters` it came to.
@@ -383,13 +384,17 @@ Unit tests cover each class on its own. Feature tests run the whole voice flow, 
 
 `tests/Feature/VoiceCallTest.php` goes further: the call's audio travels over a local UDP socket standing in for Discord's media server, encrypted and Opus-encoded like in a real call, and the spoken answer is encoded by ffmpeg. It needs ffmpeg and libopus, like the bot itself, and is skipped without them.
 
-GitHub Actions runs these tests with coverage on pull requests and pushes to `master` that change PHP code, the tests, the dependencies or `phpunit.xml` (`.github/workflows/tests.yml`), with ffmpeg and libopus installed so `VoiceCallTest` runs too. Draft pull requests aren't tested until they're marked ready for review.
+A test that leaves a socket or a timer in ReactPHP's event loop fails the run. ReactPHP runs the loop when PHP ends, and a loop with something waiting in it never ends: the tests used to print `OK` and then hang, and CI waited for its 15 minute timeout without saying why. `tests/EventLoopCheck.php`, an extension set in `phpunit.xml`, looks into the loop when the tests are over and reports what is still waiting there: sockets with their addresses, and timers with the file and line of their callbacks, each with the test that left it. It then takes it all out of the loop, so the run ends. A test that starts a server or a timer closes or cancels it in `tearDown()`, as `tests/Fixtures/FakeCdn.php` does.
+
+GitHub Actions runs these tests with coverage on pull requests and pushes to `master` that change PHP code, the tests, the dependencies, `phpunit.xml` or `pint.json` (`.github/workflows/tests.yml`), with ffmpeg and libopus installed so `VoiceCallTest` runs too. Draft pull requests aren't tested until they're marked ready for review.
 
 To see the code coverage, install a coverage driver (`sudo apt install php8.5-pcov`, or Xdebug) and run:
 
 ```bash
 composer test:coverage
 ```
+
+The code style is [Laravel Pint](https://laravel.com/docs/pint) with the rules of `pint.json`. `composer pint` fixes the files; `composer pint -- --test` only lists what it would change. The same check runs in GitHub Actions (the `pint` job of `tests.yml`, next to the tests), so a pull request with a style issue fails there instead of the issue reaching `master`.
 
 ### Live voice test
 

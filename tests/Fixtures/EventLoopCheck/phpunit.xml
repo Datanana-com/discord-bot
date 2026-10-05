@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The settings of phpunit.xml that matter for the check, with a suite of its own: see tests/Unit/EventLoopCheckTest.php. -->
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="../../../vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="../../../vendor/autoload.php"
+         colors="false"
+         failOnWarning="true">
+    <testsuites>
+        <testsuite name="Leaky">
+            <file>LeakyTest.php</file>
+        </testsuite>
+        <testsuite name="Clean">
+            <file>CleanTest.php</file>
+        </testsuite>
+    </testsuites>
+    <extensions>
+        <bootstrap class="Tests\EventLoopCheck"/>
+    </extensions>
+</phpunit>
