@@ -4,7 +4,8 @@
 # Claude writes its answer over time: after the first line, this pauses for
 # FAKE_CLAUDE_PAUSE seconds, or until the file FAKE_CLAUDE_RESUME exists.
 # FAKE_CLAUDE_LOG holds the last call. When FAKE_CLAUDE_CALLS is set, every call is also appended to it.
-# A call to update a memory prints FAKE_CLAUDE_OUTPUT_MEMORY, when it is set, instead.
+# A call to update a memory prints FAKE_CLAUDE_OUTPUT_MEMORY, when it is set, instead. It first
+# waits for as long as the file FAKE_CLAUDE_HOLD exists, for 10 seconds at most.
 # A call to look something up prints FAKE_CLAUDE_OUTPUT_LOOKUP, when it is set, instead. When FAKE_CLAUDE_LOOKUP_GO
 # is set, it first waits until that file exists, and deletes it: each time the file is made, one lookup goes on.
 # Written to a file of its own first: a lookup and an answer can start at the same moment.
@@ -25,8 +26,16 @@ output=$FAKE_CLAUDE_OUTPUT
 previous=
 lookup=
 for arg in "$@"; do
-    if [ "$previous" = --system-prompt ] && [ -n "${FAKE_CLAUDE_OUTPUT_MEMORY:-}" ]; then
-        case "$arg" in "You keep a Discord bot's memory"*) output=$FAKE_CLAUDE_OUTPUT_MEMORY ;; esac
+    if [ "$previous" = --system-prompt ]; then
+        case "$arg" in "You keep a Discord bot's memory"*)
+            output=${FAKE_CLAUDE_OUTPUT_MEMORY:-$output}
+            held=200
+            while [ -e "${FAKE_CLAUDE_HOLD:-}" ] && [ "$held" -gt 0 ]; do
+                sleep 0.05
+                held=$((held - 1))
+            done
+            ;;
+        esac
     fi
     if [ "$previous" = --system-prompt ]; then
         case "$arg" in "You look things up"*) lookup=1; output=${FAKE_CLAUDE_OUTPUT_LOOKUP:-$output} ;; esac

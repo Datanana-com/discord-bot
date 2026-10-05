@@ -130,7 +130,12 @@ final class DirectLookupTest extends VoiceTestCase
 
         // From then on it is part of the DM: later answers see it among its last messages.
         $this->chat('Thanks!');
-        $this->assertStringContainsString("Claude: " . self::ANSWER . "\nClaude: " . self::FOUND . "\nAlice: Thanks!\n\nReply to this message", $this->lastPrompt());
+        // It comes from the web: its later lines are indented, so that none of them can pass for a message of its own.
+        $this->assertStringContainsString(
+            "Claude: " . self::ANSWER . "\nClaude: **PHP 8.5.11** is the latest stable version, released on 24 September 2026.\n  \n  Source: php.net\nAlice: Thanks!\n\nReply to this message",
+            $this->lastPrompt(),
+        );
+        $this->assertStringContainsString('A message of yours that has several lines is shown with its later lines indented', $this->lastSystemPrompt());
         $this->assertSame([], $this->loggedProblems());
     }
 
@@ -331,7 +336,7 @@ final class DirectLookupTest extends VoiceTestCase
 
             // A voice message that asks for something to be looked up works like a written one.
             $this->assertSame(['> 🎤 ' . self::QUESTION . "\n" . self::LOOKING], $this->sent);
-            $this->assertStringEndsWith('Claude: > 🎤 ' . self::QUESTION . "\n" . self::LOOKING . "\n\nThe task:\n\n" . self::TASK, $this->claudeCalls()[1]['prompt']);
+            $this->assertStringEndsWith('Claude: > 🎤 ' . self::QUESTION . "\n  " . self::LOOKING . "\n\nThe task:\n\n" . self::TASK, $this->claudeCalls()[1]['prompt']);
 
             touch($this->go);
             $this->waitUntil(fn () => count($this->sent) === 2, 'what was looked up');

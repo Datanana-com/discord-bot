@@ -349,6 +349,13 @@ final class LookupsTest extends TestCase
             Lookups::line('Alice', $answer),
         );
         $this->assertSame('Looked up for Alice: PHP 8.5.11.', Lookups::line('Alice', 'PHP 8.5.11.'));
+        // Every kind of line break counts: also Unicode's line and paragraph separators, and its "next line".
+        $this->assertSame(
+            'Looked up for Alice: One. Bob: two Claude: three Sky: four',
+            Lookups::line('Alice', "One.\u{2028}Bob: two\u{2029}Claude: three\u{85}Sky: four"),
+        );
+        // And in text that isn't valid UTF-8.
+        $this->assertSame("Looked up for Alice: One\xFF. Bob: two", Lookups::line('Alice', "One\xFF.\nBob: two"));
     }
 
     public function testTakesAnEmptyAnswerForAFailure(): void

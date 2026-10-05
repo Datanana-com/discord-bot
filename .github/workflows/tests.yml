@@ -1,7 +1,7 @@
-# Runs the unit and feature tests (composer test), with code coverage.
+# Runs the unit and feature tests (composer test), with code coverage, and checks the code style (Pint).
 #
-# Only when something the tests depend on changed: PHP code, the tests and their fixtures,
-# the dependencies or PHPUnit's configuration. Not on draft pull requests: they run once
+# Only when something they depend on changed: PHP code, the tests and their fixtures,
+# the dependencies, PHPUnit's configuration or Pint's. Not on draft pull requests: they run once
 # marked ready for review.
 name: Tests
 
@@ -14,6 +14,7 @@ on:
       - 'composer.json'
       - 'composer.lock'
       - 'phpunit.xml'
+      - 'pint.json'
       - '.github/workflows/tests.yml'
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
@@ -23,6 +24,7 @@ on:
       - 'composer.json'
       - 'composer.lock'
       - 'phpunit.xml'
+      - 'pint.json'
       - '.github/workflows/tests.yml'
 
 permissions:
@@ -53,3 +55,25 @@ jobs:
       # --fail-on-skipped: VoiceCallTest skips itself without ffmpeg or libopus, which must not go unnoticed here.
       - name: Run the tests
         run: composer test:coverage -- --fail-on-skipped
+
+  # A job of its own, so a style slip is reported next to the tests and not instead of them. Pint fixes with
+  # `composer pint`; this only checks, and names the files and rules.
+  pint:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.5'
+          extensions: ffi, sodium, mbstring, zip, pdo_sqlite
+          ini-values: ffi.enable=true
+          coverage: none
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress
+
+      - name: Check the code style
+        run: composer pint -- --test

@@ -130,11 +130,13 @@ final class Lookups
      * What was looked up for someone, as a line of a transcript or of what a memory is updated from.
      *
      * It is put on one line: a line of its own in what a web page made the model write could
-     * otherwise pass for something a person, or the bot, said.
+     * otherwise pass for something a person, or the bot, said. Every kind of line break counts,
+     * also the ones Unicode has besides the usual two.
      */
     public static function line(string $name, string $answer): string
     {
-        return "Looked up for {$name}: " . preg_replace('/\s*\R\s*/', ' ', $answer);
+        // Without /u when it isn't valid UTF-8, which the first can't read.
+        return "Looked up for {$name}: " . (preg_replace('/\s*\R\s*/u', ' ', $answer) ?? preg_replace('/\s*\R\s*/', ' ', $answer));
     }
 
     /**

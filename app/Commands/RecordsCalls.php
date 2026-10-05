@@ -95,7 +95,12 @@ trait RecordsCalls
      */
     private function howToTalk(VoiceSession $session): string
     {
-        return ($name = VoiceSession::wakeWordName($session->wakeWord)) === '' ? 'I answer everything that is said.' : "Say \"{$name}\" to talk to me.";
+        $name = VoiceSession::wakeWordName($session->wakeWord);
+
+        return $name === ''
+            ? 'I answer everything that is said.'
+            // The first of the stop phrase's spellings, like the wake word's.
+            : "Say \"{$name}\" to talk to me, and \"" . VoiceSession::wakeWordName($session->stopPhrase) . '" when you\'re done.';
     }
 
     /**

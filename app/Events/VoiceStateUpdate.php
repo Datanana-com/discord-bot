@@ -9,7 +9,7 @@ use App\Voice\Meeting;
 use Discord\Discord;
 use Discord\Parts\WebSockets\VoiceStateUpdate as VoiceState;
 
-class VoiceStateUpdate extends EventAbstract
+final class VoiceStateUpdate extends EventAbstract
 {
     /**
      * Has the meetings made by /meet end once everyone has left them.
