@@ -27,7 +27,25 @@ final class VoiceSessionTest extends TestCase
         yield 'not mentioned' => ['What time is it?', 'claude', false];
         yield 'only part of a word' => ['Claudette is here', 'claude', false];
         yield 'no wake word answers everything' => ['What time is it?', '', true];
+        yield 'no wake word answers what has no words too' => ['...?', '', true];
         yield 'multi-word wake word' => ['Okay computer, play some music', 'okay computer', true];
+        yield 'a dot in the wake word is a dot' => ['Is abi here?', 'a.i', false];
+
+        // Whisper punctuates what it hears, so what it puts between the words of a wake word doesn't count.
+        yield 'a comma between the words' => ['Okay, computer, play some music', 'okay computer', true];
+        yield 'an ellipsis between the words' => ['Hey... Jarvis! What time is it?', 'hey jarvis', true];
+        yield 'a dash between the words' => ['Okay - computer, play some music', 'okay computer', true];
+        yield 'three words' => ['Hey, there. Jarvis?', 'hey there jarvis', true];
+        yield 'more than one space in the wake word' => ['Okay computer, play some music', 'okay  computer', true];
+        yield 'a wide space in the wake word, as typed on a Japanese keyboard' => ['ヘイ、クロード、今何時？', "ヘイ\u{3000}クロード", true];
+        yield 'another word between the words' => ['Okay, my computer is slow', 'okay computer', false];
+        yield 'a number between the words' => ['Okay 2 computer', 'okay computer', false];
+        yield 'the words the other way around' => ['Computer, okay?', 'okay computer', false];
+        yield 'the words run together' => ['Okaycomputer, play some music', 'okay computer', false];
+        yield 'only the first word' => ['Okay, play some music', 'okay computer', false];
+        yield 'only part of the first word' => ['Tokay, computer', 'okay computer', false];
+        yield 'only part of the last word' => ['Okay, computers are slow', 'okay computer', false];
+        yield 'an accent that belongs to the first word' => ["Jose\u{301} Maria, what time is it?", 'jose maria', false];
     }
 
     /**

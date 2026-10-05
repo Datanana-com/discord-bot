@@ -45,9 +45,21 @@ final class ClaudeTest extends TestCase
         putenv('FAKE_CLAUDE_PAUSE');
         putenv('FAKE_CLAUDE_RESUME');
         putenv('ANTHROPIC_API_KEY');
+        unset($_ENV['CLAUDE_MODEL']);
         unlink($this->log);
         @unlink($this->resume);
         @rmdir($this->workingDirectory);
+    }
+
+    public function testAServersModelReplacesTheOneInEnv(): void
+    {
+        $this->assertSame('haiku', Claude::fromEnv()->model);
+
+        $_ENV['CLAUDE_MODEL'] = 'opus';
+
+        $this->assertSame('opus', Claude::fromEnv()->model);
+        $this->assertSame('sonnet', Claude::fromEnv('sonnet')->model);
+        $this->assertSame(['haiku', 'sonnet', 'opus'], Claude::MODELS);
     }
 
     public function testAsksClaudeCodeWithoutToolsOrAnApiKey(): void

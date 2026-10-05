@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Settings\GuildSettings;
 use App\Voice\VoiceSession;
+use Monolog\Logger;
 use React\Promise\Deferred;
 
 use function React\Async\await;
@@ -53,6 +55,19 @@ final class VoiceSummaryTest extends VoiceTestCase
         $this->assertStringNotContainsString('read aloud', $systemPrompt, 'The system prompt for spoken replies is not used.');
 
         $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testTheServersModelWritesTheSummary(): void
+    {
+        // .env has haiku.
+        (new GuildSettings(new Logger('test')))->save(self::GUILD_ID, [...GuildSettings::DEFAULTS, 'model' => 'opus'], '555');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        await($session->stop());
+
+        $this->assertSame([self::SUMMARY], $this->sent);
+        $this->assertStringContainsString("arg=--model\narg=opus\n", file_get_contents($this->claudeLog));
     }
 
     public function testSummarizesTheWholeTranscriptOfALongCall(): void

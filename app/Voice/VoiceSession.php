@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Voice;
 
 use App\Analytics\Usage;
+use App\Settings\GuildSettings;
 use Discord\Builders\MessageBuilder;
 use Discord\Discord;
 use Discord\Parts\Channel\Channel;
@@ -91,7 +92,7 @@ final class VoiceSession
         private readonly Transcriber $transcriber,
         private readonly Claude $claude,
         private readonly Speech $speech,
-        private readonly string $wakeWord,
+        public readonly string $wakeWord,
         private readonly Usage $usage,
     ) {
         $this->id = bin2hex(random_bytes(4));
@@ -103,11 +104,13 @@ final class VoiceSession
 
     /**
      * Returns what is missing to run a session, or null when everything is set up.
+     *
+     * @param array{wake_word: ?string, language: ?string, voice: ?string, model: ?string} $settings The server's settings.
      */
-    public static function missingSetup(): ?string
+    public static function missingSetup(array $settings): ?string
     {
         $transcriber = Transcriber::fromEnv();
-        $speech = Speech::fromEnv();
+        $speech = Speech::fromEnv($settings['voice']);
 
         foreach ([$transcriber->binary, Claude::fromEnv()->binary, $speech->binary, $speech->ffmpeg] as $binary) {
             if (ProcessAbstract::checkForExecutable($binary) === null) {
@@ -115,13 +118,25 @@ final class VoiceSession
             }
         }
 
-        foreach (['WHISPER_MODEL' => $transcriber->model, 'PIPER_MODEL' => $speech->model] as $name => $path) {
-            if (! is_file($path)) {
-                return "{$name} in .env does not point to a model file.";
-            }
+        if (! is_file($transcriber->model)) {
+            return 'WHISPER_MODEL in .env does not point to a model file.';
+        }
+
+        if (! is_file($speech->model)) {
+            return $settings['voice'] === null
+                ? 'PIPER_MODEL in .env does not point to a model file.'
+                : "The voice `{$settings['voice']}` is no longer installed. Choose another one with /settings.";
         }
 
         return null;
+    }
+
+    /**
+     * The wake word of the servers that didn't choose their own. Empty answers everything.
+     */
+    public static function defaultWakeWord(): string
+    {
+        return trim(env('VOICE_WAKE_WORD', 'claude'));
     }
 
     public static function forGuild(string $guildId): ?self
@@ -132,10 +147,15 @@ final class VoiceSession
     /**
      * Starts recording the channel the voice client is connected to.
      *
+     * A call keeps the settings it starts with: changing them applies from the next call.
+     *
      * @param Channel $textChannel Where Claude's answers and the call's summary are posted.
+     * @param array{wake_word: ?string, language: ?string, voice: ?string, model: ?string}|null $settings
+     *        The server's settings, when they were already read.
      */
-    public static function start(VoiceClient $vc, Channel $textChannel, Discord $discord): self
+    public static function start(VoiceClient $vc, Channel $textChannel, Discord $discord, ?array $settings = null): self
     {
+        $settings ??= (new GuildSettings($discord->getLogger()))->for((string) $vc->channel->guild_id);
         $directory = sprintf(
             '%s/%s/%s',
             rtrim(env('RECORDINGS_PATH', 'recordings'), '/'),
@@ -149,10 +169,10 @@ final class VoiceSession
             $textChannel,
             $discord,
             $directory,
-            Transcriber::fromEnv(),
-            Claude::fromEnv(),
-            Speech::fromEnv(),
-            trim(env('VOICE_WAKE_WORD', 'claude')),
+            Transcriber::fromEnv($settings['language']),
+            Claude::fromEnv($settings['model']),
+            Speech::fromEnv($settings['voice']),
+            $settings['wake_word'] ?? self::defaultWakeWord(),
             new Usage($discord->getLogger()),
         );
         $session->listen();
@@ -164,10 +184,19 @@ final class VoiceSession
 
     /**
      * Whether the text mentions the wake word. An empty wake word matches everything.
+     *
+     * Whisper punctuates what it hears, so what it puts between the words of a wake word doesn't
+     * count: "Okay, computer" mentions "okay computer".
      */
     public static function mentions(string $text, string $wakeWord): bool
     {
-        return $wakeWord === '' || preg_match('/\b' . preg_quote($wakeWord, '/') . '\b/iu', $text) === 1;
+        $words = array_map(
+            fn (string $word) => preg_quote($word, '/'),
+            preg_split('/\s+/u', $wakeWord, flags: PREG_SPLIT_NO_EMPTY),
+        );
+
+        // Between two of its words: anything but letters, their accents, and numbers.
+        return $words === [] || preg_match('/\b' . implode('[^\p{L}\p{M}\p{N}]+', $words) . '\b/iu', $text) === 1;
     }
 
     /**
