@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Application;
+use App\Commands\Global\RecallCommand;
 use App\Commands\Global\SettingsCommand;
 use App\Exceptions\EventNotFoundException;
 use Closure;
@@ -120,17 +121,18 @@ final class ApplicationTest extends TestCase
         $app->prepareCommandClasses();
 
         $this->assertSame([
+            'recall' => ["Asks Claude a question about this server's saved calls.", Command::CHAT_INPUT],
             'record' => ['Records your voice channel and lets everyone in it talk to Claude.', Command::CHAT_INPUT],
             'settings' => ["Shows or changes this server's wake word, language, voice and Claude model.", Command::CHAT_INPUT],
             'stats' => ['Shows how this server has used the bot.', Command::CHAT_INPUT],
             'stop' => ['Stops recording and leaves the voice channel.', Command::CHAT_INPUT],
             'test' => ['A test global command', Command::CHAT_INPUT],
         ], $commands->saved);
-        $this->assertContains('Global commands found: RecordCommand, SettingsCommand, StatsCommand, StopCommand, TestCommand', $this->logged());
+        $this->assertContains('Global commands found: RecallCommand, RecordCommand, SettingsCommand, StatsCommand, StopCommand, TestCommand', $this->logged());
         $this->assertContains('Command record has been saved.', $this->logged());
 
         // Each command's interactions go to its class, and are logged: /test logs a greeting.
-        $this->assertSame(['record', 'settings', 'stats', 'stop', 'test'], array_keys($commands->listeners));
+        $this->assertSame(['recall', 'record', 'settings', 'stats', 'stop', 'test'], array_keys($commands->listeners));
         ($commands->listeners['test'])(new Interaction($app->discord, ['guild_id' => '100', 'channel_id' => '200', 'user' => ['id' => '555', 'username' => 'alice']], true));
         $this->assertContains(['/test used', ['guild' => '100', 'channel' => '200', 'user' => '555']], $this->loggedWithContext());
         $this->assertContains('Hello, World!', $this->logged());
@@ -145,7 +147,7 @@ final class ApplicationTest extends TestCase
         $app->prepareCommandClasses();
 
         $this->assertContains('Guild specific commands found: PingCommand', $this->logged());
-        $this->assertSame(['record', 'settings', 'stats', 'stop', 'test'], array_keys($commands->saved));
+        $this->assertSame(['recall', 'record', 'settings', 'stats', 'stop', 'test'], array_keys($commands->saved));
     }
 
     public function testDoesNotSaveCommandsDiscordAlreadyHas(): void
@@ -157,10 +159,10 @@ final class ApplicationTest extends TestCase
 
         $app->prepareCommandClasses();
 
-        $this->assertSame(['settings', 'stats', 'test'], array_keys($commands->saved));
+        $this->assertSame(['recall', 'settings', 'stats', 'test'], array_keys($commands->saved));
         $this->assertContains('Command record already exists.', $this->logged());
         $this->assertContains('Command stop already exists.', $this->logged());
-        $this->assertSame(['record', 'settings', 'stats', 'stop', 'test'], array_keys($commands->listeners), 'Existing commands are still handled.');
+        $this->assertSame(['recall', 'record', 'settings', 'stats', 'stop', 'test'], array_keys($commands->listeners), 'Existing commands are still handled.');
     }
 
     public function testSavesCommandsThatChanged(): void
@@ -195,6 +197,13 @@ final class ApplicationTest extends TestCase
         $this->assertSame('32', $settings['default_member_permissions']);
         $this->assertSame(32, $settings['options'][0]['max_length'], 'Discord stops a wake word that is too long from being typed.');
 
+        // /recall can't be used without its question.
+        $this->assertSame(
+            [['type' => Option::STRING, 'name' => 'question', 'description' => 'What you want to know, e.g. "what did we decide about the launch date?"', 'required' => true]],
+            $commands->payloads['recall']['options'],
+        );
+        $this->assertNull($commands->payloads['recall']['default_member_permissions'], 'Anyone who can use slash commands can use it.');
+
         // A command without them is sent as such, which also removes the ones Discord still has.
         $this->assertSame(
             ['name' => 'stop', 'description' => 'Stops recording and leaves the voice channel.', 'options' => [], 'default_member_permissions' => null, 'type' => Command::CHAT_INPUT],
@@ -228,6 +237,27 @@ final class ApplicationTest extends TestCase
 
         $this->assertArrayNotHasKey('settings', $commands->saved);
         $this->assertContains('Command settings already exists.', $this->logged());
+    }
+
+    public function testDoesNotSaveACommandWhoseRequiredOptionDiscordAlreadyHas(): void
+    {
+        // /recall as Discord returns it once registered.
+        $declared = (new ReflectionClass(RecallCommand::class))->getDefaultProperties();
+        [$app, $commands] = $this->appWithCommands(registered: [[
+            'id' => '903',
+            'application_id' => '901',
+            'version' => '904',
+            'name' => 'recall',
+            'description' => $declared['description'],
+            'type' => Command::CHAT_INPUT,
+            'options' => json_decode(json_encode([['name_localizations' => null, 'description_localizations' => null, ...array_reverse($declared['options'][0])]])),
+            'default_member_permissions' => null,
+        ]]);
+
+        $app->prepareCommandClasses();
+
+        $this->assertArrayNotHasKey('recall', $commands->saved);
+        $this->assertContains('Command recall already exists.', $this->logged());
     }
 
     /**
@@ -274,7 +304,7 @@ final class ApplicationTest extends TestCase
 
         $this->assertSame([], $commands->saved);
         $this->assertContains('Could not fetch the registered commands: Discord API unavailable', $this->logged());
-        $this->assertSame(['record', 'settings', 'stats', 'stop', 'test'], array_keys($commands->listeners), 'Commands Discord already has keep working.');
+        $this->assertSame(['recall', 'record', 'settings', 'stats', 'stop', 'test'], array_keys($commands->listeners), 'Commands Discord already has keep working.');
     }
 
     public function testLogsCommandsThatCannotBeSaved(): void

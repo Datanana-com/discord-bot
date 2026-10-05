@@ -135,6 +135,7 @@ final class VoiceRoundTripTest extends TestCase
         // whose options it doesn't accept, which nothing but the real Discord can tell.
         $this->assertNotEmpty(preg_grep('/^Command record (has been saved|already exists)\.$/', $logged), 'The /record command was registered.');
         $this->assertNotEmpty(preg_grep('/^Command settings (has been saved|already exists)\.$/', $logged), 'The /settings command was registered, with its options.');
+        $this->assertNotEmpty(preg_grep('/^Command recall (has been saved|already exists)\.$/', $logged), 'The /recall command was registered, with its required question.');
         $this->assertEmpty(preg_grep('/^Could not (save command|fetch the registered commands)/', $logged), 'Discord accepted every command.');
 
         // The bot heard the question through Discord, and whisper understood it.

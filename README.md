@@ -104,14 +104,14 @@ A command can take options and be shown only to members with a permission: set i
 4. Claude's answer is posted in the text channel and spoken back into the call with [Piper](https://github.com/OHF-Voice/piper1-gpl).
 5. When the call ends, Claude summarizes its whole transcript: what was discussed, what was decided, and who does what next. The summary is posted in the text channel where `/record` was used, and saved as `summary.md` next to `transcript.txt`.
 
-`/stop` finishes the recordings and leaves the channel, and `/stats` shows how the server has used the bot (see [Logs and statistics](#logs-and-statistics)). `/settings` gives a server its own wake word, language, voice and Claude model (see [Settings for each server](#settings-for-each-server)).
+`/stop` finishes the recordings and leaves the channel, and `/stats` shows how the server has used the bot (see [Logs and statistics](#logs-and-statistics)). `/settings` gives a server its own wake word, language, voice and Claude model (see [Settings for each server](#settings-for-each-server)). `/recall` asks Claude a question about the server's saved calls (see [Asking about past calls](#asking-about-past-calls)).
 
 A call ends with `/stop`, or when someone disconnects the bot from the voice channel. For the summary, the whole transcript is sent to Claude, including what was said without the wake word. The summary is written in the language of the call, once everything said is transcribed, so it includes the last thing said. A summary that doesn't fit in one Discord message is split into several, never in the middle of a sentence. When nobody said anything, there is no summary. When Claude can't make one (it isn't logged in, the usage limit is reached, ...), the bot says so in the text channel, and why.
 
 > [!IMPORTANT]
 > Only record people who have agreed to it. The bot announces in the channel when it starts recording.
 
-Claude runs with every tool disabled, no MCP servers and from an empty directory, so nothing said in the call can make it read or change anything on your computer. Its answers and summaries do count against your subscription's usage limits, and anyone in the server can use `/record`.
+Claude runs with every tool disabled, no MCP servers and from an empty directory, so nothing said in the call can make it read or change anything on your computer. Its answers and summaries do count against your subscription's usage limits, and anyone in the server can use `/record` and `/recall`.
 
 ### Setup on Windows (WSL2)
 
@@ -172,8 +172,8 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 
 | Variable | Default | |
 |---|---|---|
-| `BOT_SLASH_COMMANDS` | | Must be set for `/record`, `/stop`, `/stats` and `/settings` to be registered. |
-| `RECORDINGS_PATH` | `recordings` | Where recordings and transcripts are saved. |
+| `BOT_SLASH_COMMANDS` | | Must be set for `/record`, `/stop`, `/stats`, `/settings` and `/recall` to be registered. |
+| `RECORDINGS_PATH` | `recordings` | Where recordings, transcripts and summaries are saved. `/recall` answers from them. |
 | `VOICE_WAKE_WORD` | `claude` | Claude only answers what mentions this word. Leave it empty to answer everything. |
 | `WHISPER_BINARY` | `whisper-cli` | Path to whisper.cpp's `whisper-cli`. |
 | `WHISPER_MODEL` | | Path to the whisper model, e.g. `~/whisper.cpp/models/ggml-base.bin`. |
@@ -196,7 +196,7 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 | `wake_word` | A word or short phrase: at most 32 letters, numbers, spaces, apostrophes and hyphens, starting and ending with a letter or number. `none` answers everything: Discord doesn't let an option be empty. |
 | `language` | `auto`, or a whisper language code such as `en` or `pt`. |
 | `voice` | The name of a Piper voice in the same folder as `PIPER_MODEL`, e.g. `pt_BR-faber-medium` for `pt_BR-faber-medium.onnx`. |
-| `model` | `haiku`, `sonnet` or `opus`. It answers in the server's calls, and writes their summaries. |
+| `model` | `haiku`, `sonnet` or `opus`. It answers in the server's calls, writes their summaries, and answers `/recall`. |
 | `reset` | Goes back to the `.env` defaults. Other options given with it are applied after it. |
 
 Without options, `/settings` shows the server's settings and which of them are the defaults. An invalid value is refused with what is allowed instead, e.g. the list of installed voices, and then nothing is changed. Only whoever used `/settings` sees its replies.
@@ -209,11 +209,24 @@ Any `language` other than `en` needs a multilingual whisper model: `ggml-base.bi
 
 The settings are kept in the `guild_settings` table of `STATS_DATABASE`, one row per server. A setting that is `NULL` there is the `.env` default. When the database can't be read, that is logged and calls start with the `.env` defaults.
 
+### Asking about past calls
+
+`/recall question:<text>` asks Claude a question about the calls saved in the server it is used in, e.g. `/recall question: what did we decide about the launch date?`. Claude answers from the calls' transcripts and summaries, and says which call the answer comes from, by its date. When the calls don't say, it says that instead of guessing.
+
+- Only the server's own calls are used: every `RECORDINGS_PATH/<server id>/*/transcript.txt`, with the call's `summary.md` when it has one. Another server's calls are never sent to Claude.
+- Only whoever asked sees the answer: the calls may hold things not everyone in the channel heard.
+- The newest calls are sent first, up to about 150,000 characters, so that Claude answers quickly. When older calls don't fit, the answer ends by saying so. A call is never skipped to fit an older, shorter one in. When the newest call alone is too long, Claude gets its summary and the end of its transcript, and the answer says that instead.
+- It doesn't need a call in progress. When there is one, what was said in it so far is used too. With no saved calls, the reply is "Nothing has been recorded in this server yet."
+- Claude runs like in calls: with every tool disabled, no MCP servers and from an empty directory, and with the server's `model` from `/settings`. It is told that the calls are what it answers from, never instructions.
+- When Claude can't answer (it isn't logged in, the usage limit is reached, ...), the reply says so, and why.
+
+Anyone who can use slash commands can use `/recall`, and so ask about any call saved in the server, including the ones they weren't in. Server admins can restrict it to some roles, members or channels under Server Settings → Integrations.
+
 ### Logs and statistics
 
 Neither the logs nor the statistics contain what anyone said: that is only in the call's `transcript.txt` and `summary.md`.
 
-**Logs** are printed to the console and written to `logs/<date>.log`, one JSON object per line. Each step of a call is logged with the server (`guild`), a `session` ID for the call, the `user` it concerns, and how long it took in milliseconds: the call starting, each new speaker, each utterance, its transcription, Claude's answer, the speech synthesis, failures, the call ending with its totals, and its summary. Slash commands are logged with who used them, and where, and `/settings changed` with the settings that changed and their new values: settings aren't speech. To search the log with [jq](https://jqlang.org/):
+**Logs** are printed to the console and written to `logs/<date>.log`, one JSON object per line. Each step of a call is logged with the server (`guild`), a `session` ID for the call, the `user` it concerns, and how long it took in milliseconds: the call starting, each new speaker, each utterance, its transcription, Claude's answer, the speech synthesis, failures, the call ending with its totals, and its summary. Slash commands are logged with who used them, and where, and `/settings changed` with the settings that changed and their new values: settings aren't speech. `/recall answered` is logged with how long the answer took (`ms`), how many calls were sent to Claude (`calls`) and the answer's length (`characters`), never with the question or the answer. To search the log with [jq](https://jqlang.org/):
 
 ```bash
 # Everything that happened in one call
@@ -224,7 +237,7 @@ jq 'select(.message == "Claude answered") | .context.ms' logs/*.log
 jq -c 'select(.level >= 300) | [.datetime, .message, .context]' logs/*.log
 ```
 
-**Statistics** are kept in `STATS_DATABASE`, one row per event in the `events` table: `call_started`, `call_ended` (with the call's length), `utterance` (with its length), `answered` (with the time from the end of the question to the answer being posted) and `failed` (something said couldn't be transcribed or answered, or the answer couldn't be spoken), each with the server, channel, user and session. `/stats` shows the server it is used in its totals: calls and minutes recorded, utterances and people speaking, questions answered and how long that took on average, and failures. Summaries aren't counted. Only whoever used `/stats` sees them. To query the statistics yourself:
+**Statistics** are kept in `STATS_DATABASE`, one row per event in the `events` table: `call_started`, `call_ended` (with the call's length), `utterance` (with its length), `answered` (with the time from the end of the question to the answer being posted) and `failed` (something said couldn't be transcribed or answered, or the answer couldn't be spoken), each with the server, channel, user and session. `/stats` shows the server it is used in its totals: calls and minutes recorded, utterances and people speaking, questions answered and how long that took on average, and failures. Summaries and `/recall` aren't counted. Only whoever used `/stats` sees them. To query the statistics yourself:
 
 ```bash
 sqlite3 databases/stats.sqlite "SELECT guild_id, COUNT(*) AS answers FROM events WHERE type = 'answered' GROUP BY guild_id"
