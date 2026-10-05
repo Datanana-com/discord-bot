@@ -14,7 +14,25 @@ final class TranscriberTest extends TestCase
 {
     protected function tearDown(): void
     {
-        unset($_ENV['WHISPER_LANGUAGE']);
+        unset($_ENV['WHISPER_LANGUAGE'], $_ENV['WHISPER_THREADS']);
+    }
+
+    public function testUsesAsManyThreadsAsEnvSays(): void
+    {
+        $this->assertSame(4, Transcriber::fromEnv()->threads, "whisper's own default.");
+
+        $_ENV['WHISPER_THREADS'] = '8';
+        $this->assertSame(8, Transcriber::fromEnv()->threads);
+        $this->assertSame(8, Transcriber::fromEnv('pt')->threads, 'Whatever language a server speaks.');
+
+        $_ENV['WHISPER_THREADS'] = '1';
+        $this->assertSame(1, Transcriber::fromEnv()->threads);
+
+        // whisper would refuse anything but a whole number of threads, 1 or more, for every utterance.
+        foreach (['0', '-2', 'many', '2.5', ''] as $threads) {
+            $_ENV['WHISPER_THREADS'] = $threads;
+            $this->assertSame(4, Transcriber::fromEnv()->threads, "WHISPER_THREADS={$threads}");
+        }
     }
 
     public function testAServersLanguageReplacesTheOneInEnv(): void
@@ -52,9 +70,15 @@ final class TranscriberTest extends TestCase
 
         $this->assertSame('Hey Claude, what time is it?', $text);
         $this->assertSame(
-            "arg=--model\narg=/models/ggml-base.bin\narg=--language\narg=auto\narg=--no-timestamps\narg=--no-prints\narg=--file\narg=/recordings/utterance-1.wav\n",
+            "arg=--model\narg=/models/ggml-base.bin\narg=--language\narg=auto\narg=--threads\narg=4\narg=--no-timestamps\narg=--no-prints\narg=--file\narg=/recordings/utterance-1.wav\n",
             file_get_contents($log),
         );
+
+        // More threads transcribe faster, up to what the CPU has.
+        $transcriber = new Transcriber(__DIR__ . '/../../Fixtures/fake-whisper', '/models/ggml-base.bin', 'en', 8);
+        await($transcriber->transcribe('/recordings/utterance-2.wav'));
+
+        $this->assertStringContainsString("arg=--language\narg=en\narg=--threads\narg=8\n", file_get_contents($log));
 
         putenv('FAKE_WHISPER_LOG');
         unlink($log);

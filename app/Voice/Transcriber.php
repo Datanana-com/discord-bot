@@ -26,10 +26,14 @@ final readonly class Transcriber
         'sr', 'su', 'sv', 'sw', 'ta', 'te', 'tg', 'th', 'tk', 'tl', 'tr', 'tt', 'uk', 'ur', 'uz', 'vi', 'yi', 'yo', 'yue', 'zh',
     ];
 
+    /** The threads whisper uses unless told otherwise. */
+    private const int THREADS = 4;
+
     public function __construct(
         public string $binary,
         public string $model,
         public string $language,
+        public int $threads = self::THREADS,
     ) {
     }
 
@@ -38,10 +42,14 @@ final readonly class Transcriber
      */
     public static function fromEnv(?string $language = null): self
     {
+        // Anything but a whole number of threads, 1 or more, is whisper's own default.
+        $threads = filter_var(env('WHISPER_THREADS', self::THREADS), FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+
         return new self(
             env('WHISPER_BINARY', 'whisper-cli'),
             env('WHISPER_MODEL', ''),
             $language ?? env('WHISPER_LANGUAGE', 'auto'),
+            $threads === false ? self::THREADS : $threads,
         );
     }
 
@@ -57,6 +65,7 @@ final readonly class Transcriber
             $this->binary,
             '--model', $this->model,
             '--language', $this->language,
+            '--threads', (string) $this->threads,
             '--no-timestamps',
             '--no-prints',
             '--file', $wavPath,

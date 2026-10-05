@@ -297,7 +297,8 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 | `VOICE_WAKE_WORD` | `claude` | Claude only answers what mentions this word or phrase. A phrase also counts when punctuation is heard between its words: "Okay, computer" mentions `okay computer`. Leave it empty to answer everything. |
 | `WHISPER_BINARY` | `whisper-cli` | Path to whisper.cpp's `whisper-cli`. |
 | `WHISPER_MODEL` | | Path to the whisper model, e.g. `~/whisper.cpp/models/ggml-base.bin`. |
-| `WHISPER_LANGUAGE` | `auto` | Language spoken in the call, e.g. `en` or `pt`, or `auto` to detect it. |
+| `WHISPER_LANGUAGE` | `auto` | Language spoken in the call, e.g. `en` or `pt`, or `auto` to detect it. Detecting it takes time, for everything anyone says: on an utterance of 2.2 s, whisper `base` took 1.8 to 3.1 s with `auto` and 1.05 s with `en`. When one language is spoken, set it, here or with `/settings`. |
+| `WHISPER_THREADS` | `4` | How many threads whisper uses, 4 being its own default. More is faster, up to what your CPU has: the same utterance took 1.05 s with 4 threads, 0.71 s with 8, and no less with 10, on a CPU with 10 cores. |
 | `CLAUDE_BINARY` | `claude` | Path to the Claude Code CLI. |
 | `CLAUDE_MODEL` | `haiku` | `haiku` answers fastest; `sonnet` or `opus` answer better, but slower. |
 | `PIPER_BINARY` | `piper` | Path to Piper. |
@@ -315,7 +316,7 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 | Option | |
 |---|---|
 | `wake_word` | A word or short phrase: at most 32 letters, numbers, spaces, apostrophes and hyphens, starting and ending with a letter or number. `none` answers everything: Discord doesn't let an option be empty. |
-| `language` | `auto`, or a whisper language code such as `en` or `pt`. |
+| `language` | `auto`, or a whisper language code such as `en` or `pt`. With `auto`, whisper detects the language of everything said first, which makes the bot answer a second or two later. |
 | `voice` | The name of a Piper voice in the same folder as `PIPER_MODEL`, e.g. `pt_BR-faber-medium` for `pt_BR-faber-medium.onnx`. |
 | `model` | `haiku`, `sonnet` or `opus`. It answers in the server's calls, writes their summaries, and answers `/recall`. |
 | `reset` | Goes back to the `.env` defaults. Other options given with it are applied after it. |
