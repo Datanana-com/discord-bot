@@ -9,6 +9,7 @@ use Discord\Parts\Application\Command\Option;
 use Discord\Parts\Channel\Channel;
 use Discord\Parts\Guild\Member\Member;
 use Discord\Parts\Interactions\Interaction;
+use Discord\Parts\Part;
 use React\Promise\PromiseInterface;
 use Tests\Feature\VoiceTestCase;
 
@@ -34,8 +35,9 @@ abstract class CommandTestCase extends VoiceTestCase
      * @param string      $userId  Who used it: Alice, unless told otherwise.
      * @param array<string, string> $users     The people it names, as the user options /memory and /forget take: the option's name and their ID.
      * @param array<string, string> $nicknames What the server calls its members, by ID, when it isn't their name.
+     * @param Part|null   $channel The channel or thread it was used in, when DiscordPHP knows it.
      */
-    protected function interaction(?Channel $voiceChannel, ?string $guildId = self::GUILD_ID, string $userId = '555', array $users = [], array $nicknames = []): Interaction
+    protected function interaction(?Channel $voiceChannel, ?string $guildId = self::GUILD_ID, string $userId = '555', array $users = [], array $nicknames = [], ?Part $channel = null): Interaction
     {
         $member = static::getStubBuilder(Member::class)->disableOriginalConstructor()->onlyMethods(['getVoiceChannel'])->getStub();
         $member->method('getVoiceChannel')->willReturn($voiceChannel);
@@ -49,6 +51,7 @@ abstract class CommandTestCase extends VoiceTestCase
             'member' => $guildId === null ? null : $member,
             'user' => (object) ['id' => $userId],
             'guild_id' => $guildId,
+            'channel' => $channel,
             // Discord leaves out the options when none were filled in.
             'data' => $users === [] ? null : (object) ['options' => array_map(
                 fn (string $name) => (object) ['name' => $name, 'type' => Option::USER, 'value' => $users[$name]],

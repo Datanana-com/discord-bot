@@ -125,8 +125,8 @@ final class SettingsCommand extends CommandAbstract
 
         return "**Saved this server's settings.** "
             . (VoiceSession::forGuild($guildId) === null
-                ? 'They apply from the next /record.'
-                : 'The call in progress keeps its settings: these apply from the next /record.')
+                ? 'They apply from the next call.'
+                : 'The call in progress keeps its settings: these apply from the next call.')
             . "\n" . self::describe($settings);
     }
 
