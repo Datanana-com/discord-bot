@@ -142,7 +142,21 @@ Send the bot a direct message, and Claude answers it there, in text, as your per
 - Your messages are answered one at a time, in the order you sent them.
 - An answer that doesn't fit in one Discord message is split into several, never in the middle of a sentence.
 - When Claude can't answer (it isn't logged in, the usage limit is reached, ...), the bot replies with the reason.
-- Only text is read: a message with nothing but a picture or another attachment gets no answer. Messages in servers and messages from other bots are never answered.
+- Only text and [voice messages](#voice-messages-in-direct-messages) are read: a message with nothing but a picture or another attachment gets no answer. Messages in servers and messages from other bots are never answered.
+
+#### Voice messages in direct messages
+
+Typing isn't always convenient: record a Discord voice message in the DM instead, and the bot answers it in text. The bot recognizes it by Discord's voice message flag, downloads its Ogg Opus audio, converts it to WAV with ffmpeg (`FFMPEG_BINARY`) and transcribes it with whisper.cpp on your machine, with the `WHISPER_*` settings of `.env`.
+
+From then on it is a message like one you typed: the same prompt, memory, order and error handling, and what you said counts in the memory update.
+
+- The answer starts with a quote of what the bot heard, `> 🎤 <what you said>`, so you can tell when whisper misheard. Discord shows voice messages without text, so this quote is also what keeps your words in the DM's last 20 messages that Claude gets with your next message.
+- When nothing could be heard, the bot says so and doesn't ask Claude.
+- A voice message longer than 5 minutes is refused with a short explanation, as transcribing it would take too long. That is checked against the length Discord reports and against the audio itself, as the former comes from the sender's app.
+- The audio is only downloaded from Discord's own attachment hosts (`cdn.discordapp.com` and `media.discordapp.net`, over https), with a timeout and a size limit, without following redirects and without blocking the bot. Anything else is refused.
+- The downloaded and converted files are kept in the `discord-bot-voice-messages` folder of the system's temp folder, and deleted once the message is transcribed, whether that worked or not.
+- When a voice message can't be transcribed, the bot says so, and logs why. The logs never include what was said: a voice message is logged as `Transcribed a voice message`, with the `user`, its length in `seconds`, how long it took in `ms` and the `characters` it came to.
+- Voice messages in servers are not read, and the bot doesn't answer with voice messages.
 
 **The memory** is a markdown note that Claude writes about each person, at `MEMORY_PATH/<user id>.md`. It holds what helps Claude help that person later: their projects, plans, decisions, preferences, open questions and the people they mention. Claude is told to leave out passwords, tokens and other secrets. The note stays under 4,000 characters, so it fits in every prompt: when it's full, Claude keeps what's most useful.
 
@@ -228,7 +242,7 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 | `CLAUDE_MODEL` | `haiku` | `haiku` answers fastest; `sonnet` or `opus` answer better, but slower. |
 | `PIPER_BINARY` | `piper` | Path to Piper. |
 | `PIPER_MODEL` | | Path to the Piper voice, e.g. `~/piper/voices/en_US-lessac-medium.onnx`. The other voices in its folder can be chosen with `/settings`. |
-| `FFMPEG_BINARY` | `ffmpeg` | Path to ffmpeg, which converts Piper's speech for Discord. The voice library always uses the `ffmpeg` on your `PATH`. |
+| `FFMPEG_BINARY` | `ffmpeg` | Path to ffmpeg, which converts Piper's speech for Discord, and the voice messages sent in DMs for whisper.cpp. The voice library always uses the `ffmpeg` on your `PATH`. |
 | `STATS_DATABASE` | `databases/stats.sqlite` | SQLite database for the usage statistics, each server's settings, and who opted out of being recorded. It is created on the first start. |
 | `MEMORY_PATH` | `memories` | Where the bot keeps what it remembers about each person, one file per person. |
 
@@ -273,7 +287,7 @@ Anyone who can use slash commands can use `/recall`, and so ask about any call s
 
 Neither the logs nor the statistics contain what anyone said or what Claude answered: that is only in the call's `transcript.txt` and `summary.md`, and for direct messages in the DM itself and in the person's memory.
 
-**Logs** are printed to the console and written to `logs/<date>.log`, one JSON object per line. Each step of a call is logged with the server (`guild`), a `session` ID for the call, the `user` it concerns, and how long it took in milliseconds: the call starting, each new speaker, each utterance, its transcription, the bot starting to speak, Claude's answer, failures, the call ending with its totals, and its summary. A speaker who opted out is logged once, as `Skipping a speaker who opted out` with their user ID, and nothing else about them is. A speaker the voice library can't name is logged as `Not recording a speaker the voice client cannot name`, a warning, with their SSRC. Slash commands are logged with who used them, and where, and `/settings changed` with the settings that changed and their new values: settings aren't speech. `/recall answered` is logged with how long the answer took (`ms`), how many calls were sent to Claude (`calls`) and the answer's length (`characters`), never with the question or the answer. Direct messages are logged as `Answered a DM`, with the `user`, how long the answer took and its length in characters, and memory updates as `Updated memory`, with the `user` and the memory's length. When old recordings are deleted, `Deleted old recordings` is logged with the number of `calls` deleted and the `days` they are kept for. A call's folder that can't be deleted is logged as a warning, and tried again an hour later. A `RECORDINGS_RETENTION_DAYS` that isn't a whole number of days is logged as a warning too, when the bot starts, and nothing is deleted. To search the log with [jq](https://jqlang.org/):
+**Logs** are printed to the console and written to `logs/<date>.log`, one JSON object per line. Each step of a call is logged with the server (`guild`), a `session` ID for the call, the `user` it concerns, and how long it took in milliseconds: the call starting, each new speaker, each utterance, its transcription, the bot starting to speak, Claude's answer, failures, the call ending with its totals, and its summary. A speaker who opted out is logged once, as `Skipping a speaker who opted out` with their user ID, and nothing else about them is. A speaker the voice library can't name is logged as `Not recording a speaker the voice client cannot name`, a warning, with their SSRC. Slash commands are logged with who used them, and where, and `/settings changed` with the settings that changed and their new values: settings aren't speech. `/recall answered` is logged with how long the answer took (`ms`), how many calls were sent to Claude (`calls`) and the answer's length (`characters`), never with the question or the answer. Direct messages are logged as `Answered a DM`, with the `user`, how long the answer took and its length in characters, voice messages in them as `Transcribed a voice message`, with the `user`, the message's length in `seconds`, how long transcribing it took (`ms`) and the length of what was said (`characters`), never what was said, and memory updates as `Updated memory`, with the `user` and the memory's length. When old recordings are deleted, `Deleted old recordings` is logged with the number of `calls` deleted and the `days` they are kept for. A call's folder that can't be deleted is logged as a warning, and tried again an hour later. A `RECORDINGS_RETENTION_DAYS` that isn't a whole number of days is logged as a warning too, when the bot starts, and nothing is deleted. To search the log with [jq](https://jqlang.org/):
 
 ```bash
 # Everything that happened in one call
@@ -308,7 +322,7 @@ composer test
 composer test -- --testsuite Unit      # or Feature
 ```
 
-Unit tests cover each class on its own. Feature tests run the whole voice flow, the direct messages with their memory, and the slash commands against a fake Discord, with whisper.cpp, Claude Code and Piper replaced by the scripts in `tests/Fixtures`, so they need no models, Claude login or Discord connection.
+Unit tests cover each class on its own. Feature tests run the whole voice flow, the direct messages with their memory, and the slash commands against a fake Discord, with whisper.cpp, Claude Code, Piper and, for voice messages, ffmpeg replaced by the scripts in `tests/Fixtures`, and Discord's attachment hosts by a small web server on your machine, so they need no models, Claude login or Discord connection.
 
 `tests/Feature/VoiceCallTest.php` goes further: the call's audio travels over a local UDP socket standing in for Discord's media server, encrypted and Opus-encoded like in a real call, and the spoken answer is encoded by ffmpeg. It needs ffmpeg and libopus, like the bot itself, and is skipped without them.
 
