@@ -144,6 +144,7 @@ final class SettingsCommandTest extends CommandTestCase
         yield 'numbers' => ['r2d2', 'R2D2, what time is it?'];
         yield 'accents' => ['José', 'Olá José, que horas são?'];
         yield 'another script' => ['クロード', 'ねえ クロード 今何時'];
+        yield 'a script that writes vowels as signs' => ['राजा', 'राजा, समय क्या है?'];
         yield 'as long as it can be' => [str_repeat('a', 32), 'Hey ' . str_repeat('a', 32) . '!'];
     }
 

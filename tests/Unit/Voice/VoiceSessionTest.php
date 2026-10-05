@@ -46,6 +46,8 @@ final class VoiceSessionTest extends TestCase
         yield 'only part of the first word' => ['Tokay, computer', 'okay computer', false];
         yield 'only part of the last word' => ['Okay, computers are slow', 'okay computer', false];
         yield 'an accent that belongs to the first word' => ["Jose\u{301} Maria, what time is it?", 'jose maria', false];
+        yield 'a word that ends with a vowel sign' => ['राजा, समय क्या है?', 'राजा', true];
+        yield 'only part of a word that goes on with a vowel sign' => ['राजा आ गया', 'राज', false];
     }
 
     /**

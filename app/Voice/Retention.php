@@ -80,6 +80,11 @@ final readonly class Retention
         // Counted in seconds: a number of days too large for a date then keeps everything, as it should.
         $oldest = $now->getTimestamp() - $this->days * 86400;
         $calls = 0;
+        // As <server id>/<call>, like the folders below.
+        $unfinished = array_map(
+            fn (VoiceSession $session) => basename(dirname($session->directory)) . '/' . basename($session->directory),
+            VoiceSession::unfinished(),
+        );
 
         foreach ($this->folders($this->path) as $guildId) {
             // Server IDs are numbers. Other folders aren't the bot's.
@@ -88,7 +93,6 @@ final readonly class Retention
             }
 
             $guild = "{$this->path}/{$guildId}";
-            $inProgress = VoiceSession::forGuild($guildId)?->directory;
 
             foreach ($this->folders($guild) as $call) {
                 $startedAt = DateTimeImmutable::createFromFormat(self::FOLDER_FORMAT, $call);
@@ -98,8 +102,9 @@ final readonly class Retention
                     continue;
                 }
 
-                // A call in progress is still being written to, however long ago it started.
-                if ($startedAt->getTimestamp() >= $oldest || ($inProgress !== null && basename($inProgress) === $call)) {
+                // A call that isn't over, even one that stopped and is still being summarized, is still
+                // being written to, however long ago it started.
+                if ($startedAt->getTimestamp() >= $oldest || in_array("{$guildId}/{$call}", $unfinished, true)) {
                     continue;
                 }
 

@@ -42,4 +42,26 @@ final class VoiceRetentionTest extends VoiceTestCase
         $this->assertSame([['calls' => 2, 'days' => 7], ['calls' => 1, 'days' => 7]], $this->logged('Deleted old recordings'));
         $this->assertSame([], $this->loggedProblems());
     }
+
+    public function testKeepsTheFolderOfACallThatIsStillBeingSummarized(): void
+    {
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => 'Sounds good.']);
+        $retention = new Retention($this->recordings, 7, $this->discord->getLogger());
+        $later = new DateTimeImmutable('+30 days');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->transcript($session) !== '', 'the transcript');
+
+        // The call has stopped, and Claude is writing its summary, which is saved in the call's folder.
+        $this->setProcessEnv(['FAKE_CLAUDE_DELAY' => '1']);
+        $ended = $session->stop();
+
+        $this->assertSame(0, $retention->prune($later));
+        $this->assertDirectoryExists($session->directory);
+
+        await($ended);
+        $this->assertFileExists("{$session->directory}/summary.md");
+        $this->assertSame(1, $retention->prune($later));
+        $this->assertSame([], $this->loggedProblems());
+    }
 }

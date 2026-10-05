@@ -162,7 +162,7 @@ final class VoiceCallTest extends VoiceTestCase
         $this->assertSame([], $this->loggedProblems());
     }
 
-    public function testKeepsNoCopyOfTheAudioOfPeopleWhoOptedOut(): void
+    public function testKeepsNoCopyOfAnyonesAudioInTheTempFolder(): void
     {
         // This is about the audio: whisper hears nothing in it.
         $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => '']);
@@ -179,18 +179,19 @@ final class VoiceCallTest extends VoiceTestCase
         $this->waitUntil(fn () => count($this->logged('Transcribed')) === 2, 'Alice and Carol to have spoken', timeout: 20.0);
         $this->assertSame(['555', '777'], array_column($this->logged('Utterance ended'), 'user'));
 
+        // The voice client's ffmpeg decoders write what each speaker says to the temp folder, at the latest
+        // once they are closed, as they all are when the call ends. Carol's copy is a recording of her.
+        $vc->voiceDecoders[$carol]->close();
+        $this->assertCount(1, $copies = $this->decoderFiles($carol));
+        $this->assertGreaterThan(1000, filesize($copies[0]));
+
         VoiceSession::optOut('555');
         await($session->stop());
 
-        // The voice client's ffmpeg decoders write what each speaker says to the temp folder, when
-        // they have enough of it or are closed: Carol's copy is a recording of her.
-        $this->assertCount(1, $copies = $this->decoderFiles($carol));
-        $this->assertGreaterThan(1000, filesize($copies[0]));
-        unlink($copies[0]);
-
-        // Nothing is left of Alice and Bob: not there, and not in the call's folder.
+        // Nothing is left there of anyone once the call ends, and only Carol's recording is in the call's folder.
         $this->assertSame([], $this->decoderFiles(self::ALICE_SSRC));
         $this->assertSame([], $this->decoderFiles(self::BOB_SSRC));
+        $this->assertSame([], $this->decoderFiles($carol));
         $this->assertSame(["{$session->directory}/777-2.wav"], glob("{$session->directory}/*.wav"));
         $this->assertSame([], $this->loggedProblems());
     }

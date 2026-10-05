@@ -84,6 +84,34 @@ final class SentenceSplitterTest extends TestCase
             'That costs about 3.50 dollars in total. Not much.',
             ['That costs about 3.50 dollars in total.', 'Not much.'],
         ];
+        yield 'not after an abbreviated title' => [
+            'O encontro com o Sr. Silva é amanhã cedo. Até lá.',
+            ['O encontro com o Sr. Silva é amanhã cedo.', 'Até lá.'],
+        ];
+        yield 'not after a numbered day' => [
+            'Das Treffen ist am 3. Oktober um zehn Uhr. Bis dann!',
+            ['Das Treffen ist am 3. Oktober um zehn Uhr.', 'Bis dann!'],
+        ];
+        yield 'not after etc.' => [
+            'Bring snacks, drinks, cups, etc. and some music too. See you.',
+            ['Bring snacks, drinks, cups, etc. and some music too.', 'See you.'],
+        ];
+        yield 'after a year' => [
+            'We shipped the first version in 2024. Then came the second one.',
+            ['We shipped the first version in 2024.', 'Then came the second one.'],
+        ];
+        yield 'with the quote it closes' => [
+            'He told me: "I will be there at four." Then he left the room.',
+            ['He told me: "I will be there at four."', 'Then he left the room.'],
+        ];
+        yield 'with the bracket it closes, without spaces between sentences' => [
+            'それは本当に「良い考えだと私は心から思います。」明日また詳しく話しましょう。',
+            ['それは本当に「良い考えだと私は心から思います。」', '明日また詳しく話しましょう。'],
+        ];
+        yield 'after a danda' => [
+            'यह सचमुच बहुत अच्छा विचार है। कल फिर बात करते हैं।',
+            ['यह सचमुच बहुत अच्छा विचार है।', 'कल फिर बात करते हैं।'],
+        ];
         yield 'punctuation that repeats' => [
             'Wait... are you sure about that?! I am not so sure.',
             ['Wait... are you sure about that?!', 'I am not so sure.'],

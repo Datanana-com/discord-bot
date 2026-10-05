@@ -254,6 +254,20 @@ final class ClaudeTest extends TestCase
         }
     }
 
+    public function testNeverQuotesTheAnswerWhenClaudeCodeFailsAfterGivingIt(): void
+    {
+        putenv('FAKE_CLAUDE_OUTPUT=' . json_encode(['type' => 'result', 'is_error' => false, 'result' => 'It is a quarter past four.']));
+        putenv('FAKE_CLAUDE_EXIT=1');
+
+        try {
+            await($this->claude()->ask('Hello'));
+            $this->fail('The question should have failed.');
+        } catch (CommandFailedException $e) {
+            // Its result is the answer, not why it failed, and logs never contain what Claude answered.
+            $this->assertStringEndsWith('fake-claude exited with code 1', $e->getMessage());
+        }
+    }
+
     public function testRejectsWhenClaudeCodeEndsWithoutAResult(): void
     {
         putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeText('It is a quarter past four.'));

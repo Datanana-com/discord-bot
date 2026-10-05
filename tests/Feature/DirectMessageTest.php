@@ -189,6 +189,23 @@ final class DirectMessageTest extends VoiceTestCase
         $this->assertSame(mb_strlen($answer), $this->logged('Answered a DM')[0]['characters']);
     }
 
+    public function testKeepsBothHalvesOfASplitCodeBlockAsCode(): void
+    {
+        $code = implode("\n", array_map(fn (int $line) => sprintf('$line%02d = "%s";', $line, str_repeat('x', 40)), range(1, 60)));
+        $answer = "Here it is:\n```php\n{$code}\n```\nThat's all.";
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => $this->claudeSays($answer)]);
+
+        $this->write('Show me the code.');
+        $this->waitUntil(fn () => count($this->sent) === 2, 'both parts of the answer');
+
+        // The first message closes the block it cut, and the second opens it again.
+        $this->assertStringEndsWith("\n```", $this->sent[0]);
+        $this->assertStringStartsWith("```php\n\$line", $this->sent[1]);
+        $this->assertStringEndsWith("```\nThat's all.", $this->sent[1]);
+        $this->assertLessThanOrEqual(2000, max(array_map(mb_strlen(...), $this->sent)));
+        $this->assertSame($answer, preg_replace("/\n```\n```php\n/", "\n", implode("\n", $this->sent)));
+    }
+
     public function testTellsThePersonWhyClaudeCouldNotAnswer(): void
     {
         $this->setProcessEnv([

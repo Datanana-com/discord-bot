@@ -166,6 +166,22 @@ final class ApplicationTest extends TestCase
         $this->assertNotContains('Deleted old recordings', $this->logged());
     }
 
+    public function testDeletesTheCopiesOfWhatWasSaidThatCallsLeftInTheTempFolderWhenTheBotIsReady(): void
+    {
+        // The voice client's decoders copy each speaker's audio to the temp folder, named after when
+        // they started and the speaker's SSRC. A call the bot didn't get to end, as when it crashed, leaves them there.
+        $copies = [sys_get_temp_dir() . '/2026-10-04_21-07-666004.ogg', sys_get_temp_dir() . '/' . date('Y-m-d_H-i') . '-666005.ogg'];
+        $others = [sys_get_temp_dir() . '/2026-10-04_21-07-666004.ogg.txt', sys_get_temp_dir() . '/2026-10-04_21-07-voice.ogg'];
+        array_map(touch(...), [...$copies, ...$others]);
+        $app = $this->app();
+
+        $app->discord->emit('init', [$app->discord]);
+
+        $this->assertSame([false, false], array_map(is_file(...), $copies));
+        $this->assertSame([true, true], array_map(is_file(...), $others), 'Files named otherwise are not the voice client\'s.');
+        array_map(unlink(...), $others);
+    }
+
     public function testSavesCommandsDiscordDoesNotHaveYet(): void
     {
         [$app, $commands] = $this->appWithCommands();

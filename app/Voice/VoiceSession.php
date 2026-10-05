@@ -49,7 +49,7 @@ final class VoiceSession
      * The voice client's decoders leave a copy of each speaker's audio in the temp folder, named
      * after when the decoder started and the speaker's SSRC: <date>_<time>-<SSRC>.ogg.
      */
-    private const string DECODER_FILES = '%s/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9]-[0-9][0-9]-%d.ogg';
+    private const string DECODER_FILE = '/^\d{4}-\d\d-\d\d_\d\d-\d\d-(\d+)\.ogg$/';
 
     /** What Claude is asked to do with the transcript when the call ends. */
     private const string SUMMARY_PROMPT = <<<'PROMPT'
@@ -65,6 +65,9 @@ final class VoiceSession
 
     /** @var array<string, self> Active sessions by guild ID. */
     private static array $sessions = [];
+
+    /** @var array<string, self> Sessions that aren't over, by session ID: active, or stopped and still finishing. */
+    private static array $unfinished = [];
 
     private UtteranceSplitter $splitter;
 
@@ -91,11 +94,11 @@ final class VoiceSession
     /** @var array<string, true> */
     private array $speakers = [];
 
-    /** @var array<string, list<array{wav: ?string, ssrcs: list<int>}>> What is written of each speaker's audio, by user ID. */
+    /** @var array<string, list<string>> The recordings of each speaker, by user ID. */
     private array $audio = [];
 
-    /** @var list<array{wav: ?string, ssrcs: list<int>}> What is deleted when the call ends: the audio of people who opted out. */
-    private array $discarded = [];
+    /** @var list<int> The SSRC of every speaker, which names the copies the voice client's decoders make: see DECODER_FILE. */
+    private array $ssrcs = [];
 
     /** @var array{utterances: int, answers: int, failures: int} */
     private array $counts = ['utterances' => 0, 'answers' => 0, 'failures' => 0];
@@ -163,6 +166,34 @@ final class VoiceSession
     }
 
     /**
+     * The calls that aren't over: in progress, or stopped and still being transcribed and summarized.
+     *
+     * @return list<self>
+     */
+    public static function unfinished(): array
+    {
+        return array_values(self::$unfinished);
+    }
+
+    /**
+     * Deletes the copies of what speakers said that the voice client's decoders leave in the temp folder.
+     *
+     * @param list<int>|null $ssrcs The speakers' SSRCs, or null for every copy there, such as those
+     *                              of calls the bot didn't get to end.
+     */
+    public static function deleteDecoderFiles(?array $ssrcs = null): void
+    {
+        $folder = sys_get_temp_dir();
+
+        foreach (scandir($folder) ?: [] as $file) {
+            if (preg_match(self::DECODER_FILE, $file, $match) === 1 && ($ssrcs === null || in_array((int) $match[1], $ssrcs, true))) {
+                // Another user's file, in a temp folder they share, can't be deleted, and isn't the bot's.
+                @unlink("{$folder}/{$file}");
+            }
+        }
+    }
+
+    /**
      * Starts recording the channel the voice client is connected to.
      *
      * A call keeps the settings it starts with: changing them applies from the next call.
@@ -203,37 +234,41 @@ final class VoiceSession
         $session->log('info', 'Voice session started', ['channel' => $vc->channel->id, 'directory' => $directory]);
         $session->track(Usage::CALL_STARTED, ['channel' => $vc->channel->id]);
 
+        self::$unfinished[$session->id] = $session;
+
         return self::$sessions[$vc->channel->guild_id] = $session;
     }
 
     /**
-     * Stops recording, transcribing and answering someone in every call in progress, as they used /optout.
+     * Stops recording, transcribing and answering someone in every call that isn't over, as they used /optout.
      *
-     * What they say from now on is dropped, and what was recorded of them is deleted when the call
-     * ends. Their lines already in the transcript stay.
+     * What they say from now on is dropped, and what was recorded of them is deleted. Their lines
+     * already in the transcript stay.
      */
     public static function optOut(string $userId): void
     {
-        foreach (self::$sessions as $session) {
+        foreach (self::$unfinished as $session) {
             $session->optedOut[$userId] = true;
 
             if (isset($session->audio[$userId])) {
                 $session->log('info', 'Skipping a speaker who opted out', ['user' => $userId]);
-                array_push($session->discarded, ...$session->audio[$userId]);
+                // The voice client keeps writing to a recording it has open until the call ends, but
+                // to a file that is no longer there, and whose space is freed once it closes it.
+                array_map(unlink(...), $session->audio[$userId]);
                 unset($session->audio[$userId]);
             }
         }
     }
 
     /**
-     * Transcribes and answers someone again in every call in progress, as they used /optin.
+     * Transcribes and answers someone again in every call that isn't over, as they used /optin.
      *
      * They are only recorded again once they rejoin: until then, the voice client keeps writing
      * their audio where it was told to when they were still opted out.
      */
     public static function optIn(string $userId): void
     {
-        foreach (self::$sessions as $session) {
+        foreach (self::$unfinished as $session) {
             unset($session->optedOut[$userId]);
         }
     }
@@ -251,8 +286,9 @@ final class VoiceSession
             preg_split('/\s+/u', $wakeWord, flags: PREG_SPLIT_NO_EMPTY),
         );
 
-        // Between two of its words: anything but letters, their accents, and numbers.
-        return $words === [] || preg_match('/\b' . implode('[^\p{L}\p{M}\p{N}]+', $words) . '\b/iu', $text) === 1;
+        // Between two of its words: anything but letters, their accents, and numbers. Around it too:
+        // \b would also end a word before a vowel sign, which is how Hindi or Bengali write vowels.
+        return $words === [] || preg_match('/(?<![\p{L}\p{M}\p{N}])' . implode('[^\p{L}\p{M}\p{N}]+', $words) . '(?![\p{L}\p{M}\p{N}])/iu', $text) === 1;
     }
 
     /**
@@ -316,16 +352,8 @@ final class VoiceSession
             $this->vc->close();
         }
 
-        // The voice client is done writing, so what it wrote of people who opted out can be deleted.
-        foreach ($this->discarded as ['wav' => $wav, 'ssrcs' => $ssrcs]) {
-            if ($wav !== null) {
-                unlink($wav);
-            }
-
-            foreach ($ssrcs as $ssrc) {
-                array_map(unlink(...), glob(sprintf(self::DECODER_FILES, sys_get_temp_dir(), $ssrc)) ?: []);
-            }
-        }
+        // The voice client's decoders are closed, so the copies they made of what everyone said are complete, and can go.
+        self::deleteDecoderFiles($this->ssrcs);
 
         // An answer that was being spoken is cut off, so the queue no longer waits for it.
         $this->left->resolve(null);
@@ -341,6 +369,9 @@ final class VoiceSession
                 $this->log('warning', 'Could not summarize the call: ' . $e->getMessage());
 
                 return $this->post("Sorry, I couldn't summarize the call. ({$e->getMessage()})");
+            })
+            ->finally(function () {
+                unset(self::$unfinished[$this->id]);
             });
     }
 
@@ -350,6 +381,19 @@ final class VoiceSession
         // created that speaker's receive stream. The stream is tapped here to feed the splitter,
         // while record() itself keeps writing the speaker's full recording to the returned path.
         $this->vc->record(RecordingFormat::WAV, function (string $userId): string {
+            // What the voice client knows the speaker by, which also names the copies its decoders make: see DECODER_FILE.
+            $ssrcs = array_keys($this->vc->ssrcToUserId, $userId, true);
+
+            // It names a speaker by their SSRC when it doesn't know who they are, as when someone who left comes
+            // back and their audio arrives before the voice gateway says whose it is. They may have opted out.
+            if ($ssrcs === []) {
+                $this->log('warning', 'Not recording a speaker the voice client cannot name', ['ssrc' => (int) $userId]);
+                $this->ssrcs[] = (int) $userId;
+
+                return '/dev/null';
+            }
+
+            array_push($this->ssrcs, ...$ssrcs);
             $stream = $this->vc->getReceiveStream($userId);
             // Checked for each bit of audio: someone can opt out, or back in, during the call.
             $stream?->on('pcm', function (string $pcm) use ($userId) {
@@ -357,12 +401,9 @@ final class VoiceSession
                     $this->splitter->push($userId, $pcm, microtime(true));
                 }
             });
-            // The voice client's decoders also write what they decode: see DECODER_FILES.
-            $ssrcs = array_keys($this->vc->ssrcToUserId, $userId, true);
 
             if (isset($this->optedOut[$userId])) {
                 $this->log('info', 'Skipping a speaker who opted out', ['user' => $userId]);
-                $this->discarded[] = ['wav' => null, 'ssrcs' => $ssrcs];
 
                 // record() writes the speaker's audio to the path it gets, whoever it is, so theirs goes nowhere.
                 return '/dev/null';
@@ -377,7 +418,7 @@ final class VoiceSession
 
             // Someone who leaves and rejoins gets a new stream, so every stream gets its own file.
             $wav = sprintf('%s/%s-%d.wav', $this->directory, $userId, ++$this->files);
-            $this->audio[$userId][] = ['wav' => $wav, 'ssrcs' => $ssrcs];
+            $this->audio[$userId][] = $wav;
 
             return $wav;
         });
@@ -465,7 +506,7 @@ final class VoiceSession
         $speaking = false;
 
         $sentences = new SentenceSplitter(function (string $sentence) use (&$synthesized, &$spoken, &$speaking, $userId, $endedAt) {
-            if ($this->stopped) {
+            if (! $this->stillAnswering($userId)) {
                 return;
             }
 
@@ -475,9 +516,10 @@ final class VoiceSession
 
             // A sentence is synthesized as soon as Piper is free, while the ones before it are spoken. It is
             // spoken once they are over: the voice client refuses to play a file while it is playing another.
-            $synthesized = $synthesized->then(fn () => $this->speech->synthesize($sentence, $oggPath));
+            // Once the call stops, or they opt out, the sentences still waiting for Piper are no longer synthesized either.
+            $synthesized = $synthesized->then(fn () => $this->stillAnswering($userId) ? $this->speech->synthesize($sentence, $oggPath) : null);
             $spoken = $synthesized->finally(fn () => $before)->then(function () use (&$speaking, $userId, $oggPath, $endedAt) {
-                if ($this->stopped) {
+                if (! $this->stillAnswering($userId)) {
                     return null;
                 }
 
@@ -496,6 +538,13 @@ final class VoiceSession
                 $this->log('info', 'Claude answered', ['user' => $userId, 'ms' => $this->msSince($asking), 'characters' => mb_strlen($answer)]);
                 $sentences->flush();
 
+                // They opted out while Claude was answering: the answer would quote them.
+                if (isset($this->optedOut[$userId])) {
+                    $this->log('debug', 'Not answering', ['user' => $userId, 'reason' => 'they opted out']);
+
+                    return $spoken;
+                }
+
                 $this->remember("Claude: {$answer}");
                 $this->post("> **{$name}:** {$question}\n{$answer}");
                 $this->counts['answers']++;
@@ -510,6 +559,14 @@ final class VoiceSession
                 return $spoken->finally(fn () => throw $e);
             },
         );
+    }
+
+    /**
+     * Whether an answer to someone is still spoken: not once the call stopped, or they opted out.
+     */
+    private function stillAnswering(string $userId): bool
+    {
+        return ! $this->stopped && ! isset($this->optedOut[$userId]);
     }
 
     /**
