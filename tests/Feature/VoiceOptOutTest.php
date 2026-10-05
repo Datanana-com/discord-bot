@@ -72,11 +72,76 @@ final class VoiceOptOutTest extends VoiceTestCase
         $this->assertSame(0, $this->usage()['utterances']);
         $this->assertSame([['user' => '666']], array_map(fn (array $context) => array_slice($context, 2), $this->logged('Skipping a speaker who opted out')));
 
-        // His recording is kept until the call ends, as the voice client is still writing it.
-        $this->assertFileExists("{$session->directory}/666-1.wav");
+        // His recording is deleted right away. The voice client goes on writing to it until the call
+        // ends, but to a file that is no longer there.
+        $this->assertFileDoesNotExist("{$session->directory}/666-1.wav");
+        $this->speak($vc, ssrc: 2, userId: '666', seconds: 0.5);
         await($session->stop());
         $this->assertSame(["{$session->directory}/utterances"], glob("{$session->directory}/*"));
         $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testStopsAnsweringSomeoneWhoOptsOutWhileClaudeIsWriting(): void
+    {
+        $this->setProcessEnv([
+            'FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is a quarter past four. ', 'Time for a cup of tea.'),
+            'FAKE_CLAUDE_PAUSE' => '10',
+        ]);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        // Bob opts out once the first sentence of his answer was spoken, while Claude is still writing the rest.
+        $this->speak($vc, ssrc: 2, userId: '666', seconds: 1.0);
+        $this->waitUntil(fn () => $this->played !== [], 'the first sentence to be spoken');
+        VoiceSession::optOut('666');
+        touch($this->claudeResume);
+        $this->waitUntil(fn () => $this->logged('Claude answered') !== [], 'Claude to finish');
+        $this->runFor(0.5);
+
+        // The rest isn't spoken, and the answer, which quotes him, is neither posted nor kept.
+        $this->assertCount(1, $this->played);
+        $this->assertSame(["{$session->directory}/claude-2.ogg"], glob("{$session->directory}/claude-*"));
+        $this->assertSame([], $this->sent);
+        $this->assertStringContainsString('] Bob: Hey Claude, what time is it?', $this->transcript($session), 'What he said before stays.');
+        $this->assertStringNotContainsString('Claude:', $this->transcript($session));
+        $this->assertSame([['user' => '666', 'reason' => 'they opted out']], array_map(fn (array $context) => array_slice($context, 2), $this->logged('Not answering')));
+        $this->assertSame(0, $this->usage()['answers']);
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testDropsWhatIsLeftOfSomeoneWhoOptsOutWhileTheCallEnds(): void
+    {
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        // The call stops while Bob is talking, and he opts out before what he said is transcribed.
+        $this->speak($vc, ssrc: 2, userId: '666', seconds: 1.0);
+        $ended = $session->stop();
+        VoiceSession::optOut('666');
+        await($ended);
+
+        $this->assertSame('', $this->transcript($session));
+        $this->assertFileDoesNotExist($this->claudeLog, 'There was nothing to summarize.');
+        $this->assertSame([], $this->sent);
+        $this->assertSame(["{$session->directory}/utterances"], glob("{$session->directory}/*"), 'His recording is deleted too.');
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testKeepsNothingOfASpeakerTheVoiceClientCannotName(): void
+    {
+        (new OptOuts())->add('666');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        // Bob speaks, leaves the channel and comes back. His audio arrives again before the voice
+        // gateway says whose it is, so the voice client only has his SSRC to name him by.
+        $this->speak($vc, ssrc: 2, userId: '666', seconds: 0.5);
+        $vc->handleVoiceStateUpdate((object) ['user_id' => '666', 'channel_id' => null]);
+        $this->speak($vc, ssrc: 2, userId: '666', seconds: 1.0);
+        $this->runFor(1.5);
+
+        // Whoever it is, they may have opted out, like Bob did.
+        $this->assertSame([], glob("{$session->directory}/*.wav"));
+        $this->assertSame('', $this->transcript($session));
+        $this->assertFileDoesNotExist($this->claudeLog, 'Claude was not asked.');
+        $this->assertSame([['ssrc' => 2]], array_map(fn (array $context) => array_slice($context, 2), $this->logged('Not recording a speaker the voice client cannot name')));
     }
 
     public function testDropsWhatWaitedToBeTranscribedWhenSomeoneOptedOut(): void

@@ -75,8 +75,8 @@ final class OptoutCommandTest extends CommandTestCase
         $this->assertSame(['555', '666'], array_column($this->logged('Utterance ended'), 'user'));
         $this->assertSame(2, $this->usage()['utterances']);
 
-        // Her recording is deleted when the call ends, and only hers.
-        $this->assertFileExists("{$session->directory}/555-1.wav");
+        // Her recording is deleted right away, and only hers.
+        $this->assertSame(["{$session->directory}/666-2.wav"], glob("{$session->directory}/*.wav"));
         await($session->stop());
         $this->assertSame(["{$session->directory}/666-2.wav"], glob("{$session->directory}/*.wav"));
         $this->assertWavDuration(2.0, "{$session->directory}/666-2.wav");

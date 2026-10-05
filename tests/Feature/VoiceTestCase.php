@@ -30,6 +30,7 @@ use Tests\UsesStatsDatabase;
 
 use function React\Async\await;
 use function React\Async\delay;
+use function React\Promise\all;
 use function React\Promise\reject;
 use function React\Promise\resolve;
 
@@ -128,8 +129,7 @@ abstract class VoiceTestCase extends TestCase
     protected function tearDown(): void
     {
         // A call is summarized after it stopped, which must be over before its recordings are deleted.
-        // A test that stops a call in which something was said has to wait for that itself.
-        await(VoiceSession::forGuild(self::GUILD_ID)?->stop() ?? resolve(null));
+        await(all(array_map(fn (VoiceSession $session) => $session->stop(), VoiceSession::unfinished())));
 
         foreach ($this->originalEnv as $name => $value) {
             if (str_starts_with($name, 'FAKE_')) {

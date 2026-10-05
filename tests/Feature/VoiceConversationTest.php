@@ -139,6 +139,24 @@ final class VoiceConversationTest extends VoiceTestCase
         $this->assertWavDuration(2.0, "{$session->directory}/666-2.wav");
     }
 
+    public function testDeletesTheCopiesTheVoiceClientMadeOfWhatWasSaidWhenTheCallEnds(): void
+    {
+        // The voice client's decoders copy each speaker's audio to the temp folder, named after when
+        // they started and the speaker's SSRC. A decoder that is restarted starts a new copy.
+        // SSRC 666003 is someone in another call, whose copy that call deletes when it ends.
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => 'Sounds good.']);
+        $copies = array_map(fn (string $name) => sys_get_temp_dir() . "/{$name}", [date('Y-m-d_H-i') . '-1.ogg', '2026-10-04_21-07-2.ogg', date('Y-m-d_H-i') . '-2.ogg', date('Y-m-d_H-i') . '-666003.ogg']);
+        array_map(touch(...), $copies);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->speak($vc, ssrc: 2, userId: '666', seconds: 1.0);
+        await($session->stop());
+
+        $this->assertSame([false, false, false, true], array_map(is_file(...), $copies));
+        unlink($copies[3]);
+    }
+
     public function testTellsTheChannelWhenClaudeCannotAnswer(): void
     {
         $this->setProcessEnv([

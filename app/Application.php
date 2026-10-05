@@ -9,6 +9,7 @@ use App\Logs\Logger;
 use Discord\Discord;
 use ReflectionClass;
 use App\Voice\Retention;
+use App\Voice\VoiceSession;
 use Illuminate\Support\Str;
 use Psr\Log\LoggerInterface;
 use Discord\WebSockets\Event;
@@ -66,6 +67,8 @@ class Application
 
                 // Deletes old recordings now and every hour, when RECORDINGS_RETENTION_DAYS is set.
                 Retention::fromEnv($discord->getLogger())?->start($discord->getLoop());
+                // And what calls the bot didn't get to end, as when it crashed, left in the temp folder.
+                VoiceSession::deleteDecoderFiles();
 
                 try {
                     $this->prepareCommandClasses();
