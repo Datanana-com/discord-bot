@@ -8,7 +8,7 @@ if (! function_exists('databaseConfigs')) {
         return [
             'connections' => [
                 // Usage statistics (App\Analytics\Usage), shown by /stats, each server's settings (App\Settings\GuildSettings),
-                // and who opted out of being recorded (App\Privacy\OptOuts).
+                // each person's privacy settings (App\Settings\UserSettings), and who opted out of being recorded (App\Privacy\OptOuts).
                 'stats' => [
                     'driver' => 'sqlite',
                     'database' => env('STATS_DATABASE', 'databases/stats.sqlite'),

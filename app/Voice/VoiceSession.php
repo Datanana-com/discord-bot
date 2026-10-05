@@ -10,6 +10,7 @@ use App\Assistant\MemoryGroup;
 use App\Assistant\MemoryWriter;
 use App\Privacy\OptOuts;
 use App\Settings\GuildSettings;
+use App\Settings\UserSettings;
 use Discord\Builders\MessageBuilder;
 use Discord\Discord;
 use Discord\Parts\Channel\Channel;
@@ -52,6 +53,10 @@ use function React\Promise\resolve;
  * Whoever is in the call can also share their personal memory with it, with /share, until the call
  * ends: it is then added to every question, labeled with their name, whoever asks.
  *
+ * With /privacy, someone keeps their personal memory out of calls with others: it is then only added to
+ * their questions while they are alone with the bot, or once they shared it. When their setting can't
+ * be read, or who else is in the call isn't known, it is left out too.
+ *
  * Each step is logged with the session's ID and how long it took, and the call's usage is
  * recorded for /stats. Neither includes what anyone said: that is only in transcript.txt
  * and summary.md.
@@ -63,6 +68,13 @@ final class VoiceSession
 
     /** Personal memories shared with the call that a question's prompt holds. */
     private const int SHARED_MEMORIES = 5;
+
+    /** What can let someone's personal memory into their question: see personalMemoryBasis(). */
+    private const string ASKED = 'asked';
+
+    private const string SHARED = 'shared';
+
+    private const string ALONE = 'alone';
 
     /** Characters that fit in a Discord message. */
     private const int MESSAGE_LIMIT = 2000;
@@ -165,6 +177,7 @@ final class VoiceSession
         /** @var array<string, true> Who opted out of being recorded, by user ID. */
         private array $optedOut,
         private readonly Memory $memory,
+        private readonly UserSettings $userSettings,
     ) {
         $this->writer = new MemoryWriter($memory, $claude);
         $this->id = bin2hex(random_bytes(4));
@@ -312,6 +325,7 @@ final class VoiceSession
             new Usage($discord->getLogger()),
             $optedOut,
             Memory::fromEnv(),
+            new UserSettings($discord->getLogger()),
         );
         $session->listen();
         $session->log('info', 'Voice session started', ['channel' => $vc->channel->id, 'directory' => $directory]);
@@ -791,14 +805,17 @@ final class VoiceSession
     private function answer(string $userId, string $name, string $question, float $endedAt, ?array $people): PromiseInterface
     {
         $asking = microtime(true);
-        // Whose shared memories this answer is made from, which it must not outlive.
+        $basis = $this->personalMemoryBasis($userId, $people);
+        // Whose shared memories this answer is made from, which it must not outlive: the asker's own too,
+        // when sharing it is all that lets it in.
         $sharers = $this->sharers($userId);
+        $depends = $basis === self::SHARED ? [...$sharers, $userId] : $sharers;
         // What the last sentence so far waits for: Piper to be done with it, and the bot to have said it.
         $synthesized = $spoken = resolve(null);
         $speaking = false;
 
-        $sentences = new SentenceSplitter(function (string $sentence) use (&$synthesized, &$spoken, &$speaking, $userId, $sharers, $endedAt) {
-            if (! $this->stillAnswering($userId, $sharers)) {
+        $sentences = new SentenceSplitter(function (string $sentence) use (&$synthesized, &$spoken, &$speaking, $userId, $depends, $basis, $endedAt) {
+            if (! $this->stillAnswering($userId, $depends, $basis)) {
                 return;
             }
 
@@ -809,9 +826,9 @@ final class VoiceSession
             // A sentence is synthesized as soon as Piper is free, while the ones before it are spoken. It is
             // spoken once they are over: the voice client refuses to play a file while it is playing another.
             // Once the call stops, or they opt out, the sentences still waiting for Piper are no longer synthesized either.
-            $synthesized = $synthesized->then(fn () => $this->stillAnswering($userId, $sharers) ? $this->speech->synthesize($sentence, $oggPath) : null);
-            $spoken = $synthesized->finally(fn () => $before)->then(function () use (&$speaking, $userId, $sharers, $oggPath, $endedAt) {
-                if (! $this->stillAnswering($userId, $sharers)) {
+            $synthesized = $synthesized->then(fn () => $this->stillAnswering($userId, $depends, $basis) ? $this->speech->synthesize($sentence, $oggPath) : null);
+            $spoken = $synthesized->finally(fn () => $before)->then(function () use (&$speaking, $userId, $depends, $basis, $oggPath, $endedAt) {
+                if (! $this->stillAnswering($userId, $depends, $basis)) {
                     return null;
                 }
 
@@ -825,8 +842,8 @@ final class VoiceSession
             });
         });
 
-        return $this->claude->ask($this->prompt($userId, $name, $people, $sharers), onText: $sentences->push(...))->then(
-            function (string $answer) use ($sentences, &$spoken, $userId, $sharers, $name, $question, $endedAt, $asking, $people) {
+        return $this->claude->ask($this->prompt($userId, $name, $people, $sharers, $basis !== null), onText: $sentences->push(...))->then(
+            function (string $answer) use ($sentences, &$spoken, $userId, $depends, $basis, $name, $question, $endedAt, $asking, $people) {
                 $this->log('info', 'Claude answered', ['user' => $userId, 'ms' => $this->msSince($asking), 'characters' => mb_strlen($answer)]);
                 $sentences->flush();
 
@@ -838,8 +855,15 @@ final class VoiceSession
                 }
 
                 // Someone took their memory back while Claude was answering: the answer may quote it.
-                if (! $this->stillSharing($sharers)) {
+                if (! $this->stillSharing($depends)) {
                     $this->log('debug', 'Not answering', ['user' => $userId, 'reason' => 'a shared memory was taken back']);
+
+                    return $spoken;
+                }
+
+                // Someone joined while Claude was answering: the answer may quote a memory that was only meant for the asker.
+                if (! $this->stillAlone($userId, $basis)) {
+                    $this->log('debug', 'Not answering', ['user' => $userId, 'reason' => 'someone joined the call']);
 
                     return $spoken;
                 }
@@ -861,14 +885,48 @@ final class VoiceSession
     }
 
     /**
-     * Whether an answer to someone is still spoken: not once the call stopped, they opted out, or
-     * someone took back the memory it was made from.
+     * Whether an answer to someone is still spoken: not once the call stopped, they opted out,
+     * someone took back the memory it was made from, or someone joined a call it was made for them alone in.
      *
      * @param list<string> $sharers Whose shared memories the answer is made from.
+     * @param string|null $basis What let the asker's personal memory in: see {@see personalMemoryBasis()}.
      */
-    private function stillAnswering(string $userId, array $sharers): bool
+    private function stillAnswering(string $userId, array $sharers, ?string $basis): bool
     {
-        return ! $this->stopped && ! isset($this->optedOut[$userId]) && $this->stillSharing($sharers);
+        return ! $this->stopped && ! isset($this->optedOut[$userId]) && $this->stillSharing($sharers) && $this->stillAlone($userId, $basis);
+    }
+
+    /**
+     * What lets someone's personal memory into their question, as their /privacy setting and the call allow.
+     *
+     * Their own setting is the first thing: it is read for each question, so a change counts at once. When
+     * it keeps the memory for after /share, it is only used once they shared it, or while nobody else is in
+     * the call. When it can't be read, that is treated as that setting, and when who is in the call isn't
+     * known, as someone being there.
+     *
+     * @param list<string>|null $people Who was in the call when the question was asked: see {@see group()}.
+     * @return string|null {@see self::ASKED}, {@see self::SHARED} or {@see self::ALONE}, or null when the memory stays out.
+     */
+    private function personalMemoryBasis(string $userId, ?array $people): ?string
+    {
+        if (($this->userSettings->find($userId)['personal_memory_in_calls'] ?? null) === UserSettings::WHEN_ASKED) {
+            return self::ASKED;
+        }
+
+        if (isset($this->shared[$userId])) {
+            return self::SHARED;
+        }
+
+        // Both when it was said and now: the question may have waited behind others, and someone may have joined.
+        return $people === [$userId] && $this->group($userId) === [$userId] ? self::ALONE : null;
+    }
+
+    /**
+     * Whether the call is still just the asker and the bot, when that is what let their memory in.
+     */
+    private function stillAlone(string $userId, ?string $basis): bool
+    {
+        return $basis !== self::ALONE || $this->group($userId) === [$userId];
     }
 
     /**
@@ -931,11 +989,12 @@ final class VoiceSession
      *
      * @param list<string>|null $people Who is in the call: see {@see group()}.
      * @param list<string> $sharers Whose shared memories are added: see {@see sharers()}.
+     * @param bool $personalAllowed Whether the asker's personal memory may be added: see {@see personalMemoryBasis()}.
      */
-    private function prompt(string $userId, string $name, ?array $people, array $sharers): string
+    private function prompt(string $userId, string $name, ?array $people, array $sharers, bool $personalAllowed): string
     {
         $remembered = '';
-        $personal = $this->memory->read($userId);
+        $personal = $personalAllowed ? $this->memory->read($userId) : '';
         // Alone with the bot, the group is the asker, whose memory is the personal one.
         $group = count($people ?? []) > 1 ? $this->memory->read($people) : '';
 
