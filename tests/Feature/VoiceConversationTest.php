@@ -96,6 +96,29 @@ final class VoiceConversationTest extends VoiceTestCase
         $this->assertSame([], $this->sent);
     }
 
+    public function testGivesWhisperThePromptInEnvForEveryCall(): void
+    {
+        $this->setEnv(['WHISPER_PROMPT' => 'A voice call with the assistant Claude.']);
+        $this->setProcessEnv(['FAKE_WHISPER_LOG' => "{$this->recordings}/whisper.log"]);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->ask($vc, '555', 'Hey Claude, what time is it?');
+
+        $this->assertStringContainsString("arg=--prompt
+arg=A voice call with the assistant Claude.
+", file_get_contents("{$this->recordings}/whisper.log"));
+    }
+
+    public function testGivesWhisperNoPromptByDefault(): void
+    {
+        $this->setProcessEnv(['FAKE_WHISPER_LOG' => "{$this->recordings}/whisper.log"]);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->ask($vc, '555', 'Hey Claude, what time is it?');
+
+        $this->assertStringNotContainsString('--prompt', file_get_contents("{$this->recordings}/whisper.log"));
+    }
+
     public function testAnswersEverySpellingOfAServersWakeWord(): void
     {
         (new GuildSettings(new Logger('test')))->save(self::GUILD_ID, [...GuildSettings::DEFAULTS, 'wake_word' => 'jarvis, service, jarbas'], '555');

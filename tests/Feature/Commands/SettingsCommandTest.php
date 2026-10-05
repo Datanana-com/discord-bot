@@ -194,6 +194,15 @@ Wake word: `claude`, `cloud`, `claud` (default)
         $this->assertSame('one, two, three, four, five', $this->store->find(self::GUILD_ID)['wake_word']);
     }
 
+    public function testNoneWithCommasAroundItStillMeansNoWakeWord(): void
+    {
+        $this->settings(['wake_word' => 'claude']);
+
+        $this->settings(['wake_word' => ' None , ']);
+
+        $this->assertSame('', $this->store->find(self::GUILD_ID)['wake_word']);
+    }
+
     public function testNoneIsAWakeWordWhenAmongOthers(): void
     {
         $this->settings(['wake_word' => 'claude, none']);

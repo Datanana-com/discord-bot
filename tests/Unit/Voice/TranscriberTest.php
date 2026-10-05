@@ -14,7 +14,7 @@ final class TranscriberTest extends TestCase
 {
     protected function tearDown(): void
     {
-        unset($_ENV['WHISPER_LANGUAGE']);
+        unset($_ENV['WHISPER_LANGUAGE'], $_ENV['WHISPER_PROMPT']);
     }
 
     public function testAServersLanguageReplacesTheOneInEnv(): void
@@ -79,13 +79,13 @@ final class TranscriberTest extends TestCase
 
     public function testReadsThePromptFromTheEnvironment(): void
     {
-        putenv('WHISPER_PROMPT=  Hey Claude.  ');
+        $_ENV['WHISPER_PROMPT'] = '  Hey Claude.  ';
         $this->assertSame('Hey Claude.', Transcriber::fromEnv()->prompt);
 
-        putenv('WHISPER_PROMPT=');
+        $_ENV['WHISPER_PROMPT'] = '';
         $this->assertSame('', Transcriber::fromEnv()->prompt, 'Empty means no prompt.');
 
-        putenv('WHISPER_PROMPT');
+        unset($_ENV['WHISPER_PROMPT']);
         $this->assertSame('', Transcriber::fromEnv()->prompt, 'So does not setting it.');
     }
 

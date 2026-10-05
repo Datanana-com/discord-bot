@@ -107,9 +107,8 @@ final class SettingsCommand extends CommandAbstract
 
         if (isset($values['wake_word'])) {
             // "none" stands for no wake word, as Discord doesn't let an option be empty.
-            $values['wake_word'] = strcasecmp($values['wake_word'], 'none') === 0
-                ? ''
-                : implode(', ', VoiceSession::spellings($values['wake_word']));
+            $spellings = implode(', ', VoiceSession::spellings($values['wake_word']));
+            $values['wake_word'] = strcasecmp($spellings, 'none') === 0 ? '' : $spellings;
         }
 
         $settings = [...($reset ? GuildSettings::DEFAULTS : $current), ...$values];
