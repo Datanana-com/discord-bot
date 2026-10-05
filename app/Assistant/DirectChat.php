@@ -223,7 +223,7 @@ final class DirectChat
         $parts = mb_strlen($content) <= 2000 ? [$content] : VoiceSession::split($content, 2000 - 2 * self::FENCE_LENGTH);
         $open = null;
 
-        foreach ($parts as &$part) {
+        foreach ($parts as $index => &$part) {
             if ($open !== null) {
                 $part = "{$open}\n{$part}";
                 $open = null;
@@ -236,7 +236,8 @@ final class DirectChat
                 }
             }
 
-            if ($open !== null) {
+            // Only where the text is cut: the end of the last part is as Claude wrote it.
+            if ($open !== null && $index < count($parts) - 1) {
                 $part .= "\n```";
             }
         }
