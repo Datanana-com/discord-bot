@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Settings\UserSettings;
 use App\Voice\VoiceSession;
 use ReflectionProperty;
 
@@ -488,6 +489,56 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->assertCount(1, $this->lookups());
         $this->assertCount(2, $this->logged('Dropped what was handed off to be looked up'));
         $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testDropsWhatWasLookedUpOnceSomeoneJoinsACallItsAnswerWasMadeForSomeoneAloneIn(): void
+    {
+        // Alice keeps her memory out of calls with others (/privacy): it is used while she is alone with the bot.
+        $this->memory()->save('555', '- Is building a game called Bananas.');
+        (new UserSettings($this->discord->getLogger()))->save('555', ['personal_memory_in_calls' => UserSettings::AFTER_SHARE]);
+        $this->inCall('555');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->ask($vc, '555', self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 1, 'the lookup to start');
+        $this->assertStringContainsString('Bananas', $this->claudeCalls()[0]['prompt']);
+        $transcript = $this->transcript($session);
+
+        // Bob joins: what is looked up may be made of her memory, like an answer that was being written.
+        $this->joins('666');
+        touch($this->go);
+        $this->waitUntil(fn () => $this->logged('Looked something up') !== [], 'the lookup to end');
+        $this->runFor(0.4);
+
+        $this->assertCount(1, $this->sent);
+        $this->assertCount(1, $this->played);
+        $this->assertSame($transcript, $this->transcript($session));
+        $this->assertCount(1, $this->logged('Dropped what was handed off to be looked up'));
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testStillPostsWhatWasLookedUpAfterACallSomeoneWasAloneIn(): void
+    {
+        $this->memory()->save('555', '- Is building a game called Bananas.');
+        (new UserSettings($this->discord->getLogger()))->save('555', ['personal_memory_in_calls' => UserSettings::AFTER_SHARE]);
+        $this->inCall('555');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);
+
+        $this->ask($vc, '555', self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 1, 'the lookup to start');
+        $this->assertStringContainsString('Bananas', $this->claudeCalls()[0]['prompt']);
+
+        // The call ends and the bot leaves: who is in the channel is no longer known, and nobody can join the call anymore.
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeResult('They talked about PHP.'), 'FAKE_CLAUDE_OUTPUT_MEMORY' => self::claudeResult('- Asked about PHP.')]);
+        await($session->stop());
+        $this->leaves(self::BOT_ID);
+        $posted = count($this->sent);
+        touch($this->go);
+        $this->waitUntil(fn () => count($this->sent) === $posted + 1, 'what was looked up to be posted');
+        $this->waitUntil(fn () => VoiceSession::unfinished() === [], 'the call to be over');
+
+        $this->assertSame(self::QUOTE . "\n" . self::FOUND, end($this->sent));
+        $this->assertCount(1, $this->played);
     }
 
     public function testSaysNothingAboutAFailedLookupToSomeoneWhoOptedOutMeanwhile(): void
