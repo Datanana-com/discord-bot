@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Voice;
 
 use App\Analytics\Usage;
+use App\Privacy\OptOuts;
 use App\Settings\GuildSettings;
 use Discord\Builders\MessageBuilder;
 use Discord\Discord;
@@ -25,9 +26,12 @@ use function React\Promise\resolve;
  * Records a voice channel and lets the people in it talk to Claude.
  *
  * Every speaker is recorded to their own WAV file. Meanwhile each utterance is transcribed
- * with whisper.cpp, and when it mentions the wake word, Claude's answer is posted in the
- * text channel and spoken back into the call with Piper. When the call ends, Claude's summary
- * of it is posted in the text channel as well.
+ * with whisper.cpp, and when it mentions the wake word, Claude's answer is spoken back into
+ * the call with Piper, sentence by sentence while Claude is writing it, and then posted in the
+ * text channel. When the call ends, Claude's summary of it is posted in the text channel as well.
+ *
+ * Nothing is kept of people who opted out with /optout: they aren't recorded, transcribed or
+ * answered. The voice client still receives and decodes their audio, like everyone's.
  *
  * Each step is logged with the session's ID and how long it took, and the call's usage is
  * recorded for /stats. Neither includes what anyone said: that is only in transcript.txt
@@ -40,6 +44,12 @@ final class VoiceSession
 
     /** Characters that fit in a Discord message. */
     private const int MESSAGE_LIMIT = 2000;
+
+    /**
+     * The voice client's decoders leave a copy of each speaker's audio in the temp folder, named
+     * after when the decoder started and the speaker's SSRC: <date>_<time>-<SSRC>.ogg.
+     */
+    private const string DECODER_FILES = '%s/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9]-[0-9][0-9]-%d.ogg';
 
     /** What Claude is asked to do with the transcript when the call ends. */
     private const string SUMMARY_PROMPT = <<<'PROMPT'
@@ -81,6 +91,12 @@ final class VoiceSession
     /** @var array<string, true> */
     private array $speakers = [];
 
+    /** @var array<string, list<array{wav: ?string, ssrcs: list<int>}>> What is written of each speaker's audio, by user ID. */
+    private array $audio = [];
+
+    /** @var list<array{wav: ?string, ssrcs: list<int>}> What is deleted when the call ends: the audio of people who opted out. */
+    private array $discarded = [];
+
     /** @var array{utterances: int, answers: int, failures: int} */
     private array $counts = ['utterances' => 0, 'answers' => 0, 'failures' => 0];
 
@@ -94,6 +110,8 @@ final class VoiceSession
         private readonly Speech $speech,
         public readonly string $wakeWord,
         private readonly Usage $usage,
+        /** @var array<string, true> Who opted out of being recorded, by user ID. */
+        private array $optedOut,
     ) {
         $this->id = bin2hex(random_bytes(4));
         $this->startedAt = microtime(true);
@@ -152,9 +170,14 @@ final class VoiceSession
      * @param Channel $textChannel Where Claude's answers and the call's summary are posted.
      * @param array{wake_word: ?string, language: ?string, voice: ?string, model: ?string}|null $settings
      *        The server's settings, when they were already read.
+     *
+     * @throws Throwable When the list of who opted out can't be read. Nothing is recorded then.
      */
     public static function start(VoiceClient $vc, Channel $textChannel, Discord $discord, ?array $settings = null): self
     {
+        // Read before anything else, and only now: someone may have opted out while the bot was joining.
+        $optedOut = array_fill_keys((new OptOuts())->all(), true);
+
         $settings ??= (new GuildSettings($discord->getLogger()))->for((string) $vc->channel->guild_id);
         $directory = sprintf(
             '%s/%s/%s',
@@ -174,12 +197,45 @@ final class VoiceSession
             Speech::fromEnv($settings['voice']),
             $settings['wake_word'] ?? self::defaultWakeWord(),
             new Usage($discord->getLogger()),
+            $optedOut,
         );
         $session->listen();
         $session->log('info', 'Voice session started', ['channel' => $vc->channel->id, 'directory' => $directory]);
         $session->track(Usage::CALL_STARTED, ['channel' => $vc->channel->id]);
 
         return self::$sessions[$vc->channel->guild_id] = $session;
+    }
+
+    /**
+     * Stops recording, transcribing and answering someone in every call in progress, as they used /optout.
+     *
+     * What they say from now on is dropped, and what was recorded of them is deleted when the call
+     * ends. Their lines already in the transcript stay.
+     */
+    public static function optOut(string $userId): void
+    {
+        foreach (self::$sessions as $session) {
+            $session->optedOut[$userId] = true;
+
+            if (isset($session->audio[$userId])) {
+                $session->log('info', 'Skipping a speaker who opted out', ['user' => $userId]);
+                array_push($session->discarded, ...$session->audio[$userId]);
+                unset($session->audio[$userId]);
+            }
+        }
+    }
+
+    /**
+     * Transcribes and answers someone again in every call in progress, as they used /optin.
+     *
+     * They are only recorded again once they rejoin: until then, the voice client keeps writing
+     * their audio where it was told to when they were still opted out.
+     */
+    public static function optIn(string $userId): void
+    {
+        foreach (self::$sessions as $session) {
+            unset($session->optedOut[$userId]);
+        }
     }
 
     /**
@@ -260,6 +316,17 @@ final class VoiceSession
             $this->vc->close();
         }
 
+        // The voice client is done writing, so what it wrote of people who opted out can be deleted.
+        foreach ($this->discarded as ['wav' => $wav, 'ssrcs' => $ssrcs]) {
+            if ($wav !== null) {
+                unlink($wav);
+            }
+
+            foreach ($ssrcs as $ssrc) {
+                array_map(unlink(...), glob(sprintf(self::DECODER_FILES, sys_get_temp_dir(), $ssrc)) ?: []);
+            }
+        }
+
         // An answer that was being spoken is cut off, so the queue no longer waits for it.
         $this->left->resolve(null);
 
@@ -284,6 +351,23 @@ final class VoiceSession
         // while record() itself keeps writing the speaker's full recording to the returned path.
         $this->vc->record(RecordingFormat::WAV, function (string $userId): string {
             $stream = $this->vc->getReceiveStream($userId);
+            // Checked for each bit of audio: someone can opt out, or back in, during the call.
+            $stream?->on('pcm', function (string $pcm) use ($userId) {
+                if (! isset($this->optedOut[$userId])) {
+                    $this->splitter->push($userId, $pcm, microtime(true));
+                }
+            });
+            // The voice client's decoders also write what they decode: see DECODER_FILES.
+            $ssrcs = array_keys($this->vc->ssrcToUserId, $userId, true);
+
+            if (isset($this->optedOut[$userId])) {
+                $this->log('info', 'Skipping a speaker who opted out', ['user' => $userId]);
+                $this->discarded[] = ['wav' => null, 'ssrcs' => $ssrcs];
+
+                // record() writes the speaker's audio to the path it gets, whoever it is, so theirs goes nowhere.
+                return '/dev/null';
+            }
+
             $this->speakers[$userId] = true;
             $this->log('info', 'Recording a speaker', ['user' => $userId]);
 
@@ -291,10 +375,11 @@ final class VoiceSession
                 $this->log('warning', "No receive stream for {$userId}; their speech will not be answered.", ['user' => $userId]);
             }
 
-            $stream?->on('pcm', fn (string $pcm) => $this->splitter->push($userId, $pcm, microtime(true)));
-
             // Someone who leaves and rejoins gets a new stream, so every stream gets its own file.
-            return sprintf('%s/%s-%d.wav', $this->directory, $userId, ++$this->files);
+            $wav = sprintf('%s/%s-%d.wav', $this->directory, $userId, ++$this->files);
+            $this->audio[$userId][] = ['wav' => $wav, 'ssrcs' => $ssrcs];
+
+            return $wav;
         });
 
         $this->ticker = $this->discord->getLoop()->addPeriodicTimer(
@@ -308,6 +393,13 @@ final class VoiceSession
 
     private function queueUtterance(string $userId, string $wavPath, float $seconds): void
     {
+        // They opted out while saying this.
+        if (isset($this->optedOut[$userId])) {
+            unlink($wavPath);
+
+            return;
+        }
+
         $endedAt = microtime(true);
         $ms = (int) round($seconds * 1000);
         $this->counts['utterances']++;
@@ -328,6 +420,13 @@ final class VoiceSession
      */
     private function handleUtterance(string $userId, string $wavPath, float $endedAt): PromiseInterface
     {
+        // They opted out while this waited for its turn.
+        if (isset($this->optedOut[$userId])) {
+            unlink($wavPath);
+
+            return resolve(null);
+        }
+
         $transcribing = microtime(true);
 
         return $this->transcriber->transcribe($wavPath)
@@ -335,7 +434,8 @@ final class VoiceSession
             ->then(function (string $text) use ($userId, $endedAt, $transcribing) {
                 $this->log('info', 'Transcribed', ['user' => $userId, 'ms' => $this->msSince($transcribing), 'characters' => mb_strlen($text)]);
 
-                if ($text === '') {
+                // Nothing was said, or they opted out while it was transcribed.
+                if ($text === '' || isset($this->optedOut[$userId])) {
                     return null;
                 }
 
@@ -348,45 +448,68 @@ final class VoiceSession
                     return null;
                 }
 
-                $asking = microtime(true);
-
-                return $this->claude->ask($this->prompt($name))->then(
-                    function (string $answer) use ($userId, $name, $text, $endedAt, $asking) {
-                        $this->log('info', 'Claude answered', ['user' => $userId, 'ms' => $this->msSince($asking), 'characters' => mb_strlen($answer)]);
-
-                        return $this->reply($userId, $name, $text, $answer, $endedAt);
-                    },
-                    function (Throwable $e) {
-                        $this->post("Sorry, I couldn't get an answer from Claude. ({$e->getMessage()})");
-
-                        throw $e;
-                    },
-                );
+                return $this->answer($userId, $name, $text, $endedAt);
             });
     }
 
-    private function reply(string $userId, string $name, string $question, string $answer, float $endedAt): PromiseInterface
+    /**
+     * Asks Claude, and speaks its answer sentence by sentence while Claude is still writing it.
+     *
+     * @return PromiseInterface<mixed> Resolves once the answer is posted and the bot has stopped speaking.
+     */
+    private function answer(string $userId, string $name, string $question, float $endedAt): PromiseInterface
     {
-        $this->remember("Claude: {$answer}");
-        $this->post("> **{$name}:** {$question}\n{$answer}");
-        $this->counts['answers']++;
-        $this->track(Usage::ANSWERED, ['user' => $userId, 'duration_ms' => $this->msSince($endedAt)]);
+        $asking = microtime(true);
+        // What the last sentence so far waits for: Piper to be done with it, and the bot to have said it.
+        $synthesized = $spoken = resolve(null);
+        $speaking = false;
 
-        if ($this->stopped) {
-            return resolve(null);
-        }
+        $sentences = new SentenceSplitter(function (string $sentence) use (&$synthesized, &$spoken, &$speaking, $userId, $endedAt) {
+            if ($this->stopped) {
+                return;
+            }
 
-        // Replies are kept next to the recordings, so the bot's side of the call is saved too.
-        $oggPath = sprintf('%s/claude-%d.ogg', $this->directory, ++$this->files);
-        $synthesizing = microtime(true);
+            // Sentences are kept next to the recordings, so the bot's side of the call is saved too.
+            $oggPath = sprintf('%s/claude-%d.ogg', $this->directory, ++$this->files);
+            $before = $spoken;
 
-        return $this->speech->synthesize($answer, $oggPath)
-            ->then(function () use ($userId, $oggPath, $synthesizing) {
-                $this->log('info', 'Speaking the answer', ['user' => $userId, 'synthesis_ms' => $this->msSince($synthesizing)]);
+            // A sentence is synthesized as soon as Piper is free, while the ones before it are spoken. It is
+            // spoken once they are over: the voice client refuses to play a file while it is playing another.
+            $synthesized = $synthesized->then(fn () => $this->speech->synthesize($sentence, $oggPath));
+            $spoken = $synthesized->finally(fn () => $before)->then(function () use (&$speaking, $userId, $oggPath, $endedAt) {
+                if ($this->stopped) {
+                    return null;
+                }
 
-                // The voice client never says the answer finished when it is closed while speaking it.
+                if (! $speaking) {
+                    $speaking = true;
+                    $this->log('info', 'Started speaking', ['user' => $userId, 'ms' => $this->msSince($endedAt)]);
+                }
+
+                // The voice client never says the sentence finished when it is closed while speaking it.
                 return race([$this->vc->playFile($oggPath), $this->left->promise()]);
             });
+        });
+
+        return $this->claude->ask($this->prompt($name), onText: $sentences->push(...))->then(
+            function (string $answer) use ($sentences, &$spoken, $userId, $name, $question, $endedAt, $asking) {
+                $this->log('info', 'Claude answered', ['user' => $userId, 'ms' => $this->msSince($asking), 'characters' => mb_strlen($answer)]);
+                $sentences->flush();
+
+                $this->remember("Claude: {$answer}");
+                $this->post("> **{$name}:** {$question}\n{$answer}");
+                $this->counts['answers']++;
+                $this->track(Usage::ANSWERED, ['user' => $userId, 'duration_ms' => $this->msSince($endedAt)]);
+
+                return $spoken;
+            },
+            function (Throwable $e) use (&$spoken) {
+                $this->post("Sorry, I couldn't get an answer from Claude. ({$e->getMessage()})");
+
+                // The sentences Claude finished are still spoken, and the next answer waits for them.
+                return $spoken->finally(fn () => throw $e);
+            },
+        );
     }
 
     /**

@@ -4,11 +4,14 @@ declare(strict_types=1);
 
 namespace Tests\Feature\Commands;
 
+use App\Analytics\Usage;
 use App\Commands\Global\RecordCommand;
+use App\Privacy\OptOuts;
 use App\Settings\GuildSettings;
 use App\Voice\VoiceSession;
 use Discord\Parts\Channel\Channel;
 use Discord\Voice\Manager;
+use Illuminate\Database\Capsule\Manager as DB;
 use Monolog\Logger;
 use ReflectionClass;
 use RuntimeException;
@@ -39,7 +42,7 @@ final class RecordCommandTest extends CommandTestCase
         // Unmuted to speak answers, undeafened to hear the call.
         $this->assertSame([[$channel, false, false]], $this->joins);
         $this->assertTrue($this->acknowledged, 'Discord got a response within 3 seconds.');
-        $this->assertSame(['🔴 Recording <#200>. Say "claude" to talk to me. Use /stop to end the recording.'], $this->updates);
+        $this->assertSame(['🔴 Recording <#200>. Say "claude" to talk to me. Use /stop to end the recording, or /optout if you don\'t want to be recorded.'], $this->updates);
         $this->assertNotNull($session = VoiceSession::forGuild(self::GUILD_ID));
         $this->assertDirectoryExists($session->directory);
         $this->assertStringStartsWith("{$this->recordings}/" . self::GUILD_ID . '/', $session->directory);
@@ -53,7 +56,7 @@ final class RecordCommandTest extends CommandTestCase
 
         $this->record($this->interaction($channel));
 
-        $this->assertSame(['🔴 Recording <#200>. I answer everything that is said. Use /stop to end the recording.'], $this->updates);
+        $this->assertSame(['🔴 Recording <#200>. I answer everything that is said. Use /stop to end the recording, or /optout if you don\'t want to be recorded.'], $this->updates);
     }
 
     public function testUsesTheServersSettings(): void
@@ -75,7 +78,7 @@ final class RecordCommandTest extends CommandTestCase
         $this->record($this->interaction($channel));
 
         // The announcement tells the call the server's wake word, not the one in .env ("claude").
-        $this->assertSame(['🔴 Recording <#200>. Say "jarvis" to talk to me. Use /stop to end the recording.'], $this->updates);
+        $this->assertSame(['🔴 Recording <#200>. Say "jarvis" to talk to me. Use /stop to end the recording, or /optout if you don\'t want to be recorded.'], $this->updates);
 
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
         $this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');
@@ -99,7 +102,8 @@ final class RecordCommandTest extends CommandTestCase
             'FAKE_WHISPER_LOG' => "{$this->recordings}/whisper.log",
             'FAKE_PIPER_LOG' => "{$this->recordings}/piper.log",
         ]);
-        $this->breakStatsDatabase();
+        // Only the settings can't be read: without the list of who opted out, nothing would be recorded.
+        DB::connection(Usage::CONNECTION)->statement('CREATE VIEW guild_settings AS SELECT * FROM missing');
         $channel = $this->voiceChannel();
         $this->joinsWith(resolve($vc = $this->voiceClient($channel)));
 
@@ -107,7 +111,7 @@ final class RecordCommandTest extends CommandTestCase
 
         // Settings never stop a call from starting.
         $this->assertNotNull(VoiceSession::forGuild(self::GUILD_ID));
-        $this->assertSame(['🔴 Recording <#200>. Say "computer" to talk to me. Use /stop to end the recording.'], $this->updates);
+        $this->assertSame(['🔴 Recording <#200>. Say "computer" to talk to me. Use /stop to end the recording, or /optout if you don\'t want to be recorded.'], $this->updates);
 
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
         $this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');
@@ -119,14 +123,11 @@ final class RecordCommandTest extends CommandTestCase
             file_get_contents("{$this->recordings}/piper.log"),
         );
 
-        // It is logged, once for the call. The statistics are in the same database.
-        $problems = array_count_values($this->loggedProblems());
-        $this->assertSame(1, $problems['Could not read the server settings: Database connection [stats] not configured.']);
-        $this->assertSame(
-            ['Could not read the server settings: Database connection [stats] not configured.', 'Could not save usage statistics: Database connection [stats] not configured.'],
-            array_keys($problems),
-        );
-        $this->assertSame([['guild' => self::GUILD_ID]], $this->logged('Could not read the server settings: Database connection [stats] not configured.'));
+        // It is logged, once for the call.
+        $problems = $this->loggedProblems();
+        $this->assertCount(1, $problems);
+        $this->assertStringStartsWith('Could not read the server settings: ', $problems[0]);
+        $this->assertSame([['guild' => self::GUILD_ID]], $this->logged($problems[0]));
     }
 
     public function testReportsWhenTheVoiceChannelCannotBeJoined(): void
@@ -183,6 +184,70 @@ final class RecordCommandTest extends CommandTestCase
         $this->record($this->interaction($this->voiceChannel()));
 
         $this->assertRefused('PIPER_MODEL in .env does not point to a model file.');
+    }
+
+    public function testRefusesWhenTheOptOutListCannotBeRead(): void
+    {
+        $this->breakStatsDatabase();
+
+        $this->record($this->interaction($this->voiceChannel()));
+
+        // Without the list, someone who opted out would be recorded.
+        $this->assertRefused('I can\'t check who opted out of recording right now. Check the bot logs.');
+        $this->assertSame(
+            [['guild' => self::GUILD_ID]],
+            $this->logged('Could not read who opted out of recording: Database connection [stats] not configured.'),
+        );
+    }
+
+    public function testChecksOtherProblemsBeforeTheOptOutList(): void
+    {
+        $this->breakStatsDatabase();
+
+        $this->record($this->interaction(null));
+
+        $this->assertRefused('Join a voice channel first.');
+        $this->assertSame([], $this->logged('Could not read who opted out of recording: Database connection [stats] not configured.'));
+    }
+
+    public function testLeavesTheCallWhenTheOptOutListCannotBeReadAfterJoining(): void
+    {
+        $channel = $this->voiceChannel();
+        // It expects to be closed exactly once.
+        $vc = $this->voiceClient($channel, connected: true);
+        $this->discord->method('joinVoiceChannel')->willReturnCallback(function () use ($vc) {
+            // The list could be read when /record was used, but no longer when the call starts.
+            $this->breakStatsDatabase();
+
+            return resolve($vc);
+        });
+
+        $this->record($this->interaction($channel));
+
+        $this->assertSame(['I can\'t check who opted out of recording right now. Check the bot logs.'], $this->updates);
+        $this->assertNull(VoiceSession::forGuild(self::GUILD_ID));
+        $this->assertDirectoryDoesNotExist("{$this->recordings}/" . self::GUILD_ID, 'Nothing was recorded.');
+        $this->assertSame(['Could not read who opted out of recording: Database connection [stats] not configured.'], $this->loggedProblems());
+    }
+
+    public function testStartsTheCallWithWhoOptedOutWhileJoining(): void
+    {
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => 'Sounds good.']);
+        $channel = $this->voiceChannel();
+        $vc = $this->voiceClient($channel);
+        $this->discord->method('joinVoiceChannel')->willReturnCallback(function () use ($vc) {
+            // Bob opts out after /record was used, while the bot is still joining.
+            (new OptOuts())->add('666');
+
+            return resolve($vc);
+        });
+
+        $this->record($this->interaction($channel));
+        $this->speak($vc, ssrc: 2, userId: '666', seconds: 1.0);
+        $this->runFor(1.5);
+
+        $this->assertSame('', $this->transcript(VoiceSession::forGuild(self::GUILD_ID)));
+        $this->assertCount(1, $this->logged('Skipping a speaker who opted out'));
     }
 
     public function testRefusesWhenTheWhisperModelIsMissing(): void
