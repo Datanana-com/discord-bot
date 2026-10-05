@@ -14,7 +14,7 @@ use Throwable;
 final class OptoutCommand extends CommandAbstract
 {
     private const string OPTED_OUT = 'You opted out: I no longer record, transcribe or answer you, in any server.'
-        . ' If I am recording a call you are in, what you say from now on is dropped and your recording of it is deleted when the call ends; what was already transcribed stays.'
+        . ' If I am recording a call you are in, what you say from now on is dropped and your recording of it is deleted; what was already transcribed stays.'
         . ' Use /optin to undo this.';
 
     private const string ALREADY_OPTED_OUT = 'You had already opted out: I don\'t record, transcribe or answer you. Use /optin to undo this.';

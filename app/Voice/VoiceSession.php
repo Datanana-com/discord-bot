@@ -100,6 +100,9 @@ final class VoiceSession
     /** @var list<int> The SSRC of every speaker, which names the copies the voice client's decoders make: see DECODER_FILE. */
     private array $ssrcs = [];
 
+    /** @var array<string, string> Whose each clip of what was said is, by path, while it waits to be transcribed. */
+    private array $waiting = [];
+
     /** @var array{utterances: int, answers: int, failures: int} */
     private array $counts = ['utterances' => 0, 'answers' => 0, 'failures' => 0];
 
@@ -256,6 +259,13 @@ final class VoiceSession
                 // to a file that is no longer there, and whose space is freed once it closes it.
                 array_map(unlink(...), $session->audio[$userId]);
                 unset($session->audio[$userId]);
+            }
+
+            // So are the clips of what they said that wait to be transcribed. One being transcribed
+            // is deleted once whisper is done with it, and what whisper heard is dropped.
+            foreach (array_keys($session->waiting, $userId, true) as $clip) {
+                unlink($clip);
+                unset($session->waiting[$clip]);
             }
         }
     }
@@ -441,6 +451,7 @@ final class VoiceSession
             return;
         }
 
+        $this->waiting[$wavPath] = $userId;
         $endedAt = microtime(true);
         $ms = (int) round($seconds * 1000);
         $this->counts['utterances']++;
@@ -461,13 +472,12 @@ final class VoiceSession
      */
     private function handleUtterance(string $userId, string $wavPath, float $endedAt): PromiseInterface
     {
-        // They opted out while this waited for its turn.
-        if (isset($this->optedOut[$userId])) {
-            unlink($wavPath);
-
+        // They opted out while this waited for its turn, and it was deleted then.
+        if (! isset($this->waiting[$wavPath])) {
             return resolve(null);
         }
 
+        unset($this->waiting[$wavPath]);
         $transcribing = microtime(true);
 
         return $this->transcriber->transcribe($wavPath)

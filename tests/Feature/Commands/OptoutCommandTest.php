@@ -13,7 +13,7 @@ use function React\Async\await;
 final class OptoutCommandTest extends CommandTestCase
 {
     private const string OPTED_OUT = 'You opted out: I no longer record, transcribe or answer you, in any server.'
-        . ' If I am recording a call you are in, what you say from now on is dropped and your recording of it is deleted when the call ends; what was already transcribed stays.'
+        . ' If I am recording a call you are in, what you say from now on is dropped and your recording of it is deleted; what was already transcribed stays.'
         . ' Use /optin to undo this.';
 
     public function testOptsOutWhoeverUsedIt(): void
