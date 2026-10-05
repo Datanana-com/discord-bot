@@ -760,7 +760,7 @@ final class VoiceSession
                 $this->track(Usage::ANSWERED, ['user' => $userId, 'duration_ms' => $this->msSince($endedAt)]);
 
                 if ($task !== null) {
-                    $this->lookUp($task, $userId, $name, $question);
+                    $this->lookUp($task, $userId, $name, $question, $sharers);
                 }
 
                 return $spoken;
@@ -810,20 +810,32 @@ final class VoiceSession
     /**
      * Has what Claude handed off looked up, while the call goes on.
      *
+     * The task is made of what they said, and of the memories their answer was made from. So it is
+     * no longer looked up, and what was looked up is dropped, not posted, spoken or added to the
+     * transcript, once they opt out or one of those memories is taken back.
+     *
      * @param string $question What they said, which the answer is posted under.
+     * @param list<string> $sharers Whose shared memories the answer that handed it off was made from.
      */
-    private function lookUp(string $task, string $userId, string $name, string $question): void
+    private function lookUp(string $task, string $userId, string $name, string $question, array $sharers): void
     {
+        $wanted = fn (): bool => ! isset($this->optedOut[$userId]) && $this->stillSharing($sharers);
+
         $lookedUp = $this->lookups->lookUp(
             $task,
             $userId,
             'Transcript of the voice call so far',
             // Read once it is the task's turn, from its file: $this->transcript only holds its last lines.
-            // Not once they opted out while it waited: the task is made of what they said.
-            fn () => isset($this->optedOut[$userId]) ? null : trim(file_get_contents("{$this->directory}/transcript.txt")),
+            fn () => $wanted() ? trim(file_get_contents("{$this->directory}/transcript.txt")) : null,
         )->then(
-            fn (?string $answer) => $answer === null ? null : $this->lookedUp($answer, $userId, $name, $question),
-            fn (Throwable $e) => $this->notLookedUp($e->getMessage(), $userId, $name, $question),
+            function (?string $answer) use ($wanted, $userId, $name, $question) {
+                if ($answer !== null && $wanted()) {
+                    return $this->lookedUp($answer, $userId, $name, $question);
+                }
+
+                $this->log('debug', 'Dropped what was handed off to be looked up', ['user' => $userId]);
+            },
+            fn (Throwable $e) => $wanted() ? $this->notLookedUp($e->getMessage(), $userId, $name, $question) : null,
         );
 
         $before = $this->lookedUp;
@@ -838,13 +850,6 @@ final class VoiceSession
      */
     private function lookedUp(string $answer, string $userId, string $name, string $question): PromiseInterface
     {
-        // They opted out while it was looked up: it answers what they said.
-        if (isset($this->optedOut[$userId])) {
-            $this->log('debug', 'Not posting what was looked up', ['user' => $userId, 'reason' => 'they opted out']);
-
-            return resolve(null);
-        }
-
         // With who is in the call now, when it is still going on: they are the ones who get to hear it.
         $this->remember("Looked up for {$name}: {$answer}", $this->group($userId));
 
@@ -864,11 +869,6 @@ final class VoiceSession
      */
     private function notLookedUp(string $why, string $userId, string $name, string $question): PromiseInterface
     {
-        // They opted out while it was looked up.
-        if (isset($this->optedOut[$userId])) {
-            return resolve(null);
-        }
-
         return $this->post("> **{$name}:** {$question}\n" . Lookups::FAILED . " ({$why})")->then(function () use ($userId) {
             $this->inTurn($userId, fn () => $this->stillTalkingTo($userId) ? $this->say(Lookups::FAILED, $userId) : null);
         });
