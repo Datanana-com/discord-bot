@@ -179,8 +179,11 @@ final class VoiceCallTest extends VoiceTestCase
         $this->waitUntil(fn () => count($this->logged('Transcribed')) === 2, 'Alice and Carol to have spoken', timeout: 20.0);
         $this->assertSame(['555', '777'], array_column($this->logged('Utterance ended'), 'user'));
 
-        // The voice client's ffmpeg decoders write what each speaker says to the temp folder.
-        $this->waitUntil(fn () => $this->decoderFiles($carol) !== [], "Carol's decoder to start its copy");
+        // The voice client's ffmpeg decoders write what each speaker says to the temp folder, at the latest
+        // once they are closed, as they all are when the call ends. Carol's copy is a recording of her.
+        $vc->voiceDecoders[$carol]->close();
+        $this->assertCount(1, $copies = $this->decoderFiles($carol));
+        $this->assertGreaterThan(1000, filesize($copies[0]));
 
         VoiceSession::optOut('555');
         await($session->stop());
