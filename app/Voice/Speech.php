@@ -10,8 +10,10 @@ use App\Support\Shell;
 use React\EventLoop\Loop;
 use React\Promise\Deferred;
 use React\Promise\PromiseInterface;
+use RuntimeException;
 use Throwable;
 
+use function React\Promise\reject;
 use function React\Promise\resolve;
 
 /**
@@ -130,19 +132,28 @@ final class Speech
      * a short Piper WAV, yet only the first 20 ms of an Ogg Opus file. So Piper's WAV is
      * converted.
      *
-     * @return PromiseInterface<string> The path of the written file. Rejects when Piper ends before it spoke
-     *                                  the text, or takes too long, or when its speech can't be converted.
+     * @return PromiseInterface<string> The path of the written file. Rejects when there is nothing to say in the
+     *                                  text, when Piper ends before it spoke it, or takes too long, and when its
+     *                                  speech can't be converted.
      */
     public function synthesize(string $text, string $oggPath): PromiseInterface
     {
+        // Piper speaks each line it reads on its own, so the text is one line. And it skips a line that holds
+        // nothing but whitespace, of any script, without a word: it must never get one, or every sentence after
+        // it would get the speech of the one before.
+        $line = trim(preg_replace('/[\s\x{1c}-\x{1f}]+/u', ' ', mb_scrub($text)));
+
+        if ($line === '') {
+            return reject(new RuntimeException('There is nothing to say in the sentence.'));
+        }
+
         $this->start($this->folder);
         $piper = $this->piper;
         $piperPath = "{$oggPath}.piper.wav";
         $this->sentences[] = $spoken = new Deferred();
         $timer = Loop::addTimer($this->timeout, fn () => $piper->stop("timed out after {$this->timeout}s"));
 
-        // Piper speaks each line on its own, so the text is one line.
-        $piper->write(preg_replace('/\s+/', ' ', trim($text)) . "\n");
+        $piper->write("{$line}\n");
 
         return $spoken->promise()
             ->finally(fn () => Loop::cancelTimer($timer))

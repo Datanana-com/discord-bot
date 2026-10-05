@@ -7,6 +7,7 @@ namespace Tests\Unit\Voice;
 use App\Support\CommandFailedException;
 use App\Voice\Speech;
 use PHPUnit\Framework\TestCase;
+use RuntimeException;
 
 use function React\Async\await;
 use function React\Async\delay;
@@ -163,6 +164,46 @@ final class SpeechTest extends TestCase
             ['Sure. It is a quarter past four.', 'Time for a cup of tea.'],
             array_map(file_get_contents(...), await(all($speaking))),
         );
+    }
+
+    public function testNeverGivesPiperALineItWouldSkip(): void
+    {
+        $speech = $this->speech();
+        $speech->start("{$this->directory}/piper");
+
+        // Piper says nothing about a line that holds nothing but whitespace, here no-break spaces: given one, it
+        // would speak the next sentence into what the bot takes for this one's file, and so on for the rest of the call.
+        $nothing = $speech->synthesize("\xC2\xA0\xC2\xA0 \t\xC2\xA0", "{$this->directory}/claude-1.ogg");
+        $next = $speech->synthesize('It is a quarter past four.', "{$this->directory}/claude-2.ogg");
+
+        try {
+            await($nothing);
+            $this->fail('There was nothing to synthesize.');
+        } catch (RuntimeException $e) {
+            $this->assertSame('There is nothing to say in the sentence.', $e->getMessage());
+        }
+
+        $this->assertSame('It is a quarter past four.', file_get_contents(await($next)), 'The next sentence got its own speech.');
+        $this->assertFileDoesNotExist("{$this->directory}/claude-1.ogg");
+
+        // Whatever Python, which Piper is written in, takes for whitespace: an ideographic space, a line or paragraph
+        // separator, a next-line or a file separator character, and so on.
+        foreach (["\xE3\x80\x80", "\xE2\x80\xA8\xE2\x80\xA9", "\xC2\x85", "\x1C\x1D\x1E\x1F", "\x0B\x0C", '', "\n\r\n", " \xE1\x9A\x80\xE2\x80\x8A\xE2\x80\xAF\xE2\x81\x9F "] as $whitespace) {
+            try {
+                await($speech->synthesize($whitespace, "{$this->directory}/claude-3.ogg"));
+                $this->fail('There was nothing to synthesize in ' . bin2hex($whitespace) . '.');
+            } catch (RuntimeException $e) {
+                $this->assertSame('There is nothing to say in the sentence.', $e->getMessage());
+            }
+        }
+
+        // Inside a sentence, they are the spaces between its words: Piper gets one line. A byte that is no text
+        // would end Piper, which can't read it, and becomes a question mark.
+        $path = await($speech->synthesize("Time\xE2\x80\xA8for\x1Ca\xC2\x85cup\xE3\x80\x80of\xC2\xA0tea\xFF.", "{$this->directory}/claude-4.ogg"));
+
+        $this->assertSame('Time for a cup of tea?.', file_get_contents($path));
+        $this->assertTrue($speech->isRunning());
+        $this->assertCount(1, $this->pipers(), 'Piper never stopped.');
     }
 
     public function testStartsPiperAgainForTheNextSentenceWhenItStoppedByItself(): void
