@@ -430,6 +430,36 @@ composer test:coverage
 
 The code style is [Laravel Pint](https://laravel.com/docs/pint) with the rules of `pint.json`. `composer pint` fixes the files; `composer pint -- --test` only lists what it would change. The same check runs in GitHub Actions (the `pint` job of `tests.yml`, next to the tests), so a pull request with a style issue fails there instead of the issue reaching `master`.
 
+### Benchmark
+
+The tests above can't tell whether the bot got slower: they run with stand-ins that answer at once. `composer bench` asks the bot a spoken question with the real whisper.cpp, Claude Code and Piper of your machine, the ones in `.env`, and times each step. Run it before merging something that could slow the bot down. It isn't run in CI, which has neither the programs nor your hardware.
+
+```bash
+composer bench:baseline   # on master: save this machine's times as the baseline
+composer bench            # on the branch: fails when it is slower than the baseline
+```
+
+Piper speaks the question, "Hey Claude, tell me two short facts about Canberra, one sentence each.", into the fake Discord of the feature tests, 5 times in one call. The call goes through the bot's own code from there: the wait for silence, whisper, Claude and Piper. The times come from the bot's log, in milliseconds:
+
+| Step | |
+|---|---|
+| waiting for silence | From the end of the question to the bot taking it as over. |
+| whisper | Transcribing the question. Compared. |
+| Claude, the whole answer | From asking Claude to its whole answer. Compared. |
+| from the utterance to the first sentence spoken | `Started speaking` in the log. |
+| from the end of the question to the first sentence spoken | What someone in the call waits for. Compared. |
+| the call's summary, once | Only shown. |
+
+For each step it shows the fastest and the median of the 5 questions. The fastest is what is compared with the baseline: whatever else the machine and the network are doing only ever adds time, so it says most about the bot. In three runs of the same code on a busy machine the fastest times were within 10% of each other, and the medians within 25%. A compared step fails when it is more than 25% and more than 200 ms over the baseline, so the bench catches what makes the bot clearly slower, not a few milliseconds.
+
+It also shows the settings it ran with, and which of them differ from the baseline's: a slower model in `.env` is not a slower bot. `MAX_THINKING_TOKENS` is shown when it is set where the bench is started, as Claude Code reads it from there.
+
+- The baseline is kept in `~/.cache/discord-bot-bench.json`, so every checkout of the bot on the machine compares with the same one. `BENCH_BASELINE` is another file to use.
+- The settings are read from the checkout's `.env`. In a checkout without one, `BENCH_ENV_FILE` is the `.env` to read. Only the settings of the programs are used (`WHISPER_*`, `CLAUDE_*`, `PIPER_*`, `FFMPEG_*`, `VOICE_*`), never the Discord token or where the bot keeps its recordings, memories and statistics, and the wake word is left out so the bench doesn't depend on whisper hearing it. A setting with `TOKEN`, `KEY`, `SECRET` or `PASSWORD` in its name is left out too: the settings are printed, and saved with the baseline.
+- A baseline file that can't be read as one fails the bench, with what to do: it is never taken for no baseline.
+- Each run asks Claude 6 times with your subscription: the 5 questions and the call's summary.
+- Without a `.env`, or with a program or model it names missing, the bench is skipped and says why.
+
 ### Live voice test
 
 `tests/Live` asks the bot a question in a real Discord voice call. A second bot plays the spoken question "Hey Claude, what time is it?" and records the answer.
