@@ -79,7 +79,8 @@ final class VoiceBenchTest extends VoiceTestCase
         $this->settings = ['FFMPEG_BINARY' => 'ffmpeg', ...array_map(strval(...), $settings), 'VOICE_WAKE_WORD' => ''];
         $this->setEnv($this->settings);
 
-        // Claude Code reads this one from the environment it is started in, and it changes the times a lot.
+        // Claude Code reads this one from the environment it is started in. Answers in a call never think,
+        // whatever it says, but the call's summary does, and takes seconds longer for it.
         if (getenv('MAX_THINKING_TOKENS') !== false) {
             $this->settings['MAX_THINKING_TOKENS'] = getenv('MAX_THINKING_TOKENS');
         }
