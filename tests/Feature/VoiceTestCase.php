@@ -203,8 +203,10 @@ abstract class VoiceTestCase extends TestCase
 
     /**
      * A voice channel whose members are {@see MEMBERS}. Messages sent to it are collected in {@see $sent}.
+     *
+     * @param string $id The channel's ID: the bot's call is in 200.
      */
-    protected function voiceChannel(): Channel
+    protected function voiceChannel(string $id = '200'): Channel
     {
         $members = $this->userNames();
 
@@ -213,7 +215,7 @@ abstract class VoiceTestCase extends TestCase
             ->onlyMethods(['__get', '__isset', 'sendMessage'])
             ->getStub();
         $attributes = fn (string $name) => match ($name) {
-            'id' => '200',
+            'id' => $id,
             'guild_id' => self::GUILD_ID,
             'guild' => (object) ['members' => $members, 'voice_states' => $this->voiceStates],
             default => null,

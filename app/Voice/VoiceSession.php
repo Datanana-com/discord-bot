@@ -44,6 +44,9 @@ use function React\Promise\resolve;
  * in the channel, no group memory is used or updated. The memories are updated once the call is
  * over and summarized, one Claude request for each.
  *
+ * Whoever is in the call can also share their personal memory with it, with /share, until the call
+ * ends: it is then added to every question, labeled with their name, whoever asks.
+ *
  * Each step is logged with the session's ID and how long it took, and the call's usage is
  * recorded for /stats. Neither includes what anyone said: that is only in transcript.txt
  * and summary.md.
@@ -52,6 +55,9 @@ final class VoiceSession
 {
     /** Transcript lines given to Claude as context. */
     private const int CONTEXT_LINES = 20;
+
+    /** Personal memories shared with the call that a question's prompt holds. */
+    private const int SHARED_MEMORIES = 5;
 
     /** Characters that fit in a Discord message. */
     private const int MESSAGE_LIMIT = 2000;
@@ -116,6 +122,9 @@ final class VoiceSession
 
     /** @var array<string, int> How often each memory was forgotten, by its key, to tell what was said before from what was said after. */
     private array $forgotten = [];
+
+    /** @var array<string, true> Who shared their personal memory with the call, by user ID, the one who shared first first. */
+    private array $shared = [];
 
     private readonly MemoryWriter $writer;
 
@@ -271,6 +280,8 @@ final class VoiceSession
     {
         foreach (self::$unfinished as $session) {
             $session->optedOut[$userId] = true;
+            // Their memory is no longer used for anyone, whatever they agreed to before.
+            unset($session->shared[$userId]);
 
             if (isset($session->audio[$userId])) {
                 $session->log('info', 'Skipping a speaker who opted out', ['user' => $userId]);
@@ -414,6 +425,59 @@ final class VoiceSession
             ->finally(function () {
                 unset(self::$unfinished[$this->id]);
             });
+    }
+
+    /**
+     * Whether the call is in this voice channel.
+     */
+    public function records(Channel $channel): bool
+    {
+        return (string) $this->vc->channel->id === (string) $channel->id;
+    }
+
+    /**
+     * Whether someone opted out of being recorded, as far as this call knows.
+     */
+    public function hasOptedOut(string $userId): bool
+    {
+        return isset($this->optedOut[$userId]);
+    }
+
+    /**
+     * Shares someone's personal memory with the call, until it ends: it is then used to answer anyone
+     * in it. The call's text channel is told.
+     *
+     * @return bool False when they were already sharing it.
+     */
+    public function share(string $userId): bool
+    {
+        if (isset($this->shared[$userId])) {
+            return false;
+        }
+
+        $this->shared[$userId] = true;
+        $this->log('info', 'Shared memory', ['user' => $userId]);
+        $this->post("{$this->nameOf($userId)} shared their memory with this call.");
+
+        return true;
+    }
+
+    /**
+     * Takes someone's personal memory back from the call. The call's text channel is told.
+     *
+     * @return bool False when they weren't sharing it.
+     */
+    public function unshare(string $userId): bool
+    {
+        if (! isset($this->shared[$userId])) {
+            return false;
+        }
+
+        unset($this->shared[$userId]);
+        $this->log('info', 'Stopped sharing memory', ['user' => $userId]);
+        $this->post("{$this->nameOf($userId)} stopped sharing their memory with this call.");
+
+        return true;
     }
 
     private function listen(): void
@@ -669,6 +733,16 @@ final class VoiceSession
             $names = array_map($this->nameOf(...), $people);
             $last = array_pop($names);
             $remembered .= 'What you remember about ' . implode(', ', $names) . " and {$last} together:\n\n{$group}\n\n";
+        }
+
+        // The ones who shared most recently: a prompt only holds so many. The asker's is already there.
+        foreach (array_diff(array_slice(array_keys($this->shared), -self::SHARED_MEMORIES), [$userId]) as $sharer) {
+            // Read now, so a memory forgotten since it was shared isn't used.
+            $shared = $this->memory->read((string) $sharer);
+
+            if ($shared !== '') {
+                $remembered .= "What you remember about {$this->nameOf((string) $sharer)}, who shared their memory with this call:\n\n{$shared}\n\n";
+            }
         }
 
         return $remembered . "Transcript of the voice call so far:\n\n"
