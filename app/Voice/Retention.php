@@ -7,6 +7,7 @@ namespace App\Voice;
 use DateTimeImmutable;
 use Psr\Log\LoggerInterface;
 use React\EventLoop\LoopInterface;
+use Throwable;
 
 /**
  * Deletes the recordings of old calls, so they don't fill the disk and aren't kept
@@ -55,7 +56,7 @@ final readonly class Retention
             return null;
         }
 
-        return new self(rtrim(env('RECORDINGS_PATH', 'recordings'), '/'), $days, $log);
+        return new self(env('RECORDINGS_PATH', 'recordings'), $days, $log);
     }
 
     /**
@@ -63,9 +64,9 @@ final readonly class Retention
      */
     public function start(LoopInterface $loop): void
     {
-        $this->prune(new DateTimeImmutable());
+        $this->run();
 
-        $loop->addPeriodicTimer(self::INTERVAL, fn () => $this->prune(new DateTimeImmutable()));
+        $loop->addPeriodicTimer(self::INTERVAL, $this->run(...));
     }
 
     /**
@@ -90,7 +91,7 @@ final readonly class Retention
             $inProgress = VoiceSession::forGuild($guildId)?->directory;
 
             foreach ($this->folders($guild) as $call) {
-                $startedAt = DateTimeImmutable::createFromFormat('!' . self::FOLDER_FORMAT, $call);
+                $startedAt = DateTimeImmutable::createFromFormat(self::FOLDER_FORMAT, $call);
 
                 // Formatting the date again rejects names like 2026-13-45_00-00-00, which are read as a later date.
                 if ($startedAt === false || $startedAt->format(self::FOLDER_FORMAT) !== $call) {
@@ -109,9 +110,8 @@ final readonly class Retention
                 }
             }
 
-            if ($this->entries($guild) === []) {
-                @rmdir($guild);
-            }
+            // Only an empty folder can be removed this way.
+            @rmdir($guild);
         }
 
         if ($calls > 0) {
@@ -119,6 +119,16 @@ final readonly class Retention
         }
 
         return $calls;
+    }
+
+    private function run(): void
+    {
+        try {
+            $this->prune(new DateTimeImmutable());
+        } catch (Throwable $e) {
+            // An error that got out of here would stop the bot, and with it every call in progress.
+            $this->log->warning('Could not delete old recordings: ' . $e->getMessage());
+        }
     }
 
     /**

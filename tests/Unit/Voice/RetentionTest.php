@@ -68,7 +68,7 @@ final class RetentionTest extends TestCase
         $this->assertSame(['555-1.wav', 'claude-2.ogg', 'summary.md', 'transcript.txt', 'utterances'], $this->entries($justRecentEnough));
         $this->assertFileExists("{$justRecentEnough}/utterances/555-1.wav");
         $this->assertSame(['555-1.wav', 'claude-2.ogg', 'summary.md', 'transcript.txt', 'utterances'], $this->entries($recent));
-        $this->assertSame([['Deleted old recordings', ['calls' => 3, 'days' => 30]]], $this->logged());
+        $this->assertSame([['info', 'Deleted old recordings', ['calls' => 3, 'days' => 30]]], $this->logged());
     }
 
     public function testGoesByTheDateInTheFoldersNameNotByWhenItWasChanged(): void
@@ -95,7 +95,7 @@ final class RetentionTest extends TestCase
 
         $this->assertSame(1, $this->retention(days: 1)->prune(new DateTimeImmutable(self::NOW)));
         $this->assertDirectoryDoesNotExist($call);
-        $this->assertSame([['Deleted old recordings', ['calls' => 1, 'days' => 1]]], $this->logged());
+        $this->assertSame([['info', 'Deleted old recordings', ['calls' => 1, 'days' => 1]]], $this->logged());
     }
 
     public function testKeepsEverythingForMoreDaysThanADateCanGoBack(): void
@@ -162,6 +162,20 @@ final class RetentionTest extends TestCase
         yield 'a call inside a call' => ['100/2026-10-04_20-15-00/2020-01-01_00-00-00'];
         yield 'a link to a server folder' => ['200', true, 'elsewhere/200'];
         yield 'a link to a call folder' => ['100/2020-01-01_00-00-00', true, 'elsewhere/call'];
+    }
+
+    public function testCarriesOnAfterWhatDoesNotFollowTheLayout(): void
+    {
+        // Both are read before the old call: folders are gone through in alphabetical order.
+        mkdir("{$this->recordings}/0-misc");
+        mkdir("{$this->recordings}/100/2020-01-01_copy", 0755, true);
+        $old = $this->call('100', '2026-08-01_09-30-00');
+
+        $this->assertSame(1, $this->retention()->prune(new DateTimeImmutable(self::NOW)));
+
+        $this->assertDirectoryDoesNotExist($old);
+        $this->assertDirectoryExists("{$this->recordings}/0-misc");
+        $this->assertDirectoryExists("{$this->recordings}/100/2020-01-01_copy");
     }
 
     public function testDeletesLinksInACallWithoutWhatTheyPointTo(): void
@@ -232,8 +246,8 @@ final class RetentionTest extends TestCase
         $this->assertDirectoryDoesNotExist($deletable);
         // The call that could not be deleted is not counted, and its server's folder stays.
         $this->assertSame([
-            ['Could not delete old recordings', ['guild' => '100', 'call' => '2026-08-01_09-30-00']],
-            ['Deleted old recordings', ['calls' => 1, 'days' => 30]],
+            ['warning', 'Could not delete old recordings', ['guild' => '100', 'call' => '2026-08-01_09-30-00']],
+            ['info', 'Deleted old recordings', ['calls' => 1, 'days' => 30]],
         ], $this->logged());
 
         // It is deleted the next time, once it can be.
@@ -255,7 +269,7 @@ final class RetentionTest extends TestCase
 
         // Everything that could be deleted is gone, which frees most of the space.
         $this->assertSame(['utterances'], $this->entries($stuck));
-        $this->assertSame([['Could not delete old recordings', ['guild' => '100', 'call' => '2026-08-01_09-30-00']]], $this->logged());
+        $this->assertSame([['warning', 'Could not delete old recordings', ['guild' => '100', 'call' => '2026-08-01_09-30-00']]], $this->logged());
     }
 
     public function testKeepsEverythingWhenTheNumberOfDaysIsNotSet(): void
@@ -279,7 +293,7 @@ final class RetentionTest extends TestCase
         $this->assertNull(Retention::fromEnv(new Logger('test', [$this->logs])));
 
         $this->assertSame(
-            [['RECORDINGS_RETENTION_DAYS is not a whole number of days, 1 or more: no recordings are deleted.', []]],
+            [['warning', 'RECORDINGS_RETENTION_DAYS is not a whole number of days, 1 or more: no recordings are deleted.', []]],
             $this->logged(),
         );
     }
@@ -313,7 +327,7 @@ final class RetentionTest extends TestCase
         $this->assertSame(1, $retention?->prune(new DateTimeImmutable(self::NOW)));
         $this->assertDirectoryDoesNotExist($old);
         $this->assertDirectoryExists($recent);
-        $this->assertSame([['Deleted old recordings', ['calls' => 1, 'days' => 30]]], $this->logged());
+        $this->assertSame([['info', 'Deleted old recordings', ['calls' => 1, 'days' => 30]]], $this->logged());
     }
 
     public function testUsesTheRecordingsFolderInTheProjectByDefault(): void
@@ -341,22 +355,41 @@ final class RetentionTest extends TestCase
         // Going by the real time, as the bot does.
         $old = $this->call('100', date('Y-m-d_H-i-s', time() - 31 * 86400));
         $recent = $this->call('100', date('Y-m-d_H-i-s', time() - 29 * 86400));
+        // 30 days old a second from now.
+        $oldSoon = $this->call('200', date('Y-m-d_H-i-s', time() - 30 * 86400 + 1));
 
         $this->retention()->start($loop);
 
         $this->assertDirectoryDoesNotExist($old, 'Old recordings are deleted right away.');
         $this->assertDirectoryExists($recent);
 
-        // A call that got old since then is deleted by the next check.
-        $oldByNow = $this->call('200', date('Y-m-d_H-i-s', time() - 31 * 86400));
+        // A call that got old since then is deleted by the next check: each check goes by the time it runs at.
+        $this->assertDirectoryExists($oldSoon);
+        sleep(2);
         $everyHour();
 
-        $this->assertDirectoryDoesNotExist($oldByNow);
+        $this->assertDirectoryDoesNotExist($oldSoon);
         $this->assertDirectoryExists($recent);
         $this->assertSame([
-            ['Deleted old recordings', ['calls' => 1, 'days' => 30]],
-            ['Deleted old recordings', ['calls' => 1, 'days' => 30]],
+            ['info', 'Deleted old recordings', ['calls' => 1, 'days' => 30]],
+            ['info', 'Deleted old recordings', ['calls' => 1, 'days' => 30]],
         ], $this->logged());
+    }
+
+    public function testCarriesOnWhenDeletingFails(): void
+    {
+        $loop = $this->createMock(LoopInterface::class);
+        $loop->expects($this->once())->method('addPeriodicTimer');
+        // Recordings can't be looked for in a folder without a name: PHP throws an error.
+        $retention = new Retention('', 30, new Logger('test', [$this->logs]));
+
+        $retention->start($loop);
+
+        // The error is logged instead of stopping the bot, and the next check still runs.
+        $this->assertSame(
+            [['warning', 'Could not delete old recordings: scandir(): Argument #1 ($directory) must not be empty', []]],
+            $this->logged(),
+        );
     }
 
     private function retention(int $days = 30): Retention
@@ -394,10 +427,10 @@ final class RetentionTest extends TestCase
     }
 
     /**
-     * @return list<array{string, array<string, mixed>}> What was logged, with its context.
+     * @return list<array{string, string, array<string, mixed>}> What was logged: the level, the message and its context.
      */
     private function logged(): array
     {
-        return array_map(fn ($record) => [$record->message, $record->context], $this->logs->getRecords());
+        return array_map(fn ($record) => [$record->level->toPsrLogLevel(), $record->message, $record->context], $this->logs->getRecords());
     }
 }
