@@ -156,7 +156,7 @@ final class VoiceSession
     private readonly Lookups $lookups;
 
     /** Resolved once everything handed off so far is looked up, and posted. It never rejects. */
-    private PromiseInterface $lookedUp;
+    private PromiseInterface $allLookedUp;
 
     /** @var array{utterances: int, answers: int, failures: int} */
     private array $counts = ['utterances' => 0, 'answers' => 0, 'failures' => 0];
@@ -179,7 +179,7 @@ final class VoiceSession
         $this->writer = new MemoryWriter($memory, $claude);
         $this->id = bin2hex(random_bytes(4));
         $this->lookups = Lookups::fromEnv($discord->getLoop(), $this->log(...));
-        $this->lookedUp = resolve(null);
+        $this->allLookedUp = resolve(null);
         $this->startedAt = microtime(true);
         $this->queue = resolve(null);
         $this->left = new Deferred();
@@ -533,7 +533,7 @@ final class VoiceSession
             ->then($this->updateMemories(...))
             ->finally(function () {
                 // Not over while something is still looked up: until its answer is posted, whoever asked can still opt out.
-                $this->lookedUp->then(function () {
+                $this->allLookedUp->then(function () {
                     unset(self::$unfinished[$this->id]);
                 });
             });
@@ -938,8 +938,8 @@ final class VoiceSession
             fn (Throwable $e) => $wanted() ? $this->notLookedUp($e->getMessage(), $userId, $name, $question) : null,
         );
 
-        $before = $this->lookedUp;
-        $this->lookedUp = $lookedUp->then(fn () => $before);
+        $before = $this->allLookedUp;
+        $this->allLookedUp = $lookedUp->then(fn () => $before);
     }
 
     /**

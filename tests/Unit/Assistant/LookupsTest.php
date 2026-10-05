@@ -155,6 +155,11 @@ final class LookupsTest extends TestCase
         await($this->lookups()->lookUp(self::TASK, '555', self::HEADING, fn () => $said));
 
         $this->assertSame(self::HEADING . ":\n\n{$said}\n\nThe task:\n\n" . self::TASK, $this->calls()[0]['prompt']);
+
+        // One character more, and it gets the end.
+        await($this->lookups()->lookUp(self::TASK, '555', self::HEADING, fn () => "e{$said}"));
+
+        $this->assertSame(self::HEADING . ":\n\n(Its beginning is left out: it is too long.)\n{$said}\n\nThe task:\n\n" . self::TASK, $this->calls()[1]['prompt']);
     }
 
     public function testLooksUpOneTaskAtATimeInTheOrderTheyWereHandedOff(): void

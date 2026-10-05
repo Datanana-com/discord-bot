@@ -55,11 +55,10 @@ final class HandOff
      */
     public function push(string $text): void
     {
-        // What is held starts a line. Otherwise this piece does, unless the one before it stopped in the middle of one.
-        $startsLine = $this->held !== '' || ! $this->midLine;
         $this->held .= $text;
 
-        $this->pass(self::start($this->held, $startsLine) ?? strlen($this->held));
+        // What is held always starts a line: what was passed on before it ended with one.
+        $this->pass(self::start($this->held, ! $this->midLine) ?? strlen($this->held));
     }
 
     /**
@@ -100,7 +99,8 @@ final class HandOff
         $line = self::lastLine($text);
         $start = substr($text, $line);
 
-        return ($line > 0 || $startsLine) && $start !== '' && str_starts_with(self::MARKER, $start) ? $line : null;
+        // An empty last line is the start of the marker too: nothing of it is there to hold yet.
+        return ($line > 0 || $startsLine) && str_starts_with(self::MARKER, $start) ? $line : null;
     }
 
     /**

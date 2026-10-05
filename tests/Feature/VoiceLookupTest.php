@@ -6,6 +6,7 @@ namespace Tests\Feature;
 
 use App\Settings\UserSettings;
 use App\Voice\VoiceSession;
+use React\Promise\Deferred;
 use ReflectionProperty;
 
 use function React\Async\await;
@@ -174,6 +175,40 @@ final class VoiceLookupTest extends VoiceTestCase
         );
         $this->assertCount(3, $this->claudeCalls(), 'Claude was asked three questions, and nothing was looked up.');
         $this->assertSame([], $this->logged('Looking something up'));
+    }
+
+    public function testSpeaksALastLineThatOnlyStartsLikeTheLine(): void
+    {
+        // It was held back while it could still become the line. The answer ends there: it is something Claude says.
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream("The sign has one word on it.\n", 'LOOK')]);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => count($this->played) === 2, 'the whole answer to be spoken');
+
+        $this->assertSame(['The sign has one word on it.', 'LOOK'], array_map(file_get_contents(...), $this->played));
+        $this->assertSame([self::QUOTE . "\nThe sign has one word on it.\nLOOK"], $this->sent);
+        $this->assertSame([], $this->logged('Looking something up'));
+    }
+
+    public function testTellingWhatWasLookedUpNeverHandsOffAgain(): void
+    {
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 1, 'the lookup to start');
+
+        // Asked to tell what was found, Claude writes the line again: it is left out, and starts nothing.
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream(self::TOLD . "\n", 'LOOK UP: ', self::TASK)]);
+        touch($this->go);
+        $this->waitUntil(fn () => count($this->sent) === 3 && count($this->played) === 2, 'what was looked up to be told');
+        $this->runFor(0.4);
+
+        $this->assertSame(self::QUOTE . "\n" . self::TOLD, $this->sent[2]);
+        $this->assertSame(self::TOLD, file_get_contents($this->played[1]));
+        $this->assertStringEndsWith('] Claude: ' . self::TOLD . "\n", $this->transcript($session));
+        $this->assertCount(1, $this->lookups(), 'Or the bot would look the same thing up forever.');
+        $this->assertCount(3, $this->claudeCalls());
+        $this->assertCount(1, $this->logged('Looking something up'));
     }
 
     public function testSaysItLooksIntoItWhenClaudeOnlyWritesTheLine(): void
@@ -611,6 +646,50 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->waitUntil(fn () => count($this->lookups()) === 2, 'the next lookup to start');
         $this->finishLookups($session);
         $this->assertCount(1, $this->logged('Looked something up'));
+    }
+
+    public function testDoesNotSayThatSomethingCouldNotBeLookedUpOnceTheCallStopped(): void
+    {
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT_LOOKUP' => self::claudeResult('Usage limit reached', isError: true)]);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);
+        $this->ask($vc, '555', self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 1, 'the lookup to start');
+
+        // The call stops while Piper is still busy with the sentence.
+        $this->setProcessEnv(['FAKE_PIPER_DELAY' => '0.5', 'FAKE_CLAUDE_OUTPUT' => self::claudeResult('They talked about PHP.')]);
+        touch($this->go);
+        $this->waitUntil(fn () => count($this->sent) === 2, 'the failure to be posted');
+        await($session->stop());
+        $this->runFor(0.8);
+
+        $this->assertSame(self::QUOTE . "\n" . self::FAILED . ' (Claude Code: Usage limit reached)', $this->sent[1]);
+        $this->assertCount(1, $this->played, 'Nobody is there to hear it.');
+    }
+
+    public function testACallIsNotOverWhileSomethingLookedUpEarlierIsStillBeingPosted(): void
+    {
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);
+        $this->ask($vc, '555', self::QUESTION);
+        // What Bob asks waits for what Alice asked.
+        $this->ask($vc, '666', self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 2, 'the lookup to start');
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeResult('They talked about PHP.')]);
+        await($session->stop());
+
+        // Discord takes a while with the message. Bob opted out, so what he had waiting is dropped at once.
+        $arrived = new Deferred();
+        $this->sending = $arrived->promise();
+        VoiceSession::optOut('666');
+        touch($this->go);
+        $this->waitUntil(fn () => count($this->sent) === 4, 'what was looked up to be posted');
+        $this->runFor(0.3);
+
+        $this->assertSame('> **Alice:** ' . self::QUESTION . "\n" . self::FOUND, $this->sent[3]);
+        $this->assertSame([$session], VoiceSession::unfinished(), "Alice's answer is still on its way.");
+
+        $arrived->resolve(null);
+        $this->waitUntil(fn () => VoiceSession::unfinished() === [], 'the call to be over');
+        $this->assertCount(1, $this->lookups());
     }
 
     public function testOnlyPostsThatSomethingCouldNotBeLookedUpAfterTheCall(): void
