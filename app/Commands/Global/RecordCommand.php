@@ -55,6 +55,7 @@ final class RecordCommand extends CommandAbstract
                         "🔴 Recording <#{$voiceChannel->id}>. "
                         . ($session->wakeWord === '' ? 'I answer everything that is said.' : "Say \"{$session->wakeWord}\" to talk to me.")
                         . ' Use /stop to end the recording, or /optout if you don\'t want to be recorded.'
+                        . ' I remember each group\'s calls: see what I remember with /memory, and delete it with /forget.'
                     ));
                 },
                 function (Throwable $e) use ($interaction, $voiceChannel) {

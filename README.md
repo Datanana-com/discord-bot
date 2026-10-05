@@ -3,7 +3,7 @@ Discord PHP Framework
 
 This project was made to make it easier to start a bot, without having the clogged index file with the `->on` function & other things.
 
-Requires PHP 8.5. It also includes a voice bot that records calls and lets people talk to Claude: see [Voice calls with Claude](#voice-calls-with-claude). In direct messages, Claude answers in text and remembers who it's talking to: see [Direct messages and memory](#direct-messages-and-memory).
+Requires PHP 8.5. It also includes a voice bot that records calls and lets people talk to Claude: see [Voice calls with Claude](#voice-calls-with-claude). In direct messages, Claude answers in text and remembers who it's talking to: see [Direct messages and memory](#direct-messages-and-memory). It remembers calls too: see [Memory in calls](#memory-in-calls).
 
 ### Basic Example
 
@@ -103,13 +103,14 @@ A command can take options and be shown only to members with a permission: set i
 3. If it mentions the wake word ("Claude" by default), the recent transcript is sent to Claude through the [Claude Code CLI](https://code.claude.com/docs/en/headless), so it uses the Claude subscription you're logged in with instead of an API key.
 4. Claude's answer is spoken back into the call with [Piper](https://github.com/OHF-Voice/piper1-gpl), sentence by sentence while Claude is still writing it, and posted in the text channel once it is whole. Each spoken sentence is saved as a `claude-<n>.ogg` file next to the recordings.
 5. When the call ends, Claude summarizes its whole transcript: what was discussed, what was decided, and who does what next. The summary is posted in the text channel where `/record` was used, and saved as `summary.md` next to `transcript.txt`.
+6. Once the summary is posted, the bot updates its memories of the people in the call, from the transcript: see [Memory in calls](#memory-in-calls).
 
 `/stop` finishes the recordings and leaves the channel, and `/stats` shows how the server has used the bot (see [Logs and statistics](#logs-and-statistics)). `/settings` gives a server its own wake word, language, voice and Claude model (see [Settings for each server](#settings-for-each-server)). `/recall` asks Claude a question about the server's saved calls (see [Asking about past calls](#asking-about-past-calls)). `/optout` stops the bot from recording, transcribing or answering whoever uses it, and `/optin` undoes that (see [Opting out of being recorded](#opting-out-of-being-recorded)).
 
 A call ends with `/stop`, or when someone disconnects the bot from the voice channel. An answer the bot is speaking at that moment is cut off, but still posted in the text channel. For the summary, the whole transcript is sent to Claude, including what was said without the wake word. The summary is written in the language of the call, once everything said is transcribed, so it includes the last thing said. A summary that doesn't fit in one Discord message is split into several, never in the middle of a sentence. When nobody said anything, there is no summary. When Claude can't make one (it isn't logged in, the usage limit is reached, ...), the bot says so in the text channel, and why.
 
 > [!IMPORTANT]
-> Only record people who have agreed to it. The bot announces in the channel when it starts recording, and that anyone who doesn't want to be recorded can use `/optout`.
+> Only record people who have agreed to it. The bot announces in the channel when it starts recording, that it remembers each group's calls (and that `/memory` and `/forget` show and delete those memories), and that anyone who doesn't want to be recorded can use `/optout`. Memories of a group are kept for exactly the people who were in the call: see [Memory in calls](#memory-in-calls).
 
 Recordings are kept until you delete them, unless `RECORDINGS_RETENTION_DAYS` is set. The bot then deletes each call's folder, with its recordings, transcript and summary, once the call is older than that many days. It goes by the date in the folder's name, and checks when it starts and every hour after that. The folder of a call that isn't over, including one that stopped and is still being summarized, is never deleted, and a server's folder is removed once it is empty. Everything else in `RECORDINGS_PATH` is left alone, and so are the statistics and the logs, which hold nothing anyone said.
 
@@ -162,7 +163,7 @@ From then on it is a message like one you typed: the same prompt, memory, order 
 
 The memory is updated when a conversation pauses. Ten minutes after your last message, one Claude request gets the current memory and what was said since its last update, and returns the new memory. If the bot stops before then, that update is lost.
 
-- `/memory` shows you what the bot remembers about you.
+- `/memory` shows you what the bot remembers about you, and lists the groups you have a memory with (see [Memory in calls](#memory-in-calls)).
 - `/forget` deletes it, together with what you said since its last update. The messages themselves stay in the DM, where the last 20 are still sent to Claude with your next message.
 
 Both commands work in DMs and in servers, and only you see their replies.
@@ -171,6 +172,34 @@ Both commands work in DMs and in servers, and only you see their replies.
 > Memories are kept on the bot's machine, where anyone with access to the machine can read them. The files themselves can only be read by the user the bot runs as (mode 0600).
 
 Claude runs with the same restrictions as in calls: no tools, no MCP servers and an empty directory. Every DM answer and every memory update uses your Claude subscription, and anyone who shares a server with the bot can send it direct messages.
+
+### Memory in calls
+
+Most things are discussed and decided in calls, so the bot remembers those too. What is said in a call with Spartan belongs to you and Spartan, not to your private memory, so the bot keeps your **personal memory** (the one of your DMs) and a separate **group memory** for each group of people it has calls with.
+
+**Which memory a call uses** depends on who is in the voice channel. The bot doesn't count; everyone else does, not only the people who spoke, so a memory is never brought up in front of someone it doesn't belong to.
+
+- Alone with the bot, you have your personal memory: it is added to what Claude is asked, and updated from the call, like in DMs.
+- With others, the call uses the group memory of exactly the people in the channel. You and Spartan have one; you, Spartan and Carol have another. It is added to what Claude is asked, and updated from what was said while that group was there.
+- When people join or leave, the next question uses the memory of the new group. What was said is kept with the people who were there when it was said, also for someone who left right after speaking.
+- Whenever you ask Claude something in a call with others, your personal memory is added to the prompt as well, labeled with your name, even with others listening. The other people's personal memories are never used. Claude's instructions say whose memory is whose, that everyone in the call hears its answer, and that it should only bring up what the question needs.
+- Personal memories are never updated from calls with other people: what Spartan says there goes into the group's memory, never into yours.
+- While someone who opted out of being recorded (see [Opting out of being recorded](#opting-out-of-being-recorded)) is in the channel, no group memory is used or updated. What is said then is not remembered, and a memory belonging to someone who opts out is not used or updated from then on, even for a question already waiting for its turn or an update Claude is already writing.
+- When the voice states of the bot's cache don't show the bot in its voice channel, who is there is not known, and no group memory is used or updated either. Voice states come from the `GUILD_VOICE_STATES` intent, which the default intents include.
+
+**Updates** run after the call ends and its summary is posted (also when the summary failed), one after the other, with one Claude request for each memory, however often the same people came back to the call: it gets the memory and the part of `transcript.txt` that was said while they were there. A memory that can't be updated is logged as a warning, and the others still are.
+
+**Group memories** follow the same rules as personal ones: a markdown note under 4,000 characters, written by Claude, who is told to leave out passwords, tokens and other secrets, and kept in a file only the bot's user can read (mode 0600). A group's file is `MEMORY_PATH/groups/<the people's user IDs, sorted, joined with ->.md`, e.g. `groups/222333444555666777-888999000111222333.md`.
+
+- `/memory` also lists the groups you have a memory with: "You also have memories with: Spartan; Spartan and Carol."
+- `/memory with:@Spartan` shows the memory you share with Spartan. The options `with`, `with2`, `with3` and `with4` name the other people of the group, so a group of up to five people can be opened.
+- `/forget with:@Spartan` deletes that memory, together with what was said in a call that is going on since its last update. `/forget` without options also drops what was said alone with the bot in such a call.
+- Anyone in a group can see and delete its memory. Only they see the reply.
+- Memories of calls recorded before this feature don't exist: only what is said from now on is remembered.
+
+A call with more than five people uses and updates no group memory: `/memory` and `/forget` can only name you and four others, so the memory of a bigger group couldn't be seen or deleted. It also keeps a group's file name within what file systems allow.
+
+Updates are logged as `Updated memory`, with the call's `session`, how many `people` the memory belongs to and its length in `characters`. The memory itself is never logged.
 
 ### Setup on Windows (WSL2)
 
@@ -244,7 +273,7 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 | `PIPER_MODEL` | | Path to the Piper voice, e.g. `~/piper/voices/en_US-lessac-medium.onnx`. The other voices in its folder can be chosen with `/settings`. |
 | `FFMPEG_BINARY` | `ffmpeg` | Path to ffmpeg, which converts Piper's speech for Discord, and the voice messages sent in DMs for whisper.cpp. The voice library always uses the `ffmpeg` on your `PATH`. |
 | `STATS_DATABASE` | `databases/stats.sqlite` | SQLite database for the usage statistics, each server's settings, and who opted out of being recorded. It is created on the first start. |
-| `MEMORY_PATH` | `memories` | Where the bot keeps what it remembers about each person, one file per person. |
+| `MEMORY_PATH` | `memories` | Where the bot keeps what it remembers about each person, one file per person, and in its `groups` folder what it remembers about each group of people it has calls with. |
 
 `VOICE_WAKE_WORD`, `WHISPER_LANGUAGE`, `PIPER_MODEL` and `CLAUDE_MODEL` are the defaults for every server the bot is in. Each server can change its own with `/settings`.
 
@@ -287,7 +316,7 @@ Anyone who can use slash commands can use `/recall`, and so ask about any call s
 
 Neither the logs nor the statistics contain what anyone said or what Claude answered: that is only in the call's `transcript.txt` and `summary.md`, and for direct messages in the DM itself and in the person's memory.
 
-**Logs** are printed to the console and written to `logs/<date>.log`, one JSON object per line. Each step of a call is logged with the server (`guild`), a `session` ID for the call, the `user` it concerns, and how long it took in milliseconds: the call starting, each new speaker, each utterance, its transcription, the bot starting to speak, Claude's answer, failures, the call ending with its totals, and its summary. A speaker who opted out is logged once, as `Skipping a speaker who opted out` with their user ID, and nothing else about them is. A speaker the voice library can't name is logged as `Not recording a speaker the voice client cannot name`, a warning, with their SSRC. Slash commands are logged with who used them, and where, and `/settings changed` with the settings that changed and their new values: settings aren't speech. `/recall answered` is logged with how long the answer took (`ms`), how many calls were sent to Claude (`calls`) and the answer's length (`characters`), never with the question or the answer. Direct messages are logged as `Answered a DM`, with the `user`, how long the answer took and its length in characters, voice messages in them as `Transcribed a voice message`, with the `user`, the message's length in `seconds`, how long transcribing it took (`ms`) and the length of what was said (`characters`), never what was said, and memory updates as `Updated memory`, with the `user` and the memory's length. When old recordings are deleted, `Deleted old recordings` is logged with the number of `calls` deleted and the `days` they are kept for. A call's folder that can't be deleted is logged as a warning, and tried again an hour later. A `RECORDINGS_RETENTION_DAYS` that isn't a whole number of days is logged as a warning too, when the bot starts, and nothing is deleted. To search the log with [jq](https://jqlang.org/):
+**Logs** are printed to the console and written to `logs/<date>.log`, one JSON object per line. Each step of a call is logged with the server (`guild`), a `session` ID for the call, the `user` it concerns, and how long it took in milliseconds: the call starting, each new speaker, each utterance, its transcription, the bot starting to speak, Claude's answer, failures, the call ending with its totals, and its summary. A speaker who opted out is logged once, as `Skipping a speaker who opted out` with their user ID, and nothing else about them is. A speaker the voice library can't name is logged as `Not recording a speaker the voice client cannot name`, a warning, with their SSRC. Slash commands are logged with who used them, and where, and `/settings changed` with the settings that changed and their new values: settings aren't speech. `/recall answered` is logged with how long the answer took (`ms`), how many calls were sent to Claude (`calls`) and the answer's length (`characters`), never with the question or the answer. Direct messages are logged as `Answered a DM`, with the `user`, how long the answer took and its length in characters, voice messages in them as `Transcribed a voice message`, with the `user`, the message's length in `seconds`, how long transcribing it took (`ms`) and the length of what was said (`characters`), never what was said, and memory updates as `Updated memory`, with the `user` and the memory's length. A memory updated from a call is logged as `Updated memory` too, with the `session`, how many `people` it belongs to and its length (`characters`), and one that can't be updated as the warning `Could not update the memory`. When old recordings are deleted, `Deleted old recordings` is logged with the number of `calls` deleted and the `days` they are kept for. A call's folder that can't be deleted is logged as a warning, and tried again an hour later. A `RECORDINGS_RETENTION_DAYS` that isn't a whole number of days is logged as a warning too, when the bot starts, and nothing is deleted. To search the log with [jq](https://jqlang.org/):
 
 ```bash
 # Everything that happened in one call

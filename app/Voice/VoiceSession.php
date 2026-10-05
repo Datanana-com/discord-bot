@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace App\Voice;
 
 use App\Analytics\Usage;
+use App\Assistant\Memory;
+use App\Assistant\MemoryGroup;
+use App\Assistant\MemoryWriter;
 use App\Privacy\OptOuts;
 use App\Settings\GuildSettings;
 use Discord\Builders\MessageBuilder;
@@ -32,6 +35,14 @@ use function React\Promise\resolve;
  *
  * Nothing is kept of people who opted out with /optout: they aren't recorded, transcribed or
  * answered. The voice client still receives and decodes their audio, like everyone's.
+ *
+ * The bot remembers calls. Someone alone with the bot has their personal memory, the one of their
+ * direct messages, added to what Claude is asked, and updated from the call. With others in the voice
+ * channel, the memory is that of exactly those people: a group memory, which is updated from what
+ * was said while they were all there. A question also gets the personal memory of whoever asked,
+ * but personal memories are never updated from calls with others. While someone who opted out is
+ * in the channel, no group memory is used or updated. The memories are updated once the call is
+ * over and summarized, one Claude request for each.
  *
  * Each step is logged with the session's ID and how long it took, and the call's usage is
  * recorded for /stats. Neither includes what anyone said: that is only in transcript.txt
@@ -100,6 +111,14 @@ final class VoiceSession
     /** @var list<int> The SSRC of every speaker, which names the copies the voice client's decoders make: see DECODER_FILE. */
     private array $ssrcs = [];
 
+    /** @var array<string, list<string>> What was said while the same people were in the call, as in transcript.txt, by the key of their memory. */
+    private array $said = [];
+
+    /** @var array<string, int> How often each memory was forgotten, by its key, to tell what was said before from what was said after. */
+    private array $forgotten = [];
+
+    private readonly MemoryWriter $writer;
+
     /** @var array{utterances: int, answers: int, failures: int} */
     private array $counts = ['utterances' => 0, 'answers' => 0, 'failures' => 0];
 
@@ -115,7 +134,9 @@ final class VoiceSession
         private readonly Usage $usage,
         /** @var array<string, true> Who opted out of being recorded, by user ID. */
         private array $optedOut,
+        private readonly Memory $memory,
     ) {
+        $this->writer = new MemoryWriter($memory, $claude);
         $this->id = bin2hex(random_bytes(4));
         $this->startedAt = microtime(true);
         $this->queue = resolve(null);
@@ -229,6 +250,7 @@ final class VoiceSession
             $settings['wake_word'] ?? self::defaultWakeWord(),
             new Usage($discord->getLogger()),
             $optedOut,
+            Memory::fromEnv(),
         );
         $session->listen();
         $session->log('info', 'Voice session started', ['channel' => $vc->channel->id, 'directory' => $directory]);
@@ -270,6 +292,22 @@ final class VoiceSession
     {
         foreach (self::$unfinished as $session) {
             unset($session->optedOut[$userId]);
+        }
+    }
+
+    /**
+     * Drops what was said in every call that isn't over while a memory's people were in it, so that
+     * it is never remembered, as someone used /forget.
+     *
+     * @param string|list<string> $people The person, or the group, whose memory it is.
+     */
+    public static function forget(string|array $people): void
+    {
+        $key = implode('-', Memory::people($people));
+
+        foreach (self::$unfinished as $session) {
+            unset($session->said[$key]);
+            $session->forgotten[$key] = ($session->forgotten[$key] ?? 0) + 1;
         }
     }
 
@@ -324,9 +362,10 @@ final class VoiceSession
     }
 
     /**
-     * Stops recording and leaves the call, then posts a summary of it. Safe to call more than once.
+     * Stops recording and leaves the call, then posts a summary of it and updates the memories.
+     * Safe to call more than once.
      *
-     * @return PromiseInterface<mixed> Resolves once the summary is posted. It never rejects.
+     * @return PromiseInterface<mixed> Resolves once the summary is posted and the memories are updated. It never rejects.
      */
     public function stop(): PromiseInterface
     {
@@ -370,6 +409,8 @@ final class VoiceSession
 
                 return $this->post("Sorry, I couldn't summarize the call. ({$e->getMessage()})");
             })
+            // Whatever happened to the summary: the memories only need the transcript.
+            ->then($this->updateMemories(...))
             ->finally(function () {
                 unset(self::$unfinished[$this->id]);
             });
@@ -442,13 +483,15 @@ final class VoiceSession
         }
 
         $endedAt = microtime(true);
+        // Who was there when it was said, not when it is transcribed: they may have come or gone by then.
+        $people = $this->group($userId);
         $ms = (int) round($seconds * 1000);
         $this->counts['utterances']++;
         $this->log('info', 'Utterance ended', ['user' => $userId, 'ms' => $ms]);
         $this->track(Usage::UTTERANCE, ['user' => $userId, 'duration_ms' => $ms]);
 
         $this->queue = $this->queue
-            ->then(fn () => $this->handleUtterance($userId, $wavPath, $endedAt))
+            ->then(fn () => $this->handleUtterance($userId, $wavPath, $endedAt, $people))
             ->catch(function (Throwable $e) use ($userId) {
                 $this->counts['failures']++;
                 $this->log('error', 'Voice reply failed: ' . $e->getMessage(), ['user' => $userId]);
@@ -458,8 +501,9 @@ final class VoiceSession
 
     /**
      * @param float $endedAt When the utterance ended, to time the answer from.
+     * @param list<string>|null $people Who was in the call then: see {@see group()}.
      */
-    private function handleUtterance(string $userId, string $wavPath, float $endedAt): PromiseInterface
+    private function handleUtterance(string $userId, string $wavPath, float $endedAt, ?array $people): PromiseInterface
     {
         // They opted out while this waited for its turn.
         if (isset($this->optedOut[$userId])) {
@@ -472,7 +516,7 @@ final class VoiceSession
 
         return $this->transcriber->transcribe($wavPath)
             ->finally(fn () => unlink($wavPath))
-            ->then(function (string $text) use ($userId, $endedAt, $transcribing) {
+            ->then(function (string $text) use ($userId, $endedAt, $transcribing, $people) {
                 $this->log('info', 'Transcribed', ['user' => $userId, 'ms' => $this->msSince($transcribing), 'characters' => mb_strlen($text)]);
 
                 // Nothing was said, or they opted out while it was transcribed.
@@ -480,8 +524,10 @@ final class VoiceSession
                     return null;
                 }
 
+                // Someone else in the call may have opted out since it was said, while it waited for its turn.
+                $people = $this->unlessOptedOut($people);
                 $name = $this->nameOf($userId);
-                $this->remember("{$name}: {$text}");
+                $this->remember("{$name}: {$text}", $people);
 
                 if ($this->stopped || ! self::mentions($text, $this->wakeWord)) {
                     $this->log('debug', 'Not answering', ['user' => $userId, 'reason' => $this->stopped ? 'the session stopped' : 'Claude was not addressed']);
@@ -489,16 +535,17 @@ final class VoiceSession
                     return null;
                 }
 
-                return $this->answer($userId, $name, $text, $endedAt);
+                return $this->answer($userId, $name, $text, $endedAt, $people);
             });
     }
 
     /**
      * Asks Claude, and speaks its answer sentence by sentence while Claude is still writing it.
      *
+     * @param list<string>|null $people Who was in the call when the question was asked: see {@see group()}.
      * @return PromiseInterface<mixed> Resolves once the answer is posted and the bot has stopped speaking.
      */
-    private function answer(string $userId, string $name, string $question, float $endedAt): PromiseInterface
+    private function answer(string $userId, string $name, string $question, float $endedAt, ?array $people): PromiseInterface
     {
         $asking = microtime(true);
         // What the last sentence so far waits for: Piper to be done with it, and the bot to have said it.
@@ -533,8 +580,8 @@ final class VoiceSession
             });
         });
 
-        return $this->claude->ask($this->prompt($name), onText: $sentences->push(...))->then(
-            function (string $answer) use ($sentences, &$spoken, $userId, $name, $question, $endedAt, $asking) {
+        return $this->claude->ask($this->prompt($userId, $name, $people), onText: $sentences->push(...))->then(
+            function (string $answer) use ($sentences, &$spoken, $userId, $name, $question, $endedAt, $asking, $people) {
                 $this->log('info', 'Claude answered', ['user' => $userId, 'ms' => $this->msSince($asking), 'characters' => mb_strlen($answer)]);
                 $sentences->flush();
 
@@ -545,7 +592,7 @@ final class VoiceSession
                     return $spoken;
                 }
 
-                $this->remember("Claude: {$answer}");
+                $this->remember("Claude: {$answer}", $people);
                 $this->post("> **{$name}:** {$question}\n{$answer}");
                 $this->counts['answers']++;
                 $this->track(Usage::ANSWERED, ['user' => $userId, 'duration_ms' => $this->msSince($endedAt)]);
@@ -602,19 +649,138 @@ final class VoiceSession
         });
     }
 
-    private function prompt(string $name): string
+    /**
+     * What Claude is asked when someone talks to it: the memories it has of them, then the call so far.
+     *
+     * @param list<string>|null $people Who is in the call: see {@see group()}.
+     */
+    private function prompt(string $userId, string $name, ?array $people): string
     {
-        return "Transcript of the voice call so far:\n\n"
+        $remembered = '';
+        $personal = $this->memory->read($userId);
+        // Alone with the bot, the group is the asker, whose memory is the personal one.
+        $group = count($people ?? []) > 1 ? $this->memory->read($people) : '';
+
+        if ($personal !== '') {
+            $remembered .= "What you remember about {$name}:\n\n{$personal}\n\n";
+        }
+
+        if ($group !== '') {
+            $names = array_map($this->nameOf(...), $people);
+            $last = array_pop($names);
+            $remembered .= 'What you remember about ' . implode(', ', $names) . " and {$last} together:\n\n{$group}\n\n";
+        }
+
+        return $remembered . "Transcript of the voice call so far:\n\n"
             . implode("\n", $this->transcript)
             . "\n\n{$name} is talking to you. Reply to their last message.";
     }
 
-    private function remember(string $line): void
+    /**
+     * Adds a line to the transcript, and to what the memory of the people who were there is updated from.
+     *
+     * @param list<string>|null $people Who was in the call: see {@see group()}.
+     */
+    private function remember(string $line, ?array $people): void
     {
         $this->transcript[] = $line;
         $this->transcript = array_slice($this->transcript, -self::CONTEXT_LINES);
+        $line = date('[H:i:s] ') . $line;
 
-        file_put_contents("{$this->directory}/transcript.txt", date('[H:i:s] ') . $line . PHP_EOL, FILE_APPEND);
+        file_put_contents("{$this->directory}/transcript.txt", $line . PHP_EOL, FILE_APPEND);
+
+        if ($people !== null) {
+            $this->said[implode('-', $people)][] = $line;
+        }
+    }
+
+    /**
+     * Who is in the call: everyone in the voice channel but the bot, and the speaker, who may have
+     * just left. Memories are of who was there, not only of who spoke.
+     *
+     * @return list<string>|null Their user IDs, lowest first. Null when no group memory may be used or
+     *                           updated: someone in the call opted out, the voice states don't show the
+     *                           bot in its channel, so who else is there isn't known, or there are more
+     *                           people than /memory and /forget can name, so nobody could see or delete
+     *                           their memory.
+     */
+    private function group(string $speaker): ?array
+    {
+        $channel = $this->vc->channel;
+        $people = [$speaker];
+        $known = false;
+
+        foreach ($channel->guild?->voice_states ?? [] as $state) {
+            if ((string) $state->channel_id === (string) $channel->id) {
+                if ((string) $state->user_id === (string) $this->discord->id) {
+                    $known = true;
+                } else {
+                    $people[] = (string) $state->user_id;
+                }
+            }
+        }
+
+        $people = Memory::people($people);
+
+        return $known && count($people) <= MemoryGroup::MAX_PEOPLE ? $this->unlessOptedOut($people) : null;
+    }
+
+    /**
+     * @param list<string>|null $people Who was in the call: see {@see group()}.
+     * @return list<string>|null The same people, or null when one of them has opted out since.
+     */
+    private function unlessOptedOut(?array $people): ?array
+    {
+        return $people !== null && array_intersect($people, array_keys($this->optedOut)) === [] ? $people : null;
+    }
+
+    /**
+     * Has Claude update the memory of each group of people the call had, one after the other.
+     *
+     * @return PromiseInterface<mixed> It never rejects.
+     */
+    private function updateMemories(): PromiseInterface
+    {
+        return array_reduce(
+            array_map(strval(...), array_keys($this->said)),
+            fn (PromiseInterface $updated, string $key) => $updated->then(fn () => $this->updateMemory($key)),
+            resolve(null),
+        );
+    }
+
+    /**
+     * Updates the memory of the people of the key, from what was said while they were in the call,
+     * in one request however often they came back.
+     *
+     * @return PromiseInterface<mixed> It never rejects.
+     */
+    private function updateMemory(string $key): PromiseInterface
+    {
+        $people = explode('-', $key);
+        // Gone when someone used /forget since.
+        $said = $this->said[$key] ?? [];
+
+        // Someone opted out since: what they said is no longer remembered.
+        if ($said === [] || $this->unlessOptedOut($people) === null) {
+            return resolve(null);
+        }
+
+        $forgotten = $this->forgotten[$key] ?? 0;
+
+        // Reading the memory can throw, and that must not skip the memories after this one.
+        return resolve(null)
+            ->then(fn () => $this->writer->update(
+                $people,
+                $said,
+                // Not saved when it was forgotten, or someone opted out, while Claude was writing it.
+                fn () => ($this->forgotten[$key] ?? 0) === $forgotten && $this->unlessOptedOut($people) !== null,
+            ))
+            ->then(function (?string $memory) use ($people) {
+                if ($memory !== null) {
+                    $this->log('info', 'Updated memory', ['people' => count($people), 'characters' => mb_strlen($memory)]);
+                }
+            })
+            ->catch(fn (Throwable $e) => $this->log('warning', 'Could not update the memory: ' . $e->getMessage(), ['people' => count($people)]));
     }
 
     private function post(string $content): PromiseInterface

@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Assistant\DirectChat;
-use App\Assistant\Memory;
 use App\Events\MessageCreate;
 use Discord\Builders\MessageBuilder;
 use Discord\Parts\Channel\Channel;
@@ -35,9 +34,6 @@ trait ChatsInDirectMessages
     /** What whisper.cpp was last run with. */
     protected string $whisperLog;
 
-    /** Where the bot keeps its memories. */
-    protected string $memories;
-
     /** @var array<string, list<object>> The messages in each person's DM with the bot, oldest first. */
     protected array $dms = [];
 
@@ -62,12 +58,10 @@ trait ChatsInDirectMessages
     }
 
     /**
-     * Call from setUp(): gives the bot an empty folder for its memories, and Claude an answer to give.
+     * Call from setUp(): gives Claude an answer to give.
      */
     protected function setUpDirectMessages(): void
     {
-        $this->memories = "{$this->recordings}/memories";
-        $this->setEnv(['MEMORY_PATH' => $this->memories]);
         $this->ffmpegLog = "{$this->recordings}/ffmpeg.log";
         $this->whisperLog = "{$this->recordings}/whisper.log";
         $this->setProcessEnv([
@@ -83,19 +77,6 @@ trait ChatsInDirectMessages
     protected function endDirectMessages(): void
     {
         (new ReflectionProperty(DirectChat::class, 'chats'))->setValue(null, []);
-    }
-
-    /**
-     * Claude Code's output for an answer.
-     */
-    protected function claudeSays(string $answer): string
-    {
-        return json_encode(['type' => 'result', 'is_error' => false, 'result' => $answer]);
-    }
-
-    protected function memory(): Memory
-    {
-        return new Memory($this->memories);
     }
 
     /**
@@ -221,17 +202,5 @@ trait ChatsInDirectMessages
         $this->assertStringContainsString("arg=--tools\narg=\narg=--strict-mcp-config\narg=--no-session-persistence\n", $claudeCall);
         $this->assertStringContainsString("cwd={$workingDirectory}\n", $claudeCall);
         $this->assertSame([], array_diff(scandir($workingDirectory), ['.', '..']), 'Its working directory is empty.');
-    }
-
-    /**
-     * The logs hold IDs, counts, lengths and durations, never what anyone wrote, what Claude answered or the memory.
-     */
-    protected function assertLogsNeverMention(string ...$texts): void
-    {
-        $logs = implode("\n", array_map(fn ($record) => $record->message . ' ' . json_encode($record->context), $this->logs->getRecords()));
-
-        foreach ($texts as $text) {
-            $this->assertStringNotContainsString($text, $logs);
-        }
     }
 }
