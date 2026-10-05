@@ -110,8 +110,11 @@ final readonly class Claude
             return $answer;
         })->catch(function (CommandFailedException $e) use (&$result) {
             // Claude Code exits with code 1 on errors (not logged in, usage limit reached, ...)
-            // and explains why in its result.
-            throw is_string($result['result'] ?? null) ? new RuntimeException('Claude Code: ' . $result['result']) : $e;
+            // and explains why in its result. A result that isn't an error is the answer, which
+            // must not end up in the logs, e.g. when Claude Code hangs after giving it.
+            throw is_string($result['result'] ?? null) && ($result['is_error'] ?? false) === true
+                ? new RuntimeException('Claude Code: ' . $result['result'])
+                : $e;
         });
     }
 

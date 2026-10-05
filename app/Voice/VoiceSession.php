@@ -476,7 +476,8 @@ final class VoiceSession
 
             // A sentence is synthesized as soon as Piper is free, while the ones before it are spoken. It is
             // spoken once they are over: the voice client refuses to play a file while it is playing another.
-            $synthesized = $synthesized->then(fn () => $this->speech->synthesize($sentence, $oggPath));
+            // Once the call stops, the sentences still waiting for Piper are no longer synthesized either.
+            $synthesized = $synthesized->then(fn () => $this->stopped ? null : $this->speech->synthesize($sentence, $oggPath));
             $spoken = $synthesized->finally(fn () => $before)->then(function () use (&$speaking, $userId, $oggPath, $endedAt) {
                 if ($this->stopped) {
                     return null;

@@ -169,6 +169,23 @@ final class VoiceStreamingTest extends VoiceTestCase
         $this->assertSame([], $this->loggedProblems());
     }
 
+    public function testDoesNotSynthesizeTheSentencesThatWereWaitingWhenTheCallStops(): void
+    {
+        $this->playing = (new Deferred())->promise();
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream(self::ANSWER), 'FAKE_PIPER_DELAY' => '0.3']);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);
+
+        // The call stops while the first sentence is spoken and Piper is busy with the second.
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->played !== [], 'the first sentence to be spoken');
+        await($session->stop());
+
+        // The second one was already being synthesized; the third never is.
+        $this->assertSame(["{$session->directory}/claude-2.ogg", "{$session->directory}/claude-3.ogg"], glob("{$session->directory}/claude-*"));
+        $this->assertCount(1, $this->played);
+        $this->assertSame([], $this->loggedProblems());
+    }
+
     public function testPostsAndCountsAFailureAfterPartOfTheAnswerWasSpoken(): void
     {
         $finished = new Deferred();
