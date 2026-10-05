@@ -102,14 +102,31 @@ Each class in `app/Commands/Global`, named `<Name>Command` and extending `App\Co
 4. Claude's answer is posted in the text channel and spoken back into the call with [Piper](https://github.com/OHF-Voice/piper1-gpl).
 5. When the call ends, Claude summarizes its whole transcript: what was discussed, what was decided, and who does what next. The summary is posted in the text channel where `/record` was used, and saved as `summary.md` next to `transcript.txt`.
 
-`/stop` finishes the recordings and leaves the channel, and `/stats` shows how the server has used the bot (see [Logs and statistics](#logs-and-statistics)).
+`/stop` finishes the recordings and leaves the channel, and `/stats` shows how the server has used the bot (see [Logs and statistics](#logs-and-statistics)). `/optout` stops the bot from recording, transcribing or answering whoever uses it, and `/optin` undoes that (see [Opting out of being recorded](#opting-out-of-being-recorded)).
 
 A call ends with `/stop`, or when someone disconnects the bot from the voice channel. For the summary, the whole transcript is sent to Claude, including what was said without the wake word. The summary is written in the language of the call, once everything said is transcribed, so it includes the last thing said. A summary that doesn't fit in one Discord message is split into several, never in the middle of a sentence. When nobody said anything, there is no summary. When Claude can't make one (it isn't logged in, the usage limit is reached, ...), the bot says so in the text channel, and why.
 
 > [!IMPORTANT]
-> Only record people who have agreed to it. The bot announces in the channel when it starts recording.
+> Only record people who have agreed to it. The bot announces in the channel when it starts recording, and that anyone who doesn't want to be recorded can use `/optout`.
 
 Claude runs with every tool disabled, no MCP servers and from an empty directory, so nothing said in the call can make it read or change anything on your computer. Its answers and summaries do count against your subscription's usage limits, and anyone in the server can use `/record`.
+
+### Opting out of being recorded
+
+Anyone can use `/optout`, in any server the bot is in or in a direct message with it. From then on, in every server:
+
+- no recording of them is kept;
+- what they say isn't transcribed, so it is not in `transcript.txt` or the summary, and is never sent to Claude;
+- Claude doesn't answer them, also when they say the wake word;
+- no `utterance` statistics are saved for them.
+
+`/optin` undoes it. Both commands answer with what changed, and only whoever used them sees that.
+
+Opting out during a call takes effect right away. What they say from then on is dropped, and their recording files of that call are deleted when it ends. What was already transcribed stays in the transcript, so it is in the summary too. Someone who opts back in during a call is transcribed and answered again right away, but only recorded again once they rejoin the call.
+
+The opt-outs are kept in the `opt_outs` table of `STATS_DATABASE`: the user ID and when they opted out. They are read when a call starts. When they can't be read, `/record` refuses to start, as it can't tell who must not be recorded.
+
+Discord sends the bot everyone's audio, so the voice library still receives and decodes that of people who opted out, and keeps it in memory until the call ends, like everyone's (see [Known limitations](#known-limitations)). The bot keeps none of it. The library also writes each speaker's audio to a file in the system's temp folder (`<date>_<time>-<SSRC>.ogg`): the bot deletes those of people who opted out when the call ends.
 
 ### Setup on Windows (WSL2)
 
@@ -170,7 +187,7 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 
 | Variable | Default | |
 |---|---|---|
-| `BOT_SLASH_COMMANDS` | | Must be set for `/record`, `/stop` and `/stats` to be registered. |
+| `BOT_SLASH_COMMANDS` | | Must be set for `/record`, `/stop`, `/stats`, `/optout` and `/optin` to be registered. |
 | `RECORDINGS_PATH` | `recordings` | Where recordings and transcripts are saved. |
 | `VOICE_WAKE_WORD` | `claude` | Claude only answers what mentions this word. Leave it empty to answer everything. |
 | `WHISPER_BINARY` | `whisper-cli` | Path to whisper.cpp's `whisper-cli`. |
@@ -181,13 +198,13 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 | `PIPER_BINARY` | `piper` | Path to Piper. |
 | `PIPER_MODEL` | | Path to the Piper voice, e.g. `~/piper/voices/en_US-lessac-medium.onnx`. |
 | `FFMPEG_BINARY` | `ffmpeg` | Path to ffmpeg, which converts Piper's speech for Discord. The voice library always uses the `ffmpeg` on your `PATH`. |
-| `STATS_DATABASE` | `databases/stats.sqlite` | SQLite database for the usage statistics. It is created on the first start. |
+| `STATS_DATABASE` | `databases/stats.sqlite` | SQLite database for the usage statistics and for who opted out of being recorded. It is created on the first start. |
 
 ### Logs and statistics
 
 Neither the logs nor the statistics contain what anyone said: that is only in the call's `transcript.txt` and `summary.md`.
 
-**Logs** are printed to the console and written to `logs/<date>.log`, one JSON object per line. Each step of a call is logged with the server (`guild`), a `session` ID for the call, the `user` it concerns, and how long it took in milliseconds: the call starting, each new speaker, each utterance, its transcription, Claude's answer, the speech synthesis, failures, the call ending with its totals, and its summary. Slash commands are logged with who used them, and where. To search the log with [jq](https://jqlang.org/):
+**Logs** are printed to the console and written to `logs/<date>.log`, one JSON object per line. Each step of a call is logged with the server (`guild`), a `session` ID for the call, the `user` it concerns, and how long it took in milliseconds: the call starting, each new speaker, each utterance, its transcription, Claude's answer, the speech synthesis, failures, the call ending with its totals, and its summary. A speaker who opted out is logged once, as `Skipping a speaker who opted out` with their user ID, and nothing else about them is. Slash commands are logged with who used them, and where. To search the log with [jq](https://jqlang.org/):
 
 ```bash
 # Everything that happened in one call
@@ -209,6 +226,7 @@ sqlite3 databases/stats.sqlite "SELECT guild_id, COUNT(*) AS answers FROM events
 - Answers take a few seconds: transcription, Claude Code starting up, and speech synthesis each add some.
 - Speech recognition sometimes mishears the wake word (e.g. "cloud"). Change `VOICE_WAKE_WORD` if that happens often.
 - The voice library (`discord-php-helpers/voice` 8.3.0) keeps every decoded audio frame in memory until `/stop`, roughly 12 MB per speaker per minute of speech. That's fine for normal calls; for very long ones, `/stop` and `/record` again now and then.
+- The voice library also leaves a copy of each speaker's audio in the system's temp folder, as `<date>_<time>-<SSRC>.ogg`. The bot doesn't use these files, and only deletes those of people who [opted out](#opting-out-of-being-recorded).
 
 ### Tests
 
@@ -217,7 +235,7 @@ composer test
 composer test -- --testsuite Unit      # or Feature
 ```
 
-Unit tests cover each class on its own. Feature tests run the whole voice flow and the `/record` and `/stop` commands against a fake Discord, with whisper.cpp, Claude Code and Piper replaced by the scripts in `tests/Fixtures`, so they need no models, Claude login or Discord connection.
+Unit tests cover each class on its own. Feature tests run the whole voice flow and the slash commands against a fake Discord, with whisper.cpp, Claude Code and Piper replaced by the scripts in `tests/Fixtures`, so they need no models, Claude login or Discord connection.
 
 `tests/Feature/VoiceCallTest.php` goes further: the call's audio travels over a local UDP socket standing in for Discord's media server, encrypted and Opus-encoded like in a real call, and the spoken answer is encoded by ffmpeg. It needs ffmpeg and libopus, like the bot itself, and is skipped without them.
 
