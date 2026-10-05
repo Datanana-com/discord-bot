@@ -109,6 +109,8 @@ A call ends with `/stop`, or when someone disconnects the bot from the voice cha
 > [!IMPORTANT]
 > Only record people who have agreed to it. The bot announces in the channel when it starts recording.
 
+Recordings are kept until you delete them, unless `RECORDINGS_RETENTION_DAYS` is set. The bot then deletes each call's folder, with its recordings, transcript and summary, once the call is older than that many days. It goes by the date in the folder's name, and checks when it starts and every hour after that. The folder of a call in progress is never deleted, and a server's folder is removed once it is empty. Everything else in `RECORDINGS_PATH` is left alone, and so are the statistics and the logs, which hold nothing anyone said.
+
 Claude runs with every tool disabled, no MCP servers and from an empty directory, so nothing said in the call can make it read or change anything on your computer. Its answers and summaries do count against your subscription's usage limits, and anyone in the server can use `/record`.
 
 ### Setup on Windows (WSL2)
@@ -172,6 +174,7 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 |---|---|---|
 | `BOT_SLASH_COMMANDS` | | Must be set for `/record`, `/stop` and `/stats` to be registered. |
 | `RECORDINGS_PATH` | `recordings` | Where recordings and transcripts are saved. |
+| `RECORDINGS_RETENTION_DAYS` | | Calls older than this many days are deleted, with their recordings, transcript and summary. A whole number, 1 or more. Leave it empty to keep everything. |
 | `VOICE_WAKE_WORD` | `claude` | Claude only answers what mentions this word. Leave it empty to answer everything. |
 | `WHISPER_BINARY` | `whisper-cli` | Path to whisper.cpp's `whisper-cli`. |
 | `WHISPER_MODEL` | | Path to the whisper model, e.g. `~/whisper.cpp/models/ggml-base.bin`. |
@@ -187,7 +190,7 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 
 Neither the logs nor the statistics contain what anyone said: that is only in the call's `transcript.txt` and `summary.md`.
 
-**Logs** are printed to the console and written to `logs/<date>.log`, one JSON object per line. Each step of a call is logged with the server (`guild`), a `session` ID for the call, the `user` it concerns, and how long it took in milliseconds: the call starting, each new speaker, each utterance, its transcription, Claude's answer, the speech synthesis, failures, the call ending with its totals, and its summary. Slash commands are logged with who used them, and where. To search the log with [jq](https://jqlang.org/):
+**Logs** are printed to the console and written to `logs/<date>.log`, one JSON object per line. Each step of a call is logged with the server (`guild`), a `session` ID for the call, the `user` it concerns, and how long it took in milliseconds: the call starting, each new speaker, each utterance, its transcription, Claude's answer, the speech synthesis, failures, the call ending with its totals, and its summary. Slash commands are logged with who used them, and where. When old recordings are deleted, `Deleted old recordings` is logged with the number of `calls` deleted and the `days` they are kept for. A call's folder that can't be deleted is logged as a warning, and tried again an hour later. A `RECORDINGS_RETENTION_DAYS` that isn't a whole number of days is logged as a warning too, when the bot starts, and nothing is deleted. To search the log with [jq](https://jqlang.org/):
 
 ```bash
 # Everything that happened in one call

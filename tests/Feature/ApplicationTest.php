@@ -16,6 +16,7 @@ use Discord\WebSockets\Event;
 use Monolog\Handler\TestHandler;
 use Monolog\Logger;
 use PHPUnit\Framework\TestCase;
+use React\EventLoop\LoopInterface;
 use React\EventLoop\StreamSelectLoop;
 use React\Promise\PromiseInterface;
 use ReflectionClass;
@@ -32,17 +33,32 @@ final class ApplicationTest extends TestCase
     /** @var list<string> Files and folders added to the app's folders, removed after each test. */
     private array $appFiles = [];
 
+    /** Where the bot is told to keep its recordings, when a test needs some. */
+    private ?string $recordings = null;
+
+    private ?string $originalRecordingsPath = null;
+
     protected function setUp(): void
     {
         $this->logs = new TestHandler();
         RecordingEvent::$calls = [];
         RecordingEvent::$before = null;
-        unset($_ENV['BOT_SLASH_COMMANDS'], $_SERVER['BOT_SLASH_COMMANDS']);
+        $this->originalRecordingsPath = $_ENV['RECORDINGS_PATH'] ?? null;
+        // No recordings are deleted when the bot is ready, unless a test asks for it.
+        unset($_ENV['BOT_SLASH_COMMANDS'], $_SERVER['BOT_SLASH_COMMANDS'], $_ENV['RECORDINGS_RETENTION_DAYS'], $_SERVER['RECORDINGS_RETENTION_DAYS']);
     }
 
     protected function tearDown(): void
     {
-        unset($_ENV['BOT_SLASH_COMMANDS']);
+        unset($_ENV['BOT_SLASH_COMMANDS'], $_ENV['RECORDINGS_RETENTION_DAYS'], $_ENV['RECORDINGS_PATH']);
+
+        if ($this->originalRecordingsPath !== null) {
+            $_ENV['RECORDINGS_PATH'] = $this->originalRecordingsPath;
+        }
+
+        if ($this->recordings !== null) {
+            exec('rm -rf ' . escapeshellarg($this->recordings));
+        }
 
         foreach (array_reverse($this->appFiles) as $path) {
             is_dir($path) ? rmdir($path) : unlink($path);
@@ -108,6 +124,42 @@ final class ApplicationTest extends TestCase
         $this->assertSame($app->discord, $readyWith);
         $this->assertContains('Bot is ready!', $this->logged());
         $this->assertContains('Slash commands are disabled.', $this->logged());
+    }
+
+    public function testDeletesOldRecordingsWhenTheBotIsReadyThenEveryHour(): void
+    {
+        $old = $this->recordedCall('100', daysAgo: 31);
+        $recent = $this->recordedCall('100', daysAgo: 29);
+        $_ENV['RECORDINGS_RETENTION_DAYS'] = '30';
+        $timers = [];
+        $app = $this->app(loop: $this->loopCollectingTimers($timers));
+
+        $app->discord->emit('init', [$app->discord]);
+
+        $this->assertDirectoryDoesNotExist($old);
+        $this->assertDirectoryExists($recent);
+        $this->assertContains(['Deleted old recordings', ['calls' => 1, 'days' => 30]], $this->loggedWithContext());
+
+        // From then on it checks every hour, on the bot's event loop.
+        $this->assertSame([3600], array_keys($timers));
+        $oldByNow = $this->recordedCall('200', daysAgo: 31);
+        ($timers[3600])();
+
+        $this->assertDirectoryDoesNotExist($oldByNow);
+        $this->assertDirectoryExists($recent);
+    }
+
+    public function testKeepsEveryRecordingWhenNoRetentionIsSet(): void
+    {
+        $old = $this->recordedCall('100', daysAgo: 4000);
+        $timers = [];
+        $app = $this->app(loop: $this->loopCollectingTimers($timers));
+
+        $app->discord->emit('init', [$app->discord]);
+
+        $this->assertDirectoryExists($old);
+        $this->assertSame([], $timers);
+        $this->assertNotContains('Deleted old recordings', $this->logged());
     }
 
     public function testSavesCommandsDiscordDoesNotHaveYet(): void
@@ -219,12 +271,43 @@ final class ApplicationTest extends TestCase
      * An application whose Discord client never connects: it runs on a loop that is never started,
      * so its requests to Discord are queued and never sent.
      */
-    private function app(?Closure $ready = null): Application
+    private function app(?Closure $ready = null, ?LoopInterface $loop = null): Application
     {
         return new Application(
-            ['token' => 'test-token', 'loop' => new StreamSelectLoop(), 'logger' => new Logger('test', [$this->logs])],
+            ['token' => 'test-token', 'loop' => $loop ?? new StreamSelectLoop(), 'logger' => new Logger('test', [$this->logs])],
             $ready,
         );
+    }
+
+    /**
+     * An event loop that never runs.
+     *
+     * @param array<int, callable> &$timers Collects what the bot asks it to repeat, by the seconds in between.
+     */
+    private function loopCollectingTimers(array &$timers): LoopInterface
+    {
+        $loop = static::createStub(LoopInterface::class);
+        $loop->method('addPeriodicTimer')->willReturnCallback(function (int|float $interval, callable $callback) use (&$timers) {
+            $timers[$interval] = $callback;
+        });
+
+        return $loop;
+    }
+
+    /**
+     * Makes the folder of a call that started the given number of days ago, where the bot keeps its recordings.
+     *
+     * @return string The folder's path.
+     */
+    private function recordedCall(string $guildId, int $daysAgo): string
+    {
+        $this->recordings ??= sys_get_temp_dir() . '/application-test-' . uniqid();
+        $_ENV['RECORDINGS_PATH'] = $this->recordings;
+        $call = sprintf('%s/%s/%s', $this->recordings, $guildId, date('Y-m-d_H-i-s', time() - $daysAgo * 86400));
+        mkdir($call, 0755, true);
+        touch("{$call}/transcript.txt");
+
+        return $call;
     }
 
     /**

@@ -8,6 +8,7 @@ use Closure;
 use App\Logs\Logger;
 use Discord\Discord;
 use ReflectionClass;
+use App\Voice\Retention;
 use Illuminate\Support\Str;
 use Psr\Log\LoggerInterface;
 use Discord\WebSockets\Event;
@@ -62,6 +63,9 @@ class Application
                 if ($readyFunction !== null) {
                     $readyFunction($discord);
                 }
+
+                // Deletes old recordings now and every hour, when RECORDINGS_RETENTION_DAYS is set.
+                Retention::fromEnv($discord->getLogger())?->start($discord->getLoop());
 
                 try {
                     $this->prepareCommandClasses();
