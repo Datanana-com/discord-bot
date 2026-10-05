@@ -164,7 +164,7 @@ final class SettingsCommand extends CommandAbstract
             // Only what can be said: /record announces the wake word, where anything else could ping or format.
             // Each spelling is looked for as whole words, so it starts and ends with a letter or number.
             // A comma only separates spellings, so it can't ping or format either.
-            isset($values['wake_word']) && strcasecmp($values['wake_word'], 'none') !== 0 && ! self::validSpellings($values['wake_word'])
+            isset($values['wake_word']) && ! self::validSpellings($values['wake_word'])
                 ? 'The wake word must be a word or short phrase, or up to 5 of them separated by commas for the ways whisper may write it. Each is at most 32 letters, numbers, spaces, apostrophes and hyphens, starting and ending with a letter or number. Use `none` to answer everything.'
                 : null,
             isset($values['language']) && ! in_array($values['language'], ['auto', ...Transcriber::LANGUAGES], true)
