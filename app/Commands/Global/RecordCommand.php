@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Commands\Global;
 
 use App\CommandAbstract;
+use App\Settings\GuildSettings;
 use App\Voice\VoiceSession;
 use Discord\Builders\MessageBuilder;
 use Discord\Parts\Interactions\Interaction;
@@ -18,12 +19,14 @@ final class RecordCommand extends CommandAbstract
     public function handle(Interaction $interaction): void
     {
         $voiceChannel = $interaction->member?->getVoiceChannel();
+        // Read once, so the call starts with the settings that are checked and announced here.
+        $settings = (new GuildSettings($this->log))->for((string) $interaction->guild_id);
 
         $problem = match (true) {
             $voiceChannel === null => 'Join a voice channel first.',
             VoiceSession::forGuild((string) $interaction->guild_id) !== null => 'I am already recording in this server. Use /stop first.',
             $this->discord->voice === null => 'Voice is not available: libdave or ext-ffi could not be loaded. Check the bot logs.',
-            default => VoiceSession::missingSetup(),
+            default => VoiceSession::missingSetup($settings),
         };
 
         if ($problem !== null) {
@@ -37,13 +40,12 @@ final class RecordCommand extends CommandAbstract
         $interaction->acknowledgeWithResponse()
             ->then(fn () => $this->discord->joinVoiceChannel($voiceChannel, mute: false, deaf: false))
             ->then(
-                function (VoiceClient $vc) use ($interaction, $voiceChannel) {
-                    VoiceSession::start($vc, $interaction->channel ?? $voiceChannel, $this->discord);
-                    $wakeWord = trim(env('VOICE_WAKE_WORD', 'claude'));
+                function (VoiceClient $vc) use ($interaction, $voiceChannel, $settings) {
+                    $session = VoiceSession::start($vc, $interaction->channel ?? $voiceChannel, $this->discord, $settings);
 
                     return $interaction->updateOriginalResponse(MessageBuilder::new()->setContent(
                         "🔴 Recording <#{$voiceChannel->id}>. "
-                        . ($wakeWord === '' ? 'I answer everything that is said.' : "Say \"{$wakeWord}\" to talk to me.")
+                        . ($session->wakeWord === '' ? 'I answer everything that is said.' : "Say \"{$session->wakeWord}\" to talk to me.")
                         . ' Use /stop to end the recording.'
                     ));
                 },

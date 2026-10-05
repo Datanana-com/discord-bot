@@ -92,6 +92,8 @@ class MessageCreate extends EventAbstract
 
 Each class in `app/Commands/Global`, named `<Name>Command` and extending `App\CommandAbstract`, is registered as the slash command `/<name>` in every server the bot is in, when `BOT_SLASH_COMMANDS` is set. Commands for a single server, in `app/Commands/Guild`, aren't supported yet.
 
+A command can take options and be shown only to members with a permission: set its `$options`, each as Discord's [option object](https://docs.discord.com/developers/interactions/application-commands#application-command-object-application-command-option-structure), and its `$defaultMemberPermissions`, like `app/Commands/Global/SettingsCommand.php` does. Server admins can change who sees a command, so a command that needs a permission also checks it in `handle()`. A command is saved to Discord again when its description, options or permissions change.
+
 ## Voice calls with Claude
 
 `/record` joins your voice channel, records it, and lets everyone in it talk to Claude:
@@ -102,7 +104,7 @@ Each class in `app/Commands/Global`, named `<Name>Command` and extending `App\Co
 4. Claude's answer is posted in the text channel and spoken back into the call with [Piper](https://github.com/OHF-Voice/piper1-gpl).
 5. When the call ends, Claude summarizes its whole transcript: what was discussed, what was decided, and who does what next. The summary is posted in the text channel where `/record` was used, and saved as `summary.md` next to `transcript.txt`.
 
-`/stop` finishes the recordings and leaves the channel, and `/stats` shows how the server has used the bot (see [Logs and statistics](#logs-and-statistics)).
+`/stop` finishes the recordings and leaves the channel, and `/stats` shows how the server has used the bot (see [Logs and statistics](#logs-and-statistics)). `/settings` gives a server its own wake word, language, voice and Claude model (see [Settings for each server](#settings-for-each-server)).
 
 A call ends with `/stop`, or when someone disconnects the bot from the voice channel. For the summary, the whole transcript is sent to Claude, including what was said without the wake word. The summary is written in the language of the call, once everything said is transcribed, so it includes the last thing said. A summary that doesn't fit in one Discord message is split into several, never in the middle of a sentence. When nobody said anything, there is no summary. When Claude can't make one (it isn't logged in, the usage limit is reached, ...), the bot says so in the text channel, and why.
 
@@ -170,24 +172,48 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 
 | Variable | Default | |
 |---|---|---|
-| `BOT_SLASH_COMMANDS` | | Must be set for `/record`, `/stop` and `/stats` to be registered. |
+| `BOT_SLASH_COMMANDS` | | Must be set for `/record`, `/stop`, `/stats` and `/settings` to be registered. |
 | `RECORDINGS_PATH` | `recordings` | Where recordings and transcripts are saved. |
-| `VOICE_WAKE_WORD` | `claude` | Claude only answers what mentions this word. Leave it empty to answer everything. |
+| `VOICE_WAKE_WORD` | `claude` | Claude only answers what mentions this word or phrase. A phrase also counts when punctuation is heard between its words: "Okay, computer" mentions `okay computer`. Leave it empty to answer everything. |
 | `WHISPER_BINARY` | `whisper-cli` | Path to whisper.cpp's `whisper-cli`. |
 | `WHISPER_MODEL` | | Path to the whisper model, e.g. `~/whisper.cpp/models/ggml-base.bin`. |
 | `WHISPER_LANGUAGE` | `auto` | Language spoken in the call, e.g. `en` or `pt`, or `auto` to detect it. |
 | `CLAUDE_BINARY` | `claude` | Path to the Claude Code CLI. |
 | `CLAUDE_MODEL` | `haiku` | `haiku` answers fastest; `sonnet` or `opus` answer better, but slower. |
 | `PIPER_BINARY` | `piper` | Path to Piper. |
-| `PIPER_MODEL` | | Path to the Piper voice, e.g. `~/piper/voices/en_US-lessac-medium.onnx`. |
+| `PIPER_MODEL` | | Path to the Piper voice, e.g. `~/piper/voices/en_US-lessac-medium.onnx`. The other voices in its folder can be chosen with `/settings`. |
 | `FFMPEG_BINARY` | `ffmpeg` | Path to ffmpeg, which converts Piper's speech for Discord. The voice library always uses the `ffmpeg` on your `PATH`. |
-| `STATS_DATABASE` | `databases/stats.sqlite` | SQLite database for the usage statistics. It is created on the first start. |
+| `STATS_DATABASE` | `databases/stats.sqlite` | SQLite database for the usage statistics and each server's settings. It is created on the first start. |
+
+`VOICE_WAKE_WORD`, `WHISPER_LANGUAGE`, `PIPER_MODEL` and `CLAUDE_MODEL` are the defaults for every server the bot is in. Each server can change its own with `/settings`.
+
+### Settings for each server
+
+`/settings` changes how the bot behaves in the server it is used in, so that, say, a Portuguese server and an English one can share the same bot. All its options are optional:
+
+| Option | |
+|---|---|
+| `wake_word` | A word or short phrase: at most 32 letters, numbers, spaces, apostrophes and hyphens, starting and ending with a letter or number. `none` answers everything: Discord doesn't let an option be empty. |
+| `language` | `auto`, or a whisper language code such as `en` or `pt`. |
+| `voice` | The name of a Piper voice in the same folder as `PIPER_MODEL`, e.g. `pt_BR-faber-medium` for `pt_BR-faber-medium.onnx`. |
+| `model` | `haiku`, `sonnet` or `opus`. It answers in the server's calls, and writes their summaries. |
+| `reset` | Goes back to the `.env` defaults. Other options given with it are applied after it. |
+
+Without options, `/settings` shows the server's settings and which of them are the defaults. An invalid value is refused with what is allowed instead, e.g. the list of installed voices, and then nothing is changed. Only whoever used `/settings` sees its replies.
+
+Changes apply from the next `/record`: a call in progress keeps the settings it started with.
+
+Only members with the **Manage Server** permission can use `/settings`. Discord doesn't show it to anyone else, and the bot also checks the permission itself, because server admins can change who sees a command (Server Settings → Integrations).
+
+Any `language` other than `en` needs a multilingual whisper model: `ggml-base.bin`, not `ggml-base.en.bin`. A voice has to be downloaded into `PIPER_MODEL`'s folder before a server can choose it, like in step 4 of the setup.
+
+The settings are kept in the `guild_settings` table of `STATS_DATABASE`, one row per server. A setting that is `NULL` there is the `.env` default. When the database can't be read, that is logged and calls start with the `.env` defaults.
 
 ### Logs and statistics
 
 Neither the logs nor the statistics contain what anyone said: that is only in the call's `transcript.txt` and `summary.md`.
 
-**Logs** are printed to the console and written to `logs/<date>.log`, one JSON object per line. Each step of a call is logged with the server (`guild`), a `session` ID for the call, the `user` it concerns, and how long it took in milliseconds: the call starting, each new speaker, each utterance, its transcription, Claude's answer, the speech synthesis, failures, the call ending with its totals, and its summary. Slash commands are logged with who used them, and where. To search the log with [jq](https://jqlang.org/):
+**Logs** are printed to the console and written to `logs/<date>.log`, one JSON object per line. Each step of a call is logged with the server (`guild`), a `session` ID for the call, the `user` it concerns, and how long it took in milliseconds: the call starting, each new speaker, each utterance, its transcription, Claude's answer, the speech synthesis, failures, the call ending with its totals, and its summary. Slash commands are logged with who used them, and where, and `/settings changed` with the settings that changed and their new values: settings aren't speech. To search the log with [jq](https://jqlang.org/):
 
 ```bash
 # Everything that happened in one call
@@ -207,7 +233,8 @@ sqlite3 databases/stats.sqlite "SELECT guild_id, COUNT(*) AS answers FROM events
 ### Known limitations
 
 - Answers take a few seconds: transcription, Claude Code starting up, and speech synthesis each add some.
-- Speech recognition sometimes mishears the wake word (e.g. "cloud"). Change `VOICE_WAKE_WORD` if that happens often.
+- Speech recognition sometimes mishears the wake word (e.g. "cloud"). Change it, with `VOICE_WAKE_WORD` or `/settings`, if that happens often.
+- The wake word is looked for as whole words. In languages written without spaces between words, such as Japanese or Thai, it is only heard when whisper writes a space or punctuation around it.
 - The voice library (`discord-php-helpers/voice` 8.3.0) keeps every decoded audio frame in memory until `/stop`, roughly 12 MB per speaker per minute of speech. That's fine for normal calls; for very long ones, `/stop` and `/record` again now and then.
 
 ### Tests
@@ -217,7 +244,7 @@ composer test
 composer test -- --testsuite Unit      # or Feature
 ```
 
-Unit tests cover each class on its own. Feature tests run the whole voice flow and the `/record` and `/stop` commands against a fake Discord, with whisper.cpp, Claude Code and Piper replaced by the scripts in `tests/Fixtures`, so they need no models, Claude login or Discord connection.
+Unit tests cover each class on its own. Feature tests run the whole voice flow and the slash commands against a fake Discord, with whisper.cpp, Claude Code and Piper replaced by the scripts in `tests/Fixtures`, so they need no models, Claude login or Discord connection.
 
 `tests/Feature/VoiceCallTest.php` goes further: the call's audio travels over a local UDP socket standing in for Discord's media server, encrypted and Opus-encoded like in a real call, and the spoken answer is encoded by ffmpeg. It needs ffmpeg and libopus, like the bot itself, and is skipped without them.
 

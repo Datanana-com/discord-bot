@@ -5,9 +5,11 @@ declare(strict_types=1);
 namespace Tests\Feature\Commands;
 
 use App\Commands\Global\RecordCommand;
+use App\Settings\GuildSettings;
 use App\Voice\VoiceSession;
 use Discord\Parts\Channel\Channel;
 use Discord\Voice\Manager;
+use Monolog\Logger;
 use ReflectionClass;
 use RuntimeException;
 
@@ -52,6 +54,79 @@ final class RecordCommandTest extends CommandTestCase
         $this->record($this->interaction($channel));
 
         $this->assertSame(['🔴 Recording <#200>. I answer everything that is said. Use /stop to end the recording.'], $this->updates);
+    }
+
+    public function testUsesTheServersSettings(): void
+    {
+        touch("{$this->recordings}/models/pt_BR-faber-medium.onnx");
+        (new GuildSettings(new Logger('test')))->save(
+            self::GUILD_ID,
+            ['wake_word' => 'jarvis', 'language' => 'pt', 'voice' => 'pt_BR-faber-medium', 'model' => 'sonnet'],
+            '555',
+        );
+        $this->setProcessEnv([
+            'FAKE_WHISPER_OUTPUT' => 'Jarvis, que horas são?',
+            'FAKE_WHISPER_LOG' => "{$this->recordings}/whisper.log",
+            'FAKE_PIPER_LOG' => "{$this->recordings}/piper.log",
+        ]);
+        $channel = $this->voiceChannel();
+        $this->joinsWith(resolve($vc = $this->voiceClient($channel)));
+
+        $this->record($this->interaction($channel));
+
+        // The announcement tells the call the server's wake word, not the one in .env ("claude").
+        $this->assertSame(['🔴 Recording <#200>. Say "jarvis" to talk to me. Use /stop to end the recording.'], $this->updates);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');
+
+        // Alice was understood in the server's language, and answered by its model, in its voice.
+        $this->assertSame(["> **Alice:** Jarvis, que horas são?\nIt is a quarter past four."], $this->sent);
+        $this->assertStringContainsString("arg=--language\narg=pt\n", file_get_contents("{$this->recordings}/whisper.log"));
+        $this->assertStringContainsString("arg=--model\narg=sonnet\n", file_get_contents($this->claudeLog));
+        $this->assertStringContainsString(
+            "arg=--model\narg={$this->recordings}/models/pt_BR-faber-medium.onnx\n",
+            file_get_contents("{$this->recordings}/piper.log"),
+        );
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testUsesTheEnvDefaultsWhenTheSettingsCannotBeRead(): void
+    {
+        $this->setEnv(['VOICE_WAKE_WORD' => 'computer', 'WHISPER_LANGUAGE' => 'en', 'CLAUDE_MODEL' => 'opus']);
+        $this->setProcessEnv([
+            'FAKE_WHISPER_OUTPUT' => 'Computer, what time is it?',
+            'FAKE_WHISPER_LOG' => "{$this->recordings}/whisper.log",
+            'FAKE_PIPER_LOG' => "{$this->recordings}/piper.log",
+        ]);
+        $this->breakStatsDatabase();
+        $channel = $this->voiceChannel();
+        $this->joinsWith(resolve($vc = $this->voiceClient($channel)));
+
+        $this->record($this->interaction($channel));
+
+        // Settings never stop a call from starting.
+        $this->assertNotNull(VoiceSession::forGuild(self::GUILD_ID));
+        $this->assertSame(['🔴 Recording <#200>. Say "computer" to talk to me. Use /stop to end the recording.'], $this->updates);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');
+
+        $this->assertStringContainsString("arg=--language\narg=en\n", file_get_contents("{$this->recordings}/whisper.log"));
+        $this->assertStringContainsString("arg=--model\narg=opus\n", file_get_contents($this->claudeLog));
+        $this->assertStringContainsString(
+            "arg=--model\narg={$this->recordings}/models/voice.onnx\n",
+            file_get_contents("{$this->recordings}/piper.log"),
+        );
+
+        // It is logged, once for the call. The statistics are in the same database.
+        $problems = array_count_values($this->loggedProblems());
+        $this->assertSame(1, $problems['Could not read the server settings: Database connection [stats] not configured.']);
+        $this->assertSame(
+            ['Could not read the server settings: Database connection [stats] not configured.', 'Could not save usage statistics: Database connection [stats] not configured.'],
+            array_keys($problems),
+        );
+        $this->assertSame([['guild' => self::GUILD_ID]], $this->logged('Could not read the server settings: Database connection [stats] not configured.'));
     }
 
     public function testReportsWhenTheVoiceChannelCannotBeJoined(): void
@@ -108,6 +183,25 @@ final class RecordCommandTest extends CommandTestCase
         $this->record($this->interaction($this->voiceChannel()));
 
         $this->assertRefused('PIPER_MODEL in .env does not point to a model file.');
+    }
+
+    public function testRefusesWhenTheWhisperModelIsMissing(): void
+    {
+        $this->setEnv(['WHISPER_MODEL' => '/nowhere/ggml-base.bin']);
+
+        $this->record($this->interaction($this->voiceChannel()));
+
+        $this->assertRefused('WHISPER_MODEL in .env does not point to a model file.');
+    }
+
+    public function testRefusesWhenTheServersVoiceIsNoLongerInstalled(): void
+    {
+        // The voice was installed when it was chosen with /settings.
+        (new GuildSettings(new Logger('test')))->save(self::GUILD_ID, [...GuildSettings::DEFAULTS, 'voice' => 'pt_BR-faber-medium'], '555');
+
+        $this->record($this->interaction($this->voiceChannel()));
+
+        $this->assertRefused('The voice `pt_BR-faber-medium` is no longer installed. Choose another one with /settings.');
     }
 
     private function record(object $interaction): void
