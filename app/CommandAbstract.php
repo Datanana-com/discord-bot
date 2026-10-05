@@ -27,6 +27,25 @@ abstract class CommandAbstract
     public ?int $type = null;
 
     /**
+     * The command's options, each as Discord describes an option: its type, name, description, and so on.
+     *
+     * @see https://docs.discord.com/developers/interactions/application-commands#application-command-object-application-command-option-structure
+     *
+     * @var list<array<string, mixed>>
+     */
+    public array $options = [];
+
+    /**
+     * The permissions a member needs to be shown the command, as a bit set. Null shows it to everyone.
+     *
+     * Server admins can change who is shown a command, so a command that needs a permission
+     * also checks it in handle().
+     *
+     * @var int|null
+     */
+    public ?int $defaultMemberPermissions = null;
+
+    /**
      * The event's logger
      *
      * @var LoggerInterface

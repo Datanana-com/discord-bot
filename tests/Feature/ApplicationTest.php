@@ -5,16 +5,19 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Application;
+use App\Commands\Global\SettingsCommand;
 use App\Exceptions\EventNotFoundException;
 use Closure;
 use Discord\Discord;
 use Discord\Parts\Application\Command\Command;
+use Discord\Parts\Application\Command\Option;
 use Discord\Parts\Channel\Message;
 use Discord\Parts\Interactions\Interaction;
 use Discord\Helpers\RegisteredCommand;
 use Discord\WebSockets\Event;
 use Monolog\Handler\TestHandler;
 use Monolog\Logger;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use React\EventLoop\StreamSelectLoop;
 use React\Promise\PromiseInterface;
@@ -120,15 +123,16 @@ final class ApplicationTest extends TestCase
             'optin' => ['Lets the bot record, transcribe and answer you again, after /optout.', Command::CHAT_INPUT],
             'optout' => ['Stops the bot from recording, transcribing or answering you, in every server.', Command::CHAT_INPUT],
             'record' => ['Records your voice channel and lets everyone in it talk to Claude.', Command::CHAT_INPUT],
+            'settings' => ["Shows or changes this server's wake word, language, voice and Claude model.", Command::CHAT_INPUT],
             'stats' => ['Shows how this server has used the bot.', Command::CHAT_INPUT],
             'stop' => ['Stops recording and leaves the voice channel.', Command::CHAT_INPUT],
             'test' => ['A test global command', Command::CHAT_INPUT],
         ], $commands->saved);
-        $this->assertContains('Global commands found: OptinCommand, OptoutCommand, RecordCommand, StatsCommand, StopCommand, TestCommand', $this->logged());
+        $this->assertContains('Global commands found: OptinCommand, OptoutCommand, RecordCommand, SettingsCommand, StatsCommand, StopCommand, TestCommand', $this->logged());
         $this->assertContains('Command record has been saved.', $this->logged());
 
         // Each command's interactions go to its class, and are logged: /test logs a greeting.
-        $this->assertSame(['optin', 'optout', 'record', 'stats', 'stop', 'test'], array_keys($commands->listeners));
+        $this->assertSame(['optin', 'optout', 'record', 'settings', 'stats', 'stop', 'test'], array_keys($commands->listeners));
         ($commands->listeners['test'])(new Interaction($app->discord, ['guild_id' => '100', 'channel_id' => '200', 'user' => ['id' => '555', 'username' => 'alice']], true));
         $this->assertContains(['/test used', ['guild' => '100', 'channel' => '200', 'user' => '555']], $this->loggedWithContext());
         $this->assertContains('Hello, World!', $this->logged());
@@ -143,7 +147,7 @@ final class ApplicationTest extends TestCase
         $app->prepareCommandClasses();
 
         $this->assertContains('Guild specific commands found: PingCommand', $this->logged());
-        $this->assertSame(['optin', 'optout', 'record', 'stats', 'stop', 'test'], array_keys($commands->saved));
+        $this->assertSame(['optin', 'optout', 'record', 'settings', 'stats', 'stop', 'test'], array_keys($commands->saved));
     }
 
     public function testDoesNotSaveCommandsDiscordAlreadyHas(): void
@@ -155,10 +159,10 @@ final class ApplicationTest extends TestCase
 
         $app->prepareCommandClasses();
 
-        $this->assertSame(['optin', 'optout', 'stats', 'test'], array_keys($commands->saved));
+        $this->assertSame(['optin', 'optout', 'settings', 'stats', 'test'], array_keys($commands->saved));
         $this->assertContains('Command record already exists.', $this->logged());
         $this->assertContains('Command stop already exists.', $this->logged());
-        $this->assertSame(['optin', 'optout', 'record', 'stats', 'stop', 'test'], array_keys($commands->listeners), 'Existing commands are still handled.');
+        $this->assertSame(['optin', 'optout', 'record', 'settings', 'stats', 'stop', 'test'], array_keys($commands->listeners), 'Existing commands are still handled.');
     }
 
     public function testSavesCommandsThatChanged(): void
@@ -174,6 +178,96 @@ final class ApplicationTest extends TestCase
         $this->assertNotContains('Command record already exists.', $this->logged());
     }
 
+    public function testRegistersACommandsOptionsAndPermissions(): void
+    {
+        [$app, $commands] = $this->appWithCommands();
+
+        $app->prepareCommandClasses();
+
+        // /settings takes options, and is only shown to members with Manage Server (1 << 5).
+        $settings = $commands->payloads['settings'];
+        $this->assertSame(
+            ['wake_word' => Option::STRING, 'language' => Option::STRING, 'voice' => Option::STRING, 'model' => Option::STRING, 'reset' => Option::BOOLEAN],
+            array_column($settings['options'], 'type', 'name'),
+        );
+        $this->assertSame(
+            [['name' => 'haiku', 'value' => 'haiku'], ['name' => 'sonnet', 'value' => 'sonnet'], ['name' => 'opus', 'value' => 'opus']],
+            $settings['options'][3]['choices'],
+        );
+        $this->assertSame('32', $settings['default_member_permissions']);
+        $this->assertSame(32, $settings['options'][0]['max_length'], 'Discord stops a wake word that is too long from being typed.');
+
+        // A command without them is sent as such, which also removes the ones Discord still has.
+        $this->assertSame(
+            ['name' => 'stop', 'description' => 'Stops recording and leaves the voice channel.', 'options' => [], 'default_member_permissions' => null, 'type' => Command::CHAT_INPUT],
+            $commands->payloads['stop'],
+        );
+    }
+
+    public function testEveryOptionFitsDiscordsLimits(): void
+    {
+        [$app, $commands] = $this->appWithCommands();
+
+        $app->prepareCommandClasses();
+
+        // Discord refuses the whole command otherwise, which only shows once the bot runs.
+        foreach ($commands->payloads as $command => $payload) {
+            $this->assertLessThanOrEqual(25, count($payload['options']), "/{$command} has too many options.");
+
+            foreach ($payload['options'] as $option) {
+                $this->assertMatchesRegularExpression('/^[-_\p{Ll}\p{N}]{1,32}$/u', $option['name'], "An option name of /{$command}.");
+                $this->assertMatchesRegularExpression('/^.{1,100}$/u', $option['description'], "The description of /{$command} {$option['name']}.");
+                $this->assertLessThanOrEqual(25, count($option['choices'] ?? []), "/{$command} {$option['name']} has too many choices.");
+            }
+        }
+    }
+
+    public function testDoesNotSaveACommandWhoseOptionsAndPermissionsDiscordAlreadyHas(): void
+    {
+        [$app, $commands] = $this->appWithCommands(registered: [self::registeredSettings()]);
+
+        $app->prepareCommandClasses();
+
+        $this->assertArrayNotHasKey('settings', $commands->saved);
+        $this->assertContains('Command settings already exists.', $this->logged());
+    }
+
+    /**
+     * @param array<string, mixed> $registered /settings as Discord has it.
+     */
+    #[DataProvider('outdatedSettings')]
+    public function testSavesACommandAgainWhenItsOptionsOrPermissionsChanged(array $registered): void
+    {
+        [$app, $commands] = $this->appWithCommands(registered: [$registered]);
+
+        $app->prepareCommandClasses();
+
+        $this->assertArrayHasKey('settings', $commands->saved);
+        $this->assertNotContains('Command settings already exists.', $this->logged());
+    }
+
+    /**
+     * @return iterable<string, array{array<string, mixed>}>
+     */
+    public static function outdatedSettings(): iterable
+    {
+        $current = self::registeredSettings();
+        $declared = json_decode(json_encode($current['options']), true);
+        $with = fn (array $options) => [[...$current, 'options' => json_decode(json_encode($options))]];
+
+        // The description and type are the same in each: only the options or the permissions differ.
+        yield 'registered before it had options' => [array_diff_key($current, ['options' => true, 'default_member_permissions' => true])];
+        yield 'an option was added since' => $with(array_slice($declared, 0, -1));
+        yield 'an option was removed since' => $with([...$declared, ['type' => Option::BOOLEAN, 'name' => 'summaries', 'description' => 'Posts a summary of each call.']]);
+        yield 'the options are in another order' => $with(array_reverse($declared));
+        yield 'a description changed' => $with([['description' => 'The wake word.'] + $declared[0], ...array_slice($declared, 1)]);
+        yield 'a limit changed' => $with([['max_length' => 64] + $declared[0], ...array_slice($declared, 1)]);
+        yield 'a choice was added since' => $with([...array_slice($declared, 0, 3), ['choices' => array_slice($declared[3]['choices'], 0, 2)] + $declared[3], $declared[4]]);
+        yield 'an option is no longer required' => $with([['required' => true] + $declared[0], ...array_slice($declared, 1)]);
+        yield 'it was open to everyone' => [[...$current, 'default_member_permissions' => null]];
+        yield 'it needed another permission' => [[...$current, 'default_member_permissions' => '8']];
+    }
+
     public function testLogsWhenTheRegisteredCommandsCannotBeFetched(): void
     {
         [$app, $commands] = $this->appWithCommands(fetchError: new RuntimeException('Discord API unavailable'));
@@ -182,7 +276,7 @@ final class ApplicationTest extends TestCase
 
         $this->assertSame([], $commands->saved);
         $this->assertContains('Could not fetch the registered commands: Discord API unavailable', $this->logged());
-        $this->assertSame(['optin', 'optout', 'record', 'stats', 'stop', 'test'], array_keys($commands->listeners), 'Commands Discord already has keep working.');
+        $this->assertSame(['optin', 'optout', 'record', 'settings', 'stats', 'stop', 'test'], array_keys($commands->listeners), 'Commands Discord already has keep working.');
     }
 
     public function testLogsCommandsThatCannotBeSaved(): void
@@ -247,6 +341,9 @@ final class ApplicationTest extends TestCase
             /** @var array<string, array{string, int}> Saved commands: name => [description, type]. */
             public array $saved = [];
 
+            /** @var array<string, array<string, mixed>> What was sent to Discord to save each command, by name. */
+            public array $payloads = [];
+
             /** @var array<string, callable> Interaction handlers by command name. */
             public array $listeners = [];
 
@@ -281,6 +378,8 @@ final class ApplicationTest extends TestCase
                 }
 
                 $this->saved[$command->name] = [$command->description, $command->type];
+                // What DiscordPHP's repository posts for a command it didn't get from Discord.
+                $this->payloads[$command->name] = $command->getCreatableAttributes();
 
                 return resolve($command);
             }
@@ -288,6 +387,52 @@ final class ApplicationTest extends TestCase
         $app->discord = $this->discordStub($client, ['application' => (object) ['commands' => $commands]], $commands->listeners);
 
         return [$app, $commands];
+    }
+
+    /**
+     * /settings as Discord returns it once registered, which is not how it was sent: the options
+     * are objects with their fields in Discord's order, and they also have what wasn't sent, as
+     * null or false, and what the bot never sets.
+     *
+     * @return array<string, mixed>
+     */
+    private static function registeredSettings(): array
+    {
+        $declared = (new ReflectionClass(SettingsCommand::class))->getDefaultProperties();
+        $options = array_map(
+            fn (array $option) => [
+                'name_localizations' => null,
+                'description_localizations' => null,
+                'name_localized' => $option['name'],
+                'required' => false,
+                'autocomplete' => false,
+                'min_length' => null,
+                'min_value' => null,
+                'max_value' => null,
+                'channel_types' => null,
+                'choices' => null,
+                ...array_reverse($option),
+                ...(isset($option['choices']) ? ['choices' => array_map(fn (array $choice) => ['name_localizations' => null, ...array_reverse($choice)], $option['choices'])] : []),
+            ],
+            $declared['options'],
+        );
+
+        return [
+            'id' => '900',
+            'application_id' => '901',
+            'version' => '902',
+            'name' => 'settings',
+            'name_localizations' => null,
+            'description' => $declared['description'],
+            'description_localizations' => null,
+            'type' => Command::CHAT_INPUT,
+            'options' => json_decode(json_encode($options)),
+            'default_member_permissions' => (string) $declared['defaultMemberPermissions'],
+            'dm_permission' => true,
+            'contexts' => null,
+            'integration_types' => [0],
+            'nsfw' => false,
+        ];
     }
 
     /**
