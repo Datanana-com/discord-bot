@@ -34,6 +34,10 @@ use function React\Promise\resolve;
  * the call with Piper, sentence by sentence while Claude is writing it, and then posted in the
  * text channel. When the call ends, Claude's summary of it is posted in the text channel as well.
  *
+ * Saying the wake word opens a conversation for that person: until they say the stop phrase, are quiet
+ * for a minute, opt out or the call ends, everything they say is answered, without the wake word. What
+ * other people say is only answered when it mentions the wake word, which opens their own conversation.
+ *
  * Nothing is kept of people who opted out with /optout: they aren't recorded, transcribed or
  * answered. The voice client still receives and decodes their audio, like everyone's.
  *
@@ -62,6 +66,12 @@ final class VoiceSession
 
     /** Characters that fit in a Discord message. */
     private const int MESSAGE_LIMIT = 2000;
+
+    /** Seconds of quiet that close someone's conversation. */
+    private const float CONVERSATION_QUIET = 60.0;
+
+    /** What the bot says when the stop phrase closed a conversation. */
+    private const string OKAY = 'Okay.';
 
     /**
      * The voice client's decoders leave a copy of each speaker's audio in the temp folder, named
@@ -132,6 +142,12 @@ final class VoiceSession
 
     private readonly MemoryWriter $writer;
 
+    /** @var array<string, ?TimerInterface> Who has a conversation open, by user ID, with the timer that closes it once they are quiet. */
+    private array $conversations = [];
+
+    /** @var array<string, int> How many utterances of each person wait for their turn or are being answered, by user ID. */
+    private array $waiting = [];
+
     /** @var array{utterances: int, answers: int, failures: int} */
     private array $counts = ['utterances' => 0, 'answers' => 0, 'failures' => 0];
 
@@ -144,6 +160,7 @@ final class VoiceSession
         private readonly Claude $claude,
         private readonly Speech $speech,
         public readonly string $wakeWord,
+        public readonly string $stopPhrase,
         private readonly Usage $usage,
         /** @var array<string, true> Who opted out of being recorded, by user ID. */
         private array $optedOut,
@@ -192,6 +209,15 @@ final class VoiceSession
     public static function defaultWakeWord(): string
     {
         return trim(env('VOICE_WAKE_WORD', 'claude'));
+    }
+
+    /**
+     * The phrase that ends a conversation, for a server with this wake word: "stop <wake word>", unless
+     * VOICE_STOP_PHRASE replaces it. Empty when there is no wake word, as there are no conversations then.
+     */
+    public static function defaultStopPhrase(string $wakeWord): string
+    {
+        return $wakeWord === '' ? '' : (trim(env('VOICE_STOP_PHRASE', '')) ?: "stop {$wakeWord}");
     }
 
     public static function forGuild(string $guildId): ?self
@@ -271,6 +297,7 @@ final class VoiceSession
             date('Y-m-d_H-i-s'),
         );
         mkdir($directory, 0755, true);
+        $wakeWord = $settings['wake_word'] ?? self::defaultWakeWord();
 
         $session = new self(
             $vc,
@@ -280,7 +307,8 @@ final class VoiceSession
             Transcriber::fromEnv($settings['language']),
             Claude::fromEnv($settings['model']),
             Speech::fromEnv($settings['voice']),
-            $settings['wake_word'] ?? self::defaultWakeWord(),
+            $wakeWord,
+            self::defaultStopPhrase($wakeWord),
             new Usage($discord->getLogger()),
             $optedOut,
             Memory::fromEnv(),
@@ -298,12 +326,13 @@ final class VoiceSession
      * Stops recording, transcribing and answering someone in every call that isn't over, as they used /optout.
      *
      * What they say from now on is dropped, and what was recorded of them is deleted. Their lines
-     * already in the transcript stay.
+     * already in the transcript stay, and their conversation is closed.
      */
     public static function optOut(string $userId): void
     {
         foreach (self::$unfinished as $session) {
             $session->optedOut[$userId] = true;
+            $session->closeConversation($userId, 'opted out');
             // Their memory is no longer used for anyone, whatever they agreed to before.
             unset($session->shared[$userId]);
 
@@ -428,6 +457,15 @@ final class VoiceSession
         $this->stopped = true;
         unset(self::$sessions[$this->vc->channel->guild_id]);
         $this->discord->getLoop()->cancelTimer($this->ticker);
+
+        // Conversations end with the call. What is still waiting to be handled isn't answered any more.
+        foreach ($this->conversations as $timer) {
+            if ($timer !== null) {
+                $this->discord->getLoop()->cancelTimer($timer);
+            }
+        }
+
+        $this->conversations = [];
 
         // Speech still in progress is transcribed for the transcript, but no longer answered.
         $this->splitter->flushAll();
@@ -595,12 +633,20 @@ final class VoiceSession
         $this->log('info', 'Utterance ended', ['user' => $userId, 'ms' => $ms]);
         $this->track(Usage::UTTERANCE, ['user' => $userId, 'duration_ms' => $ms]);
 
+        // Counted from when it ended, not when its turn comes: their conversation can't end quietly meanwhile.
+        $this->waiting[$userId] = ($this->waiting[$userId] ?? 0) + 1;
+
         $this->queue = $this->queue
             ->then(fn () => $this->handleUtterance($userId, $wavPath, $endedAt, $people))
             ->catch(function (Throwable $e) use ($userId) {
                 $this->counts['failures']++;
                 $this->log('error', 'Voice reply failed: ' . $e->getMessage(), ['user' => $userId]);
                 $this->track(Usage::FAILED, ['user' => $userId]);
+            })
+            ->finally(function () use ($userId) {
+                // Answered and spoken, or not answered at all: their conversation is quiet from now on.
+                $this->waiting[$userId]--;
+                $this->startQuiet($userId);
             });
     }
 
@@ -634,14 +680,106 @@ final class VoiceSession
                 $name = $this->nameOf($userId);
                 $this->remember("{$name}: {$text}", $people);
 
-                if ($this->stopped || ! self::mentions($text, $this->wakeWord)) {
-                    $this->log('debug', 'Not answering', ['user' => $userId, 'reason' => $this->stopped ? 'the session stopped' : 'Claude was not addressed']);
+                if ($this->stopped) {
+                    $this->log('debug', 'Not answering', ['user' => $userId, 'reason' => 'the session stopped']);
 
                     return null;
                 }
 
+                // Before the wake word: by default, the stop phrase contains it.
+                if ($this->stopPhrase !== '' && self::mentions($text, $this->stopPhrase)) {
+                    return $this->closeConversation($userId, 'stop phrase') ? $this->sayOkay($userId) : null;
+                }
+
+                if (! $this->hasConversation($userId) && ! self::mentions($text, $this->wakeWord)) {
+                    $this->log('debug', 'Not answering', ['user' => $userId, 'reason' => 'Claude was not addressed']);
+
+                    return null;
+                }
+
+                // Without a wake word, everything is answered already.
+                if ($this->wakeWord !== '') {
+                    $this->openConversation($userId);
+                }
+
                 return $this->answer($userId, $name, $text, $endedAt, $people);
             });
+    }
+
+    /**
+     * Whether everything someone says is answered. Not isset(): a conversation without a timer holds null.
+     */
+    private function hasConversation(string $userId): bool
+    {
+        return array_key_exists($userId, $this->conversations);
+    }
+
+    /**
+     * Starts answering everything someone says, until they say the stop phrase or are quiet for a while.
+     */
+    private function openConversation(string $userId): void
+    {
+        if (! $this->hasConversation($userId)) {
+            $this->conversations[$userId] = null;
+            $this->log('info', 'Conversation opened', ['user' => $userId]);
+        }
+    }
+
+    /**
+     * @param string $reason Why it closed, for the log: "stop phrase", "quiet" or "opted out".
+     * @return bool False when they had no conversation open.
+     */
+    private function closeConversation(string $userId, string $reason): bool
+    {
+        if (! $this->hasConversation($userId)) {
+            return false;
+        }
+
+        if ($this->conversations[$userId] !== null) {
+            $this->discord->getLoop()->cancelTimer($this->conversations[$userId]);
+        }
+
+        unset($this->conversations[$userId]);
+        $this->log('info', 'Conversation closed', ['user' => $userId, 'reason' => $reason]);
+
+        return true;
+    }
+
+    /**
+     * Has their conversation, if one is open, close after a minute of quiet.
+     */
+    private function startQuiet(string $userId): void
+    {
+        if (! $this->hasConversation($userId)) {
+            return;
+        }
+
+        if ($this->conversations[$userId] !== null) {
+            $this->discord->getLoop()->cancelTimer($this->conversations[$userId]);
+        }
+
+        $this->conversations[$userId] = $this->discord->getLoop()->addTimer(self::CONVERSATION_QUIET, function () use ($userId) {
+            $this->conversations[$userId] = null;
+
+            // Something they said is waiting for its turn, or being answered: it starts again once that is over.
+            if (($this->waiting[$userId] ?? 0) === 0) {
+                $this->closeConversation($userId, 'quiet');
+            }
+        });
+    }
+
+    /**
+     * Tells someone, in the call, that their conversation is closed.
+     *
+     * @return PromiseInterface<mixed> Resolves once it is said. It never rejects.
+     */
+    private function sayOkay(string $userId): PromiseInterface
+    {
+        $path = sprintf('%s/claude-%d.ogg', $this->directory, ++$this->files);
+
+        return $this->speech->synthesize(self::OKAY, $path)
+            ->then(fn () => $this->stillAnswering($userId, []) ? race([$this->vc->playFile($path), $this->left->promise()]) : null)
+            ->catch(fn (Throwable $e) => $this->log('warning', 'Could not say okay: ' . $e->getMessage(), ['user' => $userId]));
     }
 
     /**

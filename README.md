@@ -105,6 +105,14 @@ A command can take options and be shown only to members with a permission: set i
 5. When the call ends, Claude summarizes its whole transcript: what was discussed, what was decided, and who does what next. The summary is posted in the text channel where `/record` was used, and saved as `summary.md` next to `transcript.txt`.
 6. Once the summary is posted, the bot updates its memories of the people in the call, from the transcript: see [Memory in calls](#memory-in-calls).
 
+Saying the wake word opens a conversation for whoever said it, so there is no need to say "Claude" in every sentence: until they say the stop phrase, everything that person says is answered. A conversation belongs to one person. What others in the call say is only answered when it mentions the wake word, which opens a conversation of their own, and several people can have one open at the same time. Their sentences are still answered one at a time, in the order they ended.
+
+- The stop phrase is `stop <wake word>`: "stop Claude" by default, or "stop computer" in a server whose wake word is "computer". `VOICE_STOP_PHRASE` replaces it, for every server (see [Configuration](#configuration)). It is heard the way the wake word is, so "Stop, Claude." counts, and it is checked first, as by default it contains the wake word.
+- A sentence with the stop phrase closes the conversation of whoever said it, and only theirs. Like everything said, it is in the transcript, but it is never sent to Claude, also when they had no conversation open. When it closed one, the bot says "Okay." in the call, with the call's Piper voice. That isn't posted in the text channel, added to the transcript or counted as an answer.
+- A conversation also closes after 60 seconds of quiet, counted from the end of that person's last sentence or from when the bot finished speaking its answer to them, whichever is later. It never closes while something they said is waiting for its turn or being answered. It closes too when they use `/optout`, and every conversation ends with the call.
+- A server without a wake word (`VOICE_WAKE_WORD` empty, or `/settings wake_word:none`) answers everything already: it has no conversations, and a sentence with the stop phrase is answered like any other.
+- Saying "Stop, Claude." while the bot speaks doesn't interrupt it: like any sentence, it waits for its turn, so that answer is spoken to the end first.
+
 `/stop` finishes the recordings and leaves the channel, and `/stats` shows how the server has used the bot (see [Logs and statistics](#logs-and-statistics)). `/settings` gives a server its own wake word, language, voice and Claude model (see [Settings for each server](#settings-for-each-server)). `/recall` asks Claude a question about the server's saved calls (see [Asking about past calls](#asking-about-past-calls)). `/optout` stops the bot from recording, transcribing or answering whoever uses it, and `/optin` undoes that (see [Opting out of being recorded](#opting-out-of-being-recorded)). `/meet` makes a private voice channel for the people you pick, and records it (see [Private meetings](#private-meetings)).
 
 A call ends with `/stop`, or when someone disconnects the bot from the voice channel. An answer the bot is speaking at that moment is cut off, but still posted in the text channel. For the summary, the whole transcript is sent to Claude, including what was said without the wake word. The summary is written in the language of the call, once everything said is transcribed, so it includes the last thing said. A summary that doesn't fit in one Discord message is split into several, never in the middle of a sentence. When nobody said anything, there is no summary. When Claude can't make one (it isn't logged in, the usage limit is reached, ...), the bot says so in the text channel, and why.
@@ -122,7 +130,7 @@ Anyone can use `/optout`, in any server the bot is in or in a direct message wit
 
 - no recording of them is kept;
 - what they say isn't transcribed, so it is not in `transcript.txt` or the summary, and is never sent to Claude;
-- Claude doesn't answer them, also when they say the wake word;
+- Claude doesn't answer them, also when they say the wake word, and a conversation they had open is closed;
 - no `utterance` statistics are saved for them.
 
 `/optin` undoes it. Both commands answer with what changed, and only whoever used them sees that.
@@ -290,7 +298,8 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 | `BOT_SLASH_COMMANDS` | | Must be set for `/record`, `/stop`, `/stats`, `/settings`, `/recall`, `/optout`, `/optin`, `/meet`, `/memory`, `/forget`, `/share` and `/unshare` to be registered. |
 | `RECORDINGS_PATH` | `recordings` | Where recordings, transcripts and summaries are saved. `/recall` answers from them. |
 | `RECORDINGS_RETENTION_DAYS` | | Calls older than this many days are deleted, with their recordings, transcript and summary. A whole number, 1 or more. Leave it empty to keep everything. |
-| `VOICE_WAKE_WORD` | `claude` | Claude only answers what mentions this word or phrase. A phrase also counts when punctuation is heard between its words: "Okay, computer" mentions `okay computer`. Leave it empty to answer everything. |
+| `VOICE_WAKE_WORD` | `claude` | Claude only answers what mentions this word or phrase. A phrase also counts when punctuation is heard between its words: "Okay, computer" mentions `okay computer`. Leave it empty to answer everything. Saying it opens a conversation: see [Voice calls with Claude](#voice-calls-with-claude). |
+| `VOICE_STOP_PHRASE` | `stop <wake word>` | What closes the conversation of whoever says it, e.g. `para claude`. It replaces the default for every server, whatever its wake word, and is heard like the wake word is. Servers without a wake word have no conversations, so it does nothing there. |
 | `WHISPER_BINARY` | `whisper-cli` | Path to whisper.cpp's `whisper-cli`. |
 | `WHISPER_MODEL` | | Path to the whisper model, e.g. `~/whisper.cpp/models/ggml-base.bin`. |
 | `WHISPER_LANGUAGE` | `auto` | Language spoken in the call, e.g. `en` or `pt`, or `auto` to detect it. |
