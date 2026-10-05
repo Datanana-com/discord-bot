@@ -95,7 +95,7 @@ trait RecordsCalls
      */
     private function howToTalk(VoiceSession $session): string
     {
-        return $session->wakeWord === '' ? 'I answer everything that is said.' : "Say \"{$session->wakeWord}\" to talk to me.";
+        return ($name = VoiceSession::wakeWordName($session->wakeWord)) === '' ? 'I answer everything that is said.' : "Say \"{$name}\" to talk to me.";
     }
 
     /**
