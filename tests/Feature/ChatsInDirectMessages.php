@@ -13,7 +13,6 @@ use Discord\Parts\Channel\Message;
 use React\EventLoop\LoopInterface;
 use React\Promise\PromiseInterface;
 use ReflectionProperty;
-use Tests\Fixtures\FakeCdn;
 use Tests\Fixtures\ManualTimers;
 use Throwable;
 
@@ -29,9 +28,6 @@ trait ChatsInDirectMessages
     protected const string ANSWER = 'Then ship the **beta** on Friday.';
 
     protected ManualTimers $timers;
-
-    /** Where voice messages are downloaded from. */
-    protected FakeCdn $cdn;
 
     /** What ffmpeg was last run with. */
     protected string $ffmpegLog;
@@ -79,8 +75,6 @@ trait ChatsInDirectMessages
             'FAKE_FFMPEG_LOG' => $this->ffmpegLog,
             'FAKE_WHISPER_LOG' => $this->whisperLog,
         ]);
-        $this->cdn = new FakeCdn();
-        $this->cdn->install();
     }
 
     /**
@@ -88,7 +82,6 @@ trait ChatsInDirectMessages
      */
     protected function endDirectMessages(): void
     {
-        $this->cdn->close();
         (new ReflectionProperty(DirectChat::class, 'chats'))->setValue(null, []);
     }
 

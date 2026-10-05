@@ -75,7 +75,10 @@ final readonly class VoiceMessage
 
         // The temp folder is shared: a folder someone else made there, a link to somewhere else or a
         // folder others can read or change must not hold what people said.
-        if (is_link($this->folder) || fileowner($this->folder) !== getmyuid() || (fileperms($this->folder) & 0077) !== 0) {
+        // getmyuid() is the owner of the script, which isn't who runs it when the code is deployed by another user.
+        $user = function_exists('posix_geteuid') ? posix_geteuid() : getmyuid();
+
+        if (is_link($this->folder) || fileowner($this->folder) !== $user || (fileperms($this->folder) & 0077) !== 0) {
             return reject(new RuntimeException('The folder for voice messages is not private to the bot.'));
         }
 

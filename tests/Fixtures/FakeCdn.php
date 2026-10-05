@@ -11,6 +11,7 @@ use Psr\Http\Message\ServerRequestInterface;
 use React\Http\HttpServer;
 use React\Http\Message\Response;
 use React\Promise\PromiseInterface;
+use React\Socket\ConnectionInterface;
 use React\Socket\ConnectorInterface;
 use React\Socket\SocketServer;
 use React\Socket\TcpConnector;
@@ -30,6 +31,9 @@ final class FakeCdn
 
     private SocketServer $socket;
 
+    /** @var list<ConnectionInterface> Both ends of every connection, which are closed with it: sockets left open stay in the event loop. */
+    private array $connections = [];
+
     public function __construct()
     {
         $this->response = new Response(200, ['Content-Type' => 'audio/ogg'], 'OggS fake voice message');
@@ -39,6 +43,9 @@ final class FakeCdn
             return $this->response instanceof Closure ? ($this->response)($request) : $this->response;
         });
         $this->socket = new SocketServer('127.0.0.1:0');
+        $this->socket->on('connection', function (ConnectionInterface $connection) {
+            $this->connections[] = $connection;
+        });
         $server->listen($this->socket);
     }
 
@@ -49,15 +56,19 @@ final class FakeCdn
     {
         $address = $this->socket->getAddress();
 
-        (new ReflectionProperty(Download::class, 'connector'))->setValue(null, new class ($address) implements ConnectorInterface {
-            public function __construct(private readonly string $address)
+        $track = function (ConnectionInterface $connection): ConnectionInterface {
+            return $this->connections[] = $connection;
+        };
+
+        (new ReflectionProperty(Download::class, 'connector'))->setValue(null, new class ($address, $track) implements ConnectorInterface {
+            public function __construct(private readonly string $address, private readonly Closure $track)
             {
             }
 
             public function connect($uri): PromiseInterface
             {
                 // Plain HTTP, though the request is for https: there is no certificate for Discord's hosts here.
-                return (new TcpConnector())->connect($this->address);
+                return (new TcpConnector())->connect($this->address)->then($this->track);
             }
         });
     }
@@ -65,6 +76,11 @@ final class FakeCdn
     public function close(): void
     {
         (new ReflectionProperty(Download::class, 'connector'))->setValue(null, null);
+
+        foreach ($this->connections as $connection) {
+            $connection->close();
+        }
+
         $this->socket->close();
     }
 }

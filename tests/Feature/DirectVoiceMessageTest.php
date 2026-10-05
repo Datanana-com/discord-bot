@@ -7,6 +7,7 @@ namespace Tests\Feature;
 use App\Assistant\DirectChat;
 use PHPUnit\Framework\Attributes\DataProvider;
 use React\Http\Message\Response;
+use Tests\Fixtures\FakeCdn;
 
 final class DirectVoiceMessageTest extends VoiceTestCase
 {
@@ -18,6 +19,9 @@ final class DirectVoiceMessageTest extends VoiceTestCase
 
     private const string COULD_NOT = "Sorry, I couldn't transcribe that voice message.";
 
+    /** Where voice messages are downloaded from. */
+    private FakeCdn $cdn;
+
     /** @var list<string> The files in the folder for voice messages before the test. */
     private array $voiceFilesBefore = [];
 
@@ -26,11 +30,15 @@ final class DirectVoiceMessageTest extends VoiceTestCase
         parent::setUp();
         $this->setUpDirectMessages();
         $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => self::SAID]);
+        $this->cdn = new FakeCdn();
+        $this->cdn->install();
         $this->voiceFilesBefore = $this->voiceFiles();
     }
 
     protected function tearDown(): void
     {
+        // Sockets left open stay in the event loop, which PHP then keeps running when the tests are over.
+        $this->cdn->close();
         $this->endDirectMessages();
         parent::tearDown();
     }
