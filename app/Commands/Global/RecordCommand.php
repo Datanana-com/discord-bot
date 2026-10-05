@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Commands\Global;
 
 use App\CommandAbstract;
+use App\Privacy\OptOuts;
 use App\Voice\VoiceSession;
 use Discord\Builders\MessageBuilder;
 use Discord\Parts\Interactions\Interaction;
@@ -23,7 +24,7 @@ final class RecordCommand extends CommandAbstract
             $voiceChannel === null => 'Join a voice channel first.',
             VoiceSession::forGuild((string) $interaction->guild_id) !== null => 'I am already recording in this server. Use /stop first.',
             $this->discord->voice === null => 'Voice is not available: libdave or ext-ffi could not be loaded. Check the bot logs.',
-            default => VoiceSession::missingSetup(),
+            default => VoiceSession::missingSetup() ?? $this->optOutsProblem($interaction),
         };
 
         if ($problem !== null) {
@@ -38,13 +39,21 @@ final class RecordCommand extends CommandAbstract
             ->then(fn () => $this->discord->joinVoiceChannel($voiceChannel, mute: false, deaf: false))
             ->then(
                 function (VoiceClient $vc) use ($interaction, $voiceChannel) {
-                    VoiceSession::start($vc, $interaction->channel ?? $voiceChannel, $this->discord);
+                    try {
+                        VoiceSession::start($vc, $interaction->channel ?? $voiceChannel, $this->discord);
+                    } catch (Throwable $e) {
+                        // The call starts with the list as it is now, which could still be read before joining.
+                        $vc->close();
+
+                        return $interaction->updateOriginalResponse(MessageBuilder::new()->setContent($this->optOutsUnreadable($e, $interaction)));
+                    }
+
                     $wakeWord = trim(env('VOICE_WAKE_WORD', 'claude'));
 
                     return $interaction->updateOriginalResponse(MessageBuilder::new()->setContent(
                         "🔴 Recording <#{$voiceChannel->id}>. "
                         . ($wakeWord === '' ? 'I answer everything that is said.' : "Say \"{$wakeWord}\" to talk to me.")
-                        . ' Use /stop to end the recording.'
+                        . ' Use /stop to end the recording, or /optout if you don\'t want to be recorded.'
                     ));
                 },
                 function (Throwable $e) use ($interaction, $voiceChannel) {
@@ -55,5 +64,27 @@ final class RecordCommand extends CommandAbstract
                     );
                 },
             );
+    }
+
+    /**
+     * Refuses to record when the list of who opted out can't be read: without it, someone who
+     * opted out would be recorded.
+     */
+    private function optOutsProblem(Interaction $interaction): ?string
+    {
+        try {
+            (new OptOuts())->all();
+        } catch (Throwable $e) {
+            return $this->optOutsUnreadable($e, $interaction);
+        }
+
+        return null;
+    }
+
+    private function optOutsUnreadable(Throwable $e, Interaction $interaction): string
+    {
+        $this->log->error('Could not read who opted out of recording: ' . $e->getMessage(), ['guild' => $interaction->guild_id]);
+
+        return 'I can\'t check who opted out of recording right now. Check the bot logs.';
     }
 }
