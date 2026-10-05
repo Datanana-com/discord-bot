@@ -246,7 +246,7 @@ final class DirectChat
                 // Remembered like an answer, unless the person asked to be forgotten since they asked. The memory
                 // is updated once the chat has paused again: the pause it was waiting for may be over by now.
                 if ($forgotten === $this->forgotten) {
-                    $this->unremembered[] = "Looked up for {$name}: {$answer}";
+                    $this->unremembered[] = Lookups::line($name, $answer);
                     $this->waitForPause();
                 }
 

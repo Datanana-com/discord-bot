@@ -24,6 +24,9 @@ final class DirectLookupTest extends VoiceTestCase
 
     private const string FOUND = "**PHP 8.5.11** is the latest stable version, released on 24 September 2026.\n\nSource: php.net";
 
+    /** How it is remembered: on one line. */
+    private const string LOOKED_UP = 'Looked up for Alice: **PHP 8.5.11** is the latest stable version, released on 24 September 2026. Source: php.net';
+
     private const string BUSY = "I'm still looking into other things. Ask me again in a moment.";
 
     private const string FAILED = "Sorry, I couldn't look that up.";
@@ -152,7 +155,7 @@ final class DirectLookupTest extends VoiceTestCase
         $this->waitUntil(fn () => count($this->logged('Updated memory')) === 2, 'the memory');
 
         $this->assertSame(
-            "The current memory:\n\n- Asked about PHP.\n\nWhat was said since it was last updated:\n\nLooked up for Alice: " . self::FOUND . "\n\nReply with the new memory.",
+            "The current memory:\n\n- Asked about PHP.\n\nWhat was said since it was last updated:\n\n" . self::LOOKED_UP . "\n\nReply with the new memory.",
             $this->lastPrompt(),
         );
         $this->assertSame('- Knows PHP 8.5.11 is the latest.', $this->memory()->read('555'));
@@ -174,7 +177,7 @@ final class DirectLookupTest extends VoiceTestCase
         $this->waitUntil(fn () => $this->logged('Updated memory') !== [], 'the memory');
 
         $this->assertStringContainsString(
-            "Alice: " . self::QUESTION . "\nClaude: " . self::LOOKING . "\nLooked up for Alice: " . self::FOUND . "\n\nReply with the new memory.",
+            "Alice: " . self::QUESTION . "\nClaude: " . self::LOOKING . "\n" . self::LOOKED_UP . "\n\nReply with the new memory.",
             $this->lastPrompt(),
         );
     }
@@ -337,7 +340,7 @@ final class DirectLookupTest extends VoiceTestCase
             $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT_MEMORY' => $this->claudeSays('- Knows PHP 8.5.11 is the latest.')]);
             $this->assertSame(1, $this->timers->elapse(600.0));
             $this->waitUntil(fn () => $this->logged('Updated memory') !== [], 'the memory');
-            $this->assertStringContainsString("Alice: " . self::QUESTION . "\nClaude: " . self::LOOKING . "\nLooked up for Alice: " . self::FOUND . "\n\n", $this->lastPrompt());
+            $this->assertStringContainsString("Alice: " . self::QUESTION . "\nClaude: " . self::LOOKING . "\n" . self::LOOKED_UP . "\n\n", $this->lastPrompt());
         } finally {
             // Sockets left open stay in the event loop, which PHP then keeps running when the tests are over.
             $cdn->close();

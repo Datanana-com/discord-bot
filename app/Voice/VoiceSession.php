@@ -361,6 +361,12 @@ final class VoiceSession
             $stopped = $session->unshare($userId) || $stopped;
         }
 
+        // A call that stopped shares nothing anymore, and is told nothing. What is still looked up
+        // for it from an answer made with that memory is dropped, like in a call that is going on.
+        foreach (self::$unfinished as $session) {
+            unset($session->shared[$userId]);
+        }
+
         return $stopped;
     }
 
@@ -778,7 +784,8 @@ final class VoiceSession
         $handOff = new HandOff($sentences->push(...));
         // While nothing more can wait to be looked up, the bot may have to say something in the place of what
         // Claude writes: nothing is spoken until the answer is whole.
-        $full = $this->lookups->full();
+        // Telling what was looked up hands nothing off, so it is spoken while it is written.
+        $full = $lookedUp === null && $this->lookups->full();
 
         return $this->claude->ask($this->prompt($userId, $name, $people, $sharers, $basis !== null, $lookedUp), onText: $full ? null : $handOff->push(...))->then(
             function (string $answer) use ($sentences, $handOff, $full, $lookedUp, &$spoken, $userId, $depends, $basis, $name, $question, $endedAt, $asking, $people) {
@@ -917,9 +924,18 @@ final class VoiceSession
      */
     private function lookUp(string $task, string $userId, string $name, string $question, array $sharers, ?string $basis): void
     {
-        // Once the call is over, nobody can join it anymore.
-        $wanted = fn (): bool => ! isset($this->optedOut[$userId]) && $this->stillSharing($sharers)
-            && ($this->stopped || $this->stillAlone($userId, $basis));
+        // Once the call is over, who is in the channel is no longer known, and nobody can join the call
+        // anymore: whether they were still alone is settled when it stops.
+        $alone = true;
+        $this->left->promise()->then(function () use (&$alone, $userId, $basis) {
+            $alone = $this->stillAlone($userId, $basis);
+        });
+        $wanted = function () use (&$alone, $userId, $sharers, $basis): bool {
+            return ! isset($this->optedOut[$userId]) && $this->stillSharing($sharers)
+                && ($this->stopped ? $alone : $this->stillAlone($userId, $basis));
+        };
+        // Which memories were forgotten so far: what is looked up may hold what one of them said.
+        $forgotten = $this->forgotten;
 
         $lookedUp = $this->lookups->lookUp(
             $task,
@@ -928,9 +944,9 @@ final class VoiceSession
             // Read once it is the task's turn, from its file: $this->transcript only holds its last lines.
             fn () => $wanted() ? trim(file_get_contents("{$this->directory}/transcript.txt")) : null,
         )->then(
-            function (?string $answer) use ($wanted, $userId, $name, $question) {
+            function (?string $answer) use ($wanted, $forgotten, $userId, $name, $question) {
                 if ($answer !== null && $wanted()) {
-                    return $this->lookedUp($answer, $userId, $name, $question);
+                    return $this->lookedUp($answer, $userId, $name, $question, $forgotten);
                 }
 
                 $this->log('debug', 'Dropped what was handed off to be looked up', ['user' => $userId]);
@@ -946,19 +962,34 @@ final class VoiceSession
      * Posts what was looked up for someone under their question, adds it to the transcript, and has
      * Claude tell them in the call, when the call is still going on.
      *
+     * @param array<string, int> $forgotten How often each memory had been forgotten when it was handed off.
      * @return PromiseInterface<mixed> Resolves once it is posted. It never rejects.
      */
-    private function lookedUp(string $answer, string $userId, string $name, string $question): PromiseInterface
+    private function lookedUp(string $answer, string $userId, string $name, string $question, array $forgotten): PromiseInterface
     {
+        $found = microtime(true);
         // With who is in the call now, when it is still going on: they are the ones who get to hear it.
-        $this->remember("Looked up for {$name}: {$answer}", $this->group($userId));
+        $this->remember(Lookups::line($name, $answer), $this->unlessForgotten($this->group($userId), $forgotten));
 
-        return $this->postAll("> **{$name}:** {$question}\n{$answer}")->then(function () use ($answer, $userId, $name, $question) {
+        return $this->postAll("> **{$name}:** {$question}\n{$answer}")->then(function () use ($answer, $userId, $name, $question, $forgotten, $found) {
             // It waits its turn like an utterance does, so it never talks over an answer.
             $this->inTurn($userId, fn () => $this->stillTalkingTo($userId)
-                ? $this->answer($userId, $name, $question, microtime(true), $this->group($userId), $answer)
+                ? $this->answer($userId, $name, $question, $found, $this->unlessForgotten($this->group($userId), $forgotten), $answer)
                 : null);
         });
+    }
+
+    /**
+     * @param list<string>|null $people Who is in the call: see {@see group()}.
+     * @param array<string, int> $forgotten How often each memory had been forgotten when something was handed off.
+     * @return list<string>|null The same people, or null when their memory was forgotten since: what was
+     *                           looked up may hold what they asked to forget, so no memory is used or updated with it.
+     */
+    private function unlessForgotten(?array $people, array $forgotten): ?array
+    {
+        $key = implode('-', $people ?? []);
+
+        return ($this->forgotten[$key] ?? 0) === ($forgotten[$key] ?? 0) ? $people : null;
     }
 
     /**

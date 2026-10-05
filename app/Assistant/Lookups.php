@@ -23,9 +23,10 @@ use function React\Promise\resolve;
  * model may think, search the web and consult an advisor for as long as it takes, while the
  * conversation goes on. One task is looked up at a time, and up to three more wait their turn.
  *
- * That model gets the conversation and the task, and never what the bot remembers about anyone.
- * Web search is its only tool: it can't fetch a page by its address, read or write files, run
- * anything or use MCP servers.
+ * That model gets the conversation and the task, and never the memories the bot keeps of people.
+ * The task and the conversation can still hold what an answer said from one. Web search is its
+ * only tool: it can't fetch a page by its address, read or write files, run anything or use MCP
+ * servers.
  *
  * The logs never include the task, the conversation or the answer.
  */
@@ -126,6 +127,17 @@ final class Lookups
     }
 
     /**
+     * What was looked up for someone, as a line of a transcript or of what a memory is updated from.
+     *
+     * It is put on one line: a line of its own in what a web page made the model write could
+     * otherwise pass for something a person, or the bot, said.
+     */
+    public static function line(string $name, string $answer): string
+    {
+        return "Looked up for {$name}: " . preg_replace('/\s*\R\s*/', ' ', $answer);
+    }
+
+    /**
      * Looks a task up, after the ones handed off before it.
      *
      * @param string $userId Whose question it is, for the logs.
@@ -177,10 +189,18 @@ final class Lookups
             // Stops Claude Code, which would otherwise keep searching for nobody.
             $asked->cancel();
         });
-        $asked = $this->claude->ask(
-            self::prompt($task, $heading, $said),
-            self::PROMPT . ($this->claude->advisor === '' ? '' : "\n" . self::ADVISOR_PROMPT),
-        );
+
+        try {
+            $asked = $this->claude->ask(
+                self::prompt($task, $heading, $said),
+                self::PROMPT . ($this->claude->advisor === '' ? '' : "\n" . self::ADVISOR_PROMPT),
+            );
+        } catch (Throwable $e) {
+            // Claude Code could not even be started: there is nothing to give up later.
+            $this->loop->cancelTimer($timer);
+
+            throw $e;
+        }
 
         return race([$asked, $givenUp->promise()])
             ->then(function (string $answer) use ($userId, $started) {
