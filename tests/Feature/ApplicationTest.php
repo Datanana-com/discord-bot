@@ -189,22 +189,25 @@ final class ApplicationTest extends TestCase
         $app->prepareCommandClasses();
 
         $this->assertSame([
-            'forget' => ['Deletes what the bot remembers about you.', Command::CHAT_INPUT],
-            'memory' => ['Shows what the bot remembers about you.', Command::CHAT_INPUT],
+            'forget' => ['Deletes what the bot remembers about you, or about you and the people you have calls with.', Command::CHAT_INPUT],
+            'meet' => ['Starts a private voice meeting with the people you pick, which I join and record.', Command::CHAT_INPUT],
+            'memory' => ['Shows what the bot remembers about you, or about you and the people you have calls with.', Command::CHAT_INPUT],
             'optin' => ['Lets the bot record, transcribe and answer you again, after /optout.', Command::CHAT_INPUT],
             'optout' => ['Stops the bot from recording, transcribing or answering you, in every server.', Command::CHAT_INPUT],
             'recall' => ["Asks Claude a question about this server's saved calls.", Command::CHAT_INPUT],
             'record' => ['Records your voice channel and lets everyone in it talk to Claude.', Command::CHAT_INPUT],
             'settings' => ["Shows or changes this server's wake word, language, voice and Claude model.", Command::CHAT_INPUT],
+            'share' => ['Lets the bot use your personal memory for everyone in the call it is recording.', Command::CHAT_INPUT],
             'stats' => ['Shows how this server has used the bot.', Command::CHAT_INPUT],
             'stop' => ['Stops recording and leaves the voice channel.', Command::CHAT_INPUT],
             'test' => ['A test global command', Command::CHAT_INPUT],
+            'unshare' => ['Takes your personal memory back from the call it was shared with.', Command::CHAT_INPUT],
         ], $commands->saved);
-        $this->assertContains('Global commands found: ForgetCommand, MemoryCommand, OptinCommand, OptoutCommand, RecallCommand, RecordCommand, SettingsCommand, StatsCommand, StopCommand, TestCommand', $this->logged());
+        $this->assertContains('Global commands found: ForgetCommand, MeetCommand, MemoryCommand, OptinCommand, OptoutCommand, RecallCommand, RecordCommand, SettingsCommand, ShareCommand, StatsCommand, StopCommand, TestCommand, UnshareCommand', $this->logged());
         $this->assertContains('Command record has been saved.', $this->logged());
 
         // Each command's interactions go to its class, and are logged: /test logs a greeting.
-        $this->assertSame(['forget', 'memory', 'optin', 'optout', 'recall', 'record', 'settings', 'stats', 'stop', 'test'], array_keys($commands->listeners));
+        $this->assertSame(['forget', 'meet', 'memory', 'optin', 'optout', 'recall', 'record', 'settings', 'share', 'stats', 'stop', 'test', 'unshare'], array_keys($commands->listeners));
         ($commands->listeners['test'])(new Interaction($app->discord, ['guild_id' => '100', 'channel_id' => '200', 'user' => ['id' => '555', 'username' => 'alice']], true));
         $this->assertContains(['/test used', ['guild' => '100', 'channel' => '200', 'user' => '555']], $this->loggedWithContext());
         $this->assertContains('Hello, World!', $this->logged());
@@ -219,7 +222,7 @@ final class ApplicationTest extends TestCase
         $app->prepareCommandClasses();
 
         $this->assertContains('Guild specific commands found: PingCommand', $this->logged());
-        $this->assertSame(['forget', 'memory', 'optin', 'optout', 'recall', 'record', 'settings', 'stats', 'stop', 'test'], array_keys($commands->saved));
+        $this->assertSame(['forget', 'meet', 'memory', 'optin', 'optout', 'recall', 'record', 'settings', 'share', 'stats', 'stop', 'test', 'unshare'], array_keys($commands->saved));
     }
 
     public function testDoesNotSaveCommandsDiscordAlreadyHas(): void
@@ -231,10 +234,10 @@ final class ApplicationTest extends TestCase
 
         $app->prepareCommandClasses();
 
-        $this->assertSame(['forget', 'memory', 'optin', 'optout', 'recall', 'settings', 'stats', 'test'], array_keys($commands->saved));
+        $this->assertSame(['forget', 'meet', 'memory', 'optin', 'optout', 'recall', 'settings', 'share', 'stats', 'test', 'unshare'], array_keys($commands->saved));
         $this->assertContains('Command record already exists.', $this->logged());
         $this->assertContains('Command stop already exists.', $this->logged());
-        $this->assertSame(['forget', 'memory', 'optin', 'optout', 'recall', 'record', 'settings', 'stats', 'stop', 'test'], array_keys($commands->listeners), 'Existing commands are still handled.');
+        $this->assertSame(['forget', 'meet', 'memory', 'optin', 'optout', 'recall', 'record', 'settings', 'share', 'stats', 'stop', 'test', 'unshare'], array_keys($commands->listeners), 'Existing commands are still handled.');
     }
 
     public function testSavesCommandsThatChanged(): void
@@ -269,12 +272,29 @@ final class ApplicationTest extends TestCase
         $this->assertSame('32', $settings['default_member_permissions']);
         $this->assertSame(32, $settings['options'][0]['max_length'], 'Discord stops a wake word that is too long from being typed.');
 
+        // /memory and /forget take up to four other people, to pick the memory shared with them.
+        foreach (['memory', 'forget'] as $command) {
+            $this->assertSame(
+                ['with' => Option::USER, 'with2' => Option::USER, 'with3' => Option::USER, 'with4' => Option::USER],
+                array_column($commands->payloads[$command]['options'], 'type', 'name'),
+            );
+            $this->assertSame([], array_filter(array_column($commands->payloads[$command]['options'], 'required')), 'None of them is needed.');
+        }
+
         // /recall can't be used without its question.
         $this->assertSame(
             [['type' => Option::STRING, 'name' => 'question', 'description' => 'What you want to know, e.g. "what did we decide about the launch date?"', 'required' => true]],
             $commands->payloads['recall']['options'],
         );
         $this->assertNull($commands->payloads['recall']['default_member_permissions'], 'Anyone who can use slash commands can use it.');
+
+        // /meet takes up to four people. Discord refuses a command whose required options don't come first.
+        $this->assertSame(
+            ['person' => Option::USER, 'person2' => Option::USER, 'person3' => Option::USER, 'person4' => Option::USER],
+            array_column($commands->payloads['meet']['options'], 'type', 'name'),
+        );
+        $this->assertSame([true, null, null, null], array_map(fn (array $option) => $option['required'] ?? null, $commands->payloads['meet']['options']));
+        $this->assertNull($commands->payloads['meet']['default_member_permissions'], 'Anyone who can use slash commands can use it.');
 
         // A command without them is sent as such, which also removes the ones Discord still has.
         $this->assertSame(
@@ -376,7 +396,7 @@ final class ApplicationTest extends TestCase
 
         $this->assertSame([], $commands->saved);
         $this->assertContains('Could not fetch the registered commands: Discord API unavailable', $this->logged());
-        $this->assertSame(['forget', 'memory', 'optin', 'optout', 'recall', 'record', 'settings', 'stats', 'stop', 'test'], array_keys($commands->listeners), 'Commands Discord already has keep working.');
+        $this->assertSame(['forget', 'meet', 'memory', 'optin', 'optout', 'recall', 'record', 'settings', 'share', 'stats', 'stop', 'test', 'unshare'], array_keys($commands->listeners), 'Commands Discord already has keep working.');
     }
 
     public function testLogsCommandsThatCannotBeSaved(): void

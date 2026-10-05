@@ -9,7 +9,11 @@ use InvalidArgumentException;
 use RuntimeException;
 
 /**
- * What the bot remembers about each person: a markdown file per person, written by Claude.
+ * What the bot remembers about each person, and about each group of people it has calls with:
+ * a markdown file for each, written by Claude.
+ *
+ * A person's memory is at `<directory>/<user ID>.md`. A group's is at `<directory>/groups/<the
+ * people's user IDs, from the lowest, joined with ->.md`, and belongs to exactly those people.
  *
  * The files stay on the bot's machine, where only the bot's user can read them.
  */
@@ -32,11 +36,41 @@ final readonly class Memory
     }
 
     /**
-     * @return string What is remembered about the person, or an empty string when nothing is.
+     * The people a memory belongs to, as the memory sees them: each once, from the lowest user ID.
+     *
+     * @param string|list<string> $people A user ID, or the user IDs of a group.
+     * @return list<string>
+     *
+     * @throws InvalidArgumentException When there is nobody, or something isn't a Discord user ID.
      */
-    public function read(string $userId): string
+    public static function people(string|array $people): array
     {
-        $path = $this->path($userId);
+        $people = array_values(array_unique((array) $people));
+
+        // The IDs become a file name, so they can only be what Discord's IDs are: digits.
+        foreach ($people as $userId) {
+            if (! ctype_digit($userId)) {
+                throw new InvalidArgumentException("Not a Discord user ID: {$userId}");
+            }
+        }
+
+        if ($people === []) {
+            throw new InvalidArgumentException('A memory belongs to somebody.');
+        }
+
+        // IDs grow with time, so a shorter ID is a lower one.
+        usort($people, fn (string $a, string $b) => strlen($a) <=> strlen($b) ?: strcmp($a, $b));
+
+        return $people;
+    }
+
+    /**
+     * @param string|list<string> $people A user ID, or the user IDs of a group.
+     * @return string What is remembered about them, or an empty string when nothing is.
+     */
+    public function read(string|array $people): string
+    {
+        $path = $this->path($people);
 
         return is_file($path) ? trim(file_get_contents($path)) : '';
     }
@@ -64,27 +98,29 @@ final readonly class Memory
     }
 
     /**
-     * Replaces what is remembered about the person.
+     * Replaces what is remembered about the person, or the group.
      *
+     * @param string|list<string> $people A user ID, or the user IDs of a group.
      * @return string The memory as it was saved: cut to the limit when it was longer.
      *
      * @throws RuntimeException When it can't be saved. The memory is then as it was.
      */
-    public function save(string $userId, string $memory): string
+    public function save(string|array $people, string $memory): string
     {
-        $path = $this->path($userId);
+        $path = $this->path($people);
+        $folder = dirname($path);
         $memory = self::cut(trim($memory));
 
-        if (! is_dir($this->directory)) {
-            @mkdir($this->directory, 0700, true);
+        if (! is_dir($folder)) {
+            @mkdir($folder, 0700, true);
         }
 
         // tempnam() creates a file only the bot's user can read (mode 0600), and renaming it
         // into place never leaves half a memory behind. When it can't create one in the folder,
         // it uses the system's temporary folder instead, where the memory has no place.
-        $temporary = @tempnam($this->directory, 'memory-');
+        $temporary = @tempnam($folder, 'memory-');
         $saved = $temporary !== false
-            && dirname($temporary) === realpath($this->directory)
+            && dirname($temporary) === realpath($folder)
             && file_put_contents($temporary, $memory . PHP_EOL) === strlen($memory . PHP_EOL)
             && rename($temporary, $path);
 
@@ -93,31 +129,60 @@ final readonly class Memory
                 unlink($temporary);
             }
 
-            throw new RuntimeException("The memory could not be saved in {$this->directory}.");
+            throw new RuntimeException("The memory could not be saved in {$folder}.");
         }
 
         return $memory;
     }
 
     /**
-     * Deletes what is remembered about the person.
+     * Deletes what is remembered about the person, or the group.
      *
+     * @param string|list<string> $people A user ID, or the user IDs of a group.
      * @return bool Whether there was anything to forget.
      */
-    public function forget(string $userId): bool
+    public function forget(string|array $people): bool
     {
-        $path = $this->path($userId);
+        $path = $this->path($people);
 
         return is_file($path) && unlink($path);
     }
 
-    private function path(string $userId): string
+    /**
+     * The groups a person has a memory with.
+     *
+     * @return list<list<string>> The user IDs of each group, the person's among them.
+     */
+    public function groups(string $userId): array
     {
-        // The ID becomes a file name, so it can only be what Discord's IDs are: digits.
-        if (! ctype_digit($userId)) {
-            throw new InvalidArgumentException("Not a Discord user ID: {$userId}");
+        $groups = [];
+
+        foreach (is_dir("{$this->directory}/groups") ? scandir("{$this->directory}/groups") : [] as $file) {
+            // Only what the bot saved: a group's memory is named after exactly its people.
+            if (preg_match('/^(\d+(?:-\d+)+)\.md$/', $file, $match) === 1) {
+                $people = explode('-', $match[1]);
+
+                if (in_array($userId, $people, true) && $match[1] === implode('-', self::people($people))) {
+                    $groups[] = $people;
+                }
+            }
         }
 
-        return "{$this->directory}/{$userId}.md";
+        // The smallest groups first, then by who is in them.
+        usort($groups, fn (array $a, array $b) => count($a) <=> count($b) ?: strcmp(implode('-', $a), implode('-', $b)));
+
+        return $groups;
+    }
+
+    /**
+     * @param string|list<string> $people
+     */
+    private function path(string|array $people): string
+    {
+        $people = self::people($people);
+
+        return count($people) === 1
+            ? "{$this->directory}/{$people[0]}.md"
+            : "{$this->directory}/groups/" . implode('-', $people) . '.md';
     }
 }
