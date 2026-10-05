@@ -4,6 +4,10 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Voice\VoiceSession;
+
+use function React\Async\await;
+
 final class MemoryUpdateTest extends VoiceTestCase
 {
     use ChatsInDirectMessages;
@@ -231,6 +235,77 @@ final class MemoryUpdateTest extends VoiceTestCase
         $this->chat('Are you still there?');
 
         $this->assertCount(2, $this->sent);
+    }
+
+    public function testAnUpdateFromACallWaitsForTheOneFromTheChatAndReadsWhatItSaved(): void
+    {
+        $this->memory()->save('555', self::MEMORY);
+        $session = $this->callAlone('I am learning to sail.');
+        $this->chat('We ship the beta on Friday.');
+
+        // The conversation pauses, and Claude is still writing the new memory when the call ends.
+        $this->holdMemoryUpdates();
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT_MEMORY' => $this->claudeSays(self::NEW_MEMORY)]);
+        $this->assertSame(1, $this->timers->elapse(600.0));
+        $this->waitUntil(fn () => $this->memoryUpdates() !== [], 'Claude to be asked for the new memory');
+        $ended = $session->stop();
+        $this->waitUntil(fn () => $this->logged('Summarized the call') !== [], 'the summary');
+        $this->runFor(0.3);
+        $this->assertCount(1, $this->memoryUpdates(), 'The call\'s update waits for the chat\'s.');
+
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT_MEMORY' => $this->claudeSays(self::NEW_MEMORY . "\n- Is learning to sail.")]);
+        $this->releaseMemoryUpdates();
+        await($ended);
+
+        // It got the memory the chat's update saved, so what the chat added isn't overwritten.
+        $this->assertSame(
+            "The current memory:\n\n" . self::NEW_MEMORY . "\n\n"
+            . "What was said since it was last updated:\n\nAlice: I am learning to sail.\n\nReply with the new memory.",
+            $this->untimed($this->memoryUpdates()[1]['prompt']),
+        );
+        $this->assertSame(self::NEW_MEMORY . "\n- Is learning to sail.", $this->memory()->read('555'));
+        $this->assertCount(2, $this->logged('Updated memory'));
+        $this->assertLogsNeverMention('Bananas', 'Friday', 'sail');
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testAnUpdateThatFailsDoesNotHoldUpTheNextOneOfTheSameMemory(): void
+    {
+        $this->memory()->save('555', self::MEMORY);
+        $session = $this->callAlone('I am learning to sail.');
+        $this->chat('We ship the beta on Friday.');
+
+        // Claude can't write the new memory the chat asks for, and the call ends before it says so.
+        $this->holdMemoryUpdates();
+        $this->setProcessEnv(['FAKE_CLAUDE_EXIT' => '1']);
+        $this->timers->elapse(600.0);
+        $this->waitUntil(fn () => $this->memoryUpdates() !== [], 'Claude to be asked for the new memory');
+        $this->setProcessEnv(['FAKE_CLAUDE_EXIT' => '0', 'FAKE_CLAUDE_OUTPUT_MEMORY' => $this->claudeSays(self::NEW_MEMORY)]);
+        $ended = $session->stop();
+        $this->waitUntil(fn () => $this->logged('Summarized the call') !== [], 'the summary');
+        $this->releaseMemoryUpdates();
+        await($ended);
+
+        $problems = $this->loggedProblems();
+        $this->assertCount(1, $problems);
+        $this->assertStringStartsWith('Could not update the memory: ', $problems[0]);
+        // The call's update was still made, from the memory as it was.
+        $this->assertStringStartsWith("The current memory:\n\n" . self::MEMORY . "\n\nWhat was said since", $this->memoryUpdates()[1]['prompt']);
+        $this->assertSame(self::NEW_MEMORY, $this->memory()->read('555'));
+        $this->assertSame([1], array_column($this->logged('Updated memory'), 'people'));
+    }
+
+    /**
+     * Alice is alone with the bot in a call, and says something in it, which is transcribed when the call ends.
+     */
+    private function callAlone(string $said): VoiceSession
+    {
+        $this->inCall('555');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => $said]);
+        $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
+
+        return $session;
     }
 
     /**

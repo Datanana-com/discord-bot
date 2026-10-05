@@ -50,6 +50,9 @@ abstract class VoiceTestCase extends TestCase
 
     protected const array MEMBERS = ['555' => 'Alice', '666' => 'Bob', '777' => 'Carol'];
 
+    /** Another bot of the server, which plays music in voice channels. Discord says of it that it is a bot. */
+    protected const array BOTS = ['1234' => 'Jukebox'];
+
     /** The bot's own user ID: it is in the voice channel too, but it doesn't count as someone there. */
     protected const string BOT_ID = '999';
 
@@ -62,6 +65,9 @@ abstract class VoiceTestCase extends TestCase
 
     /** Every time Claude's stand-in ran, one after the other: see {@see claudeCalls()}. */
     protected string $claudeCalls;
+
+    /** While this file exists, Claude's stand-in doesn't answer when it is asked for a new memory. */
+    protected string $claudeHold;
 
     /** Where the bot keeps its memories. */
     protected string $memories;
@@ -107,6 +113,7 @@ abstract class VoiceTestCase extends TestCase
         $this->claudeLog = "{$this->recordings}/claude.log";
         $this->claudeResume = "{$this->recordings}/claude.resume";
         $this->claudeCalls = "{$this->recordings}/claude.calls";
+        $this->claudeHold = "{$this->recordings}/claude.hold";
         $this->memories = "{$this->recordings}/memories";
         $this->voiceStates = new \ArrayObject();
 
@@ -129,6 +136,7 @@ abstract class VoiceTestCase extends TestCase
             'FAKE_CLAUDE_EXIT' => '0',
             'FAKE_CLAUDE_PAUSE' => '0',
             'FAKE_CLAUDE_RESUME' => $this->claudeResume,
+            'FAKE_CLAUDE_HOLD' => $this->claudeHold,
             'FAKE_WHISPER_OUTPUT' => 'Hey Claude, what time is it?',
         ]);
 
@@ -237,21 +245,25 @@ abstract class VoiceTestCase extends TestCase
     }
 
     /**
-     * What looks up a user by ID in the bot's caches, for the members of {@see MEMBERS} unless told otherwise.
+     * What looks up a user by ID in the bot's caches, for the members of {@see MEMBERS} and the
+     * bots of {@see BOTS} unless told otherwise. Like Discord, it only says of a bot that it is one.
      *
      * @param array<string, string> $names The display name of each user, by ID.
      */
-    protected function userNames(array $names = self::MEMBERS): object
+    protected function userNames(array $names = self::MEMBERS + self::BOTS): object
     {
-        return new class ($names) {
-            /** @param array<string, string> $names */
-            public function __construct(private array $names)
+        return new class ($names, self::BOTS) {
+            /**
+             * @param array<string, string> $names
+             * @param array<string, string> $bots
+             */
+            public function __construct(private array $names, private array $bots)
             {
             }
 
             public function get(string $key, string $id): ?object
             {
-                return isset($this->names[$id]) ? (object) ['displayname' => $this->names[$id]] : null;
+                return isset($this->names[$id]) ? (object) ['displayname' => $this->names[$id], 'bot' => isset($this->bots[$id]) ? true : null] : null;
             }
         };
     }
@@ -265,8 +277,16 @@ abstract class VoiceTestCase extends TestCase
         $this->voiceStates->exchangeArray([]);
 
         foreach ([self::BOT_ID, ...$userIds] as $userId) {
-            $this->voiceStates[] = (object) ['user_id' => $userId, 'channel_id' => '200'];
+            $this->voiceStates[] = $this->inVoice($userId);
         }
+    }
+
+    /**
+     * Someone's voice state: the voice channel they are in, and who they are when the bot's cache knows them.
+     */
+    protected function inVoice(string $userId, string $channelId = '200'): object
+    {
+        return (object) ['user_id' => $userId, 'channel_id' => $channelId, 'user' => $this->userNames()->get('id', $userId)];
     }
 
     /**
@@ -287,7 +307,7 @@ abstract class VoiceTestCase extends TestCase
     protected function joins(string $userId): void
     {
         $this->leaves($userId);
-        $this->voiceStates[] = (object) ['user_id' => $userId, 'channel_id' => '200'];
+        $this->voiceStates[] = $this->inVoice($userId);
     }
 
     /**
@@ -322,6 +342,27 @@ abstract class VoiceTestCase extends TestCase
         }
 
         return $calls;
+    }
+
+    /**
+     * @return list<array{prompt: string, system: string}> The times Claude Code was asked for a new memory, in order.
+     */
+    protected function memoryUpdates(): array
+    {
+        return array_values(array_filter($this->claudeCalls(), fn (array $call) => str_starts_with($call['system'], "You keep a Discord bot's memory")));
+    }
+
+    /**
+     * From now on, Claude is still writing a new memory it is asked for, until {@see releaseMemoryUpdates()}.
+     */
+    protected function holdMemoryUpdates(): void
+    {
+        touch($this->claudeHold);
+    }
+
+    protected function releaseMemoryUpdates(): void
+    {
+        unlink($this->claudeHold);
     }
 
     /**
