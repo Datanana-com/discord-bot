@@ -368,4 +368,53 @@ final class VoiceMemoryTest extends VoiceTestCase
         $this->assertSame([], $this->logged('Updated memory'));
         $this->assertSame([], $this->loggedProblems());
     }
+
+    public function testWhatIsSaidIsKeptWithWhoWasThereWhenItWasSaidNotWhenItIsTranscribedOrAnswered(): void
+    {
+        $this->memory()->save(['555', '666'], self::TRIP);
+        $this->memory()->save(['555', '666', '777'], '- The three of them run a chess club.');
+        $this->inCall('555', '666');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        // Alice and Bob both ask something, and transcribing takes a while: Bob's wait for Alice's. Carol joins meanwhile.
+        $this->setProcessEnv(['FAKE_WHISPER_DELAY' => '0.7']);
+        $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
+        $this->speak($vc, ssrc: 666, userId: '666', seconds: 1.0);
+        $this->waitUntil(fn () => count($this->logged('Utterance ended')) === 2, 'both utterances to end');
+        $this->joins('777');
+        $this->waitUntil(fn () => count($this->sent) === 2, 'both answers');
+
+        // Both were asked with the two of them in the call, so both got their memory, and not the three's.
+        foreach (array_column($this->claudeCalls(), 'prompt') as $prompt) {
+            $this->assertStringContainsString('Lisbon', $prompt);
+            $this->assertStringNotContainsString('chess', $prompt);
+        }
+
+        await($session->stop());
+
+        $this->assertSame(self::NEW_MEMORY, $this->memory()->read(['555', '666']));
+        $this->assertSame('- The three of them run a chess club.', $this->memory()->read(['555', '666', '777']), 'Carol was not there when it was said.');
+        $this->assertSame([2], array_column($this->logged('Updated memory'), 'people'));
+    }
+
+    public function testSkipsTheMemoriesStillWaitingWhenTheirSayingIsForgotten(): void
+    {
+        $this->inCall('555');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', 'Hey Claude, first.');
+        $this->joins('666');
+        $this->ask($vc, '555', 'Hey Claude, second.');
+
+        // Alice's own memory is being updated when the memory of her and Bob is forgotten: nothing is left to update it with.
+        $this->setProcessEnv(['FAKE_CLAUDE_DELAY' => '0.5']);
+        $ended = $session->stop();
+        $this->waitUntil(fn () => count($this->claudeCalls()) === 4, 'the first memory to be updated');
+        VoiceSession::forget(['555', '666']);
+        await($ended);
+
+        $this->assertCount(4, $this->claudeCalls(), 'Two answers, the summary, and the update of Alice\'s memory only.');
+        $this->assertSame(self::NEW_MEMORY, $this->memory()->read('555'));
+        $this->assertFileDoesNotExist("{$this->memories}/groups/555-666.md");
+        $this->assertSame([1], array_column($this->logged('Updated memory'), 'people'));
+    }
 }

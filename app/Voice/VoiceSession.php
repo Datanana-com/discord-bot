@@ -745,7 +745,6 @@ final class VoiceSession
         $people = explode('-', $key);
         // Gone when someone used /forget since.
         $said = $this->said[$key] ?? [];
-        unset($this->said[$key]);
 
         // Someone opted out since: what they said is no longer remembered.
         if ($said === [] || array_intersect($people, array_keys($this->optedOut)) !== []) {
