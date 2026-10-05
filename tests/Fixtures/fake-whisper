@@ -1,6 +1,12 @@
 #!/bin/sh
 # Stands in for whisper-cli: logs its arguments and prints a transcript with annotations.
+# It first waits for as long as the file FAKE_WHISPER_HOLD exists, for 10 seconds at most.
 for arg in "$@"; do printf 'arg=%s\n' "$arg"; done > "${FAKE_WHISPER_LOG:-/dev/null}"
+held=200
+while [ -e "${FAKE_WHISPER_HOLD:-}" ] && [ "$held" -gt 0 ]; do
+    sleep 0.05
+    held=$((held - 1))
+done
 sleep "${FAKE_WHISPER_DELAY:-0}"
 printf ' [BLANK_AUDIO]\n %s\n' "${FAKE_WHISPER_OUTPUT-Hey Claude, (coughs) what time is it?}"
 exit "${FAKE_WHISPER_EXIT:-0}"
