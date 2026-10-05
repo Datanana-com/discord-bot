@@ -132,7 +132,7 @@ final class VoiceClaudeTest extends VoiceTestCase
         $this->assertCount(1, $calls);
         $this->assertSame([false, self::PROMPT, '0'], [$calls[0]['waited'], $calls[0]['prompt'], $calls[0]['thinking']]);
         $this->assertSame(['> **Alice:** ' . self::QUESTION . "\nIt is a quarter past four."], $this->sent);
-        $this->assertCount(1, $this->played, 'And answered once.');
+        $this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');
         $this->assertSame(['No Claude Code process was waiting for the question'], $this->loggedProblems());
         $this->assertSame('555', $this->logged('No Claude Code process was waiting for the question')[0]['user']);
 
@@ -140,6 +140,7 @@ final class VoiceClaudeTest extends VoiceTestCase
         $this->waitUntil(fn () => count($this->waitingClaudes()) === 2, 'Claude Code to be started again');
         $this->runFor(0.5);
         $this->assertCount(2, $this->waitingClaudes());
+        $this->assertCount(1, $this->played, 'And the question was answered once.');
     }
 
     public function testAQuestionIsNotLostWhenTheWaitingProcessEndsWithoutWritingAnything(): void
@@ -154,6 +155,8 @@ final class VoiceClaudeTest extends VoiceTestCase
         $this->assertCount(1, $calls);
         $this->assertSame([false, self::PROMPT, '0'], [$calls[0]['waited'], $calls[0]['prompt'], $calls[0]['thinking']]);
         $this->assertSame(['> **Alice:** ' . self::QUESTION . "\nIt is a quarter past four."], $this->sent);
+        $this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');
+        $this->runFor(0.3);
         $this->assertCount(1, $this->played, 'Nothing was spoken twice.');
 
         // Which is logged, without the question.
