@@ -27,7 +27,8 @@ final class Shell
      * @param array<string, string>|null $env Environment variables, or null to inherit the bot's.
      * @param float $timeout Seconds before the program is killed.
      * @return PromiseInterface<string> Resolves with stdout; rejects with a {@see CommandFailedException}
-     *                                  when the program fails or times out.
+     *                                  when the program fails or times out. Its message quotes stderr, never
+     *                                  stdout, which can hold something that must not be logged.
      */
     public static function run(
         array $command,
@@ -50,8 +51,7 @@ final class Shell
      * @param array<string, string>|null $env Environment variables, or null to inherit the bot's.
      * @param float $timeout Seconds before the program is killed.
      * @return PromiseInterface<null> Resolves when the program is done; rejects with a {@see CommandFailedException}
-     *                                when it fails or times out, or with what $onLine threw. The exception never
-     *                                quotes stdout: unlike with run(), it may be something that must not be logged.
+     *                                when it fails or times out, or with what $onLine threw.
      */
     public static function stream(
         array $command,
@@ -62,6 +62,29 @@ final class Shell
         float $timeout = 120.0,
     ): PromiseInterface {
         return self::start($command, $onLine, $input, $cwd, $env, $timeout);
+    }
+
+    /**
+     * Starts a program that keeps running, to give it its input later, and more than once.
+     *
+     * @param list<string> $command Program followed by its arguments; each one is shell-escaped.
+     * @param (callable(string $line): void)|null $onLine Called with each line of stdout, without its line ending.
+     *                                                    When it throws, the program is stopped.
+     * @param (callable(string $line): mixed)|null $onErrorLine Called with each line of stderr, likewise. It returns
+     *                                                          true for a line it expected. The end of what the
+     *                                                          program said since the last such line is kept, to
+     *                                                          say why it failed.
+     * @param string|null $cwd Working directory, or null for the bot's own.
+     * @param array<string, string>|null $env Environment variables, or null to inherit the bot's.
+     */
+    public static function open(
+        array $command,
+        ?callable $onLine = null,
+        ?callable $onErrorLine = null,
+        ?string $cwd = null,
+        ?array $env = null,
+    ): Program {
+        return new Program($command, $onLine === null ? null : $onLine(...), $onErrorLine === null ? null : $onErrorLine(...), $cwd, $env);
     }
 
     /**
@@ -146,7 +169,8 @@ final class Shell
                 $signal !== null => "was killed by signal {$signal}",
                 default => 'exited with code ' . ($code ?? 'unknown'),
             };
-            $output = trim($stderr) !== '' ? trim($stderr) : trim($stdout);
+            // Never stdout: it can hold what someone said, like whisper's transcript, and the message is logged.
+            $output = trim($stderr);
             $message = "{$command[0]} {$reason}" . ($output !== '' ? ': ' . mb_substr($output, 0, 500) : '');
             $deferred->reject(new CommandFailedException($message, $stdout));
         });

@@ -6,11 +6,38 @@
 # FAKE_CLAUDE_LOG holds the last call. When FAKE_CLAUDE_CALLS is set, every call is also appended to it.
 # A call to update a memory prints FAKE_CLAUDE_OUTPUT_MEMORY, when it is set, instead. It first
 # waits for as long as the file FAKE_CLAUDE_HOLD exists, for 10 seconds at most.
+#
+# With --input-format stream-json it waits for its prompt, like Claude Code then does: it prints and logs
+# nothing until a line arrives on its stdin, answers it, and ends once its stdin is closed. Its PID is
+# appended to FAKE_CLAUDE_WAITING when it starts. With FAKE_CLAUDE_WAITING_LEAVES it ends at once instead
+# of waiting, and with FAKE_CLAUDE_WAITING_FAILS it ends with code 1 when its prompt arrives, having
+# printed nothing. With FAKE_CLAUDE_WAITING_GREETS it prints that line when it starts, as a Claude Code that
+# says something about its session before it is asked anything would. A test may set these variables after
+# the process started: it reads them again from the file FAKE_ENV, when there is one, once its prompt is there.
+waits=
+for arg in "$@"; do
+    if [ "$arg" = --input-format ]; then waits=1; fi
+done
+if [ -n "$waits" ]; then
+    if [ -n "${FAKE_CLAUDE_WAITING:-}" ]; then printf '%s\n' "$$" >> "$FAKE_CLAUDE_WAITING"; fi
+    if [ -n "${FAKE_CLAUDE_WAITING_LEAVES:-}" ]; then exit 0; fi
+    if [ -n "${FAKE_CLAUDE_WAITING_GREETS:-}" ]; then printf '%s\n' "$FAKE_CLAUDE_WAITING_GREETS"; fi
+    # Without a prompt, Claude Code ends quietly once its stdin is closed.
+    IFS= read -r input || exit 0
+    if [ -r "${FAKE_ENV:-}" ]; then . "$FAKE_ENV"; fi
+    if [ -n "${FAKE_CLAUDE_WAITING_FAILS:-}" ]; then exit 1; fi
+else
+    input=$(cat)
+fi
 {
+    printf 'pid=%s\n' "$$"
     printf 'cwd=%s\n' "$PWD"
     printf 'api_key=%s\n' "${ANTHROPIC_API_KEY-unset}"
+    printf 'thinking=%s\n' "${MAX_THINKING_TOKENS-unset}"
+    printf 'nonessential_traffic=%s\n' "${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC-unset}"
+    printf 'autoupdater=%s\n' "${DISABLE_AUTOUPDATER-unset}"
     for arg in "$@"; do printf 'arg=%s\n' "$arg"; done
-    printf 'stdin=%s\n' "$(cat)"
+    printf 'stdin=%s\n' "$input"
 } > "${FAKE_CLAUDE_LOG:-/dev/null}"
 if [ -n "${FAKE_CLAUDE_CALLS:-}" ]; then
     { printf '=== call ===\n'; cat "$FAKE_CLAUDE_LOG"; } >> "$FAKE_CLAUDE_CALLS"
@@ -41,4 +68,6 @@ printf '%s' "$output" | while IFS= read -r line || [ -n "$line" ]; do
     done
     ticks=0
 done
+# Claude Code keeps reading messages until its stdin is closed.
+if [ -n "$waits" ]; then cat > /dev/null; fi
 exit "${FAKE_CLAUDE_EXIT:-0}"
