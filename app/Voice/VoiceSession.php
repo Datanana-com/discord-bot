@@ -293,7 +293,8 @@ final class VoiceSession
     {
         $words = array_map(
             fn (string $word) => preg_quote($word, '/'),
-            preg_split('/\s+/u', $wakeWord, flags: PREG_SPLIT_NO_EMPTY),
+            // What has no letters or numbers, like the dash in "Hey - Jarvis", is between words, where nothing counts.
+            preg_grep('/[\p{L}\p{N}]/u', preg_split('/\s+/u', $wakeWord, flags: PREG_SPLIT_NO_EMPTY)),
         );
 
         // Between two of its words: anything but letters, their accents, and numbers. Around it too:

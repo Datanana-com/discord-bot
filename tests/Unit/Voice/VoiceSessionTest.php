@@ -45,6 +45,10 @@ final class VoiceSessionTest extends TestCase
         yield 'only the first word' => ['Okay, play some music', 'okay computer', false];
         yield 'only part of the first word' => ['Tokay, computer', 'okay computer', false];
         yield 'only part of the last word' => ['Okay, computers are slow', 'okay computer', false];
+        yield 'a hyphen inside a word' => ['Jean-Luc, are you there?', 'jean-luc', true];
+        yield 'a hyphen inside a word is part of it' => ['Jean Luc, are you there?', 'jean-luc', false];
+        yield 'an apostrophe inside a word is part of it' => ['O Brien, are you there?', "o'brien", false];
+        yield 'a dash between the words of the wake word' => ['Hey, Jarvis, what time is it?', 'hey - jarvis', true];
         yield 'an accent that belongs to the first word' => ["Jose\u{301} Maria, what time is it?", 'jose maria', false];
         yield 'a word that ends with a vowel sign' => ['राजा, समय क्या है?', 'राजा', true];
         yield 'only part of a word that goes on with a vowel sign' => ['राजा आ गया', 'राज', false];
