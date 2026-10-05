@@ -143,7 +143,7 @@ Discord doesn't let bots join the calls of direct messages and group DMs, only v
 - The bot replies with a link to the channel, and mentions the people you picked in a message of its own, so that Discord notifies them. Nobody else is pinged.
 - The meeting ends when the last person leaves the channel: the bot stops recording, as with `/stop`, and deletes the channel. Bots don't count as people. A channel nobody is in 5 minutes after it was made is deleted too.
 - Like with `/record`, Claude's answers and the meeting's summary are posted in the channel where `/meet` was used: the meeting's own chat is deleted with its channel. Use `/meet` in a channel only the people in the meeting can read when nobody else should see them. The meeting is saved with the server's other calls, so `/recall` answers from it as well.
-- `/meet` checks what `/record` checks, and refuses while a call is being recorded in the server: Discord lets a bot be in one voice channel per server. `/stop` during a meeting stops the recording, and the channel stays until everyone has left it.
+- `/meet` checks what `/record` checks, and refuses while a call is being recorded in the server, or the bot is joining a channel to record one: Discord lets a bot be in one voice channel per server. `/stop` during a meeting stops the recording, and the channel stays until everyone has left it.
 - The bot needs the **Manage Channels** permission to make and delete the channel, and says so when it lacks it.
 
 ### Direct messages and memory

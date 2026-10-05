@@ -70,6 +70,9 @@ final class VoiceSession
     /** @var array<string, self> Sessions that aren't over, by session ID: active, or stopped and still finishing. */
     private static array $unfinished = [];
 
+    /** @var array<string, true> The servers a call is about to start in, by guild ID. */
+    private static array $starting = [];
+
     private UtteranceSplitter $splitter;
 
     private TimerInterface $ticker;
@@ -164,6 +167,26 @@ final class VoiceSession
     public static function forGuild(string $guildId): ?self
     {
         return self::$sessions[$guildId] ?? null;
+    }
+
+    /**
+     * Whether a call is about to start in the server: forGuild() only knows a call once the bot has joined its channel.
+     */
+    public static function isStarting(string $guildId): bool
+    {
+        return isset(self::$starting[$guildId]);
+    }
+
+    /**
+     * Says that a call is about to start in the server, or that it no longer is: it started, or couldn't.
+     */
+    public static function starting(string $guildId, bool $starting = true): void
+    {
+        if ($starting) {
+            self::$starting[$guildId] = true;
+        } else {
+            unset(self::$starting[$guildId]);
+        }
     }
 
     /**

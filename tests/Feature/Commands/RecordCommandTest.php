@@ -15,6 +15,7 @@ use Discord\Parts\Channel\Thread\Thread;
 use Discord\Voice\Manager;
 use Illuminate\Database\Capsule\Manager as DB;
 use Monolog\Logger;
+use React\Promise\Deferred;
 use ReflectionClass;
 use RuntimeException;
 
@@ -187,6 +188,37 @@ final class RecordCommandTest extends CommandTestCase
         $this->record($this->interaction($channel));
 
         $this->assertRefused('I am already recording in this server. Use /stop first.');
+    }
+
+    public function testRefusesWhileTheBotIsStillJoiningForAnotherCall(): void
+    {
+        $channel = $this->voiceChannel();
+        $joining = new Deferred();
+        $joins = 0;
+        $this->discord->method('joinVoiceChannel')->willReturnCallback(function () use ($joining, &$joins) {
+            // The bot joins for the first call, and is still joining for the one after it.
+            return ++$joins === 1 ? $joining->promise() : (new Deferred())->promise();
+        });
+        $this->record($this->interaction($channel));
+
+        // Until the bot has joined, there is no call to find in the server.
+        $this->record($this->interaction($channel));
+
+        $this->assertSame([['content' => 'I am already joining a voice channel in this server.', 'ephemeral' => true]], $this->responses);
+        $this->assertSame(1, $joins);
+
+        // Once it has, it is the call that is in the way.
+        $joining->resolve($this->voiceClient($channel));
+        $this->record($this->interaction($channel));
+
+        $this->assertSame('I am already recording in this server. Use /stop first.', $this->responses[1]['content']);
+
+        // And once that call is over, nothing is.
+        VoiceSession::forGuild(self::GUILD_ID)->stop();
+        $this->record($this->interaction($channel));
+
+        $this->assertCount(2, $this->responses);
+        $this->assertSame(2, $joins);
     }
 
     public function testRefusesWhenVoiceIsUnavailable(): void

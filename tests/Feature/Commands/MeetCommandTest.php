@@ -6,6 +6,7 @@ namespace Tests\Feature\Commands;
 
 use App\Application;
 use App\Commands\Global\MeetCommand;
+use App\Commands\Global\RecordCommand;
 use App\Commands\Global\StopCommand;
 use App\Voice\Meeting;
 use App\Voice\VoiceSession;
@@ -21,12 +22,13 @@ use Discord\Parts\Guild\Guild;
 use Discord\Parts\Interactions\ApplicationCommand;
 use Discord\Parts\Interactions\Interaction;
 use Discord\Parts\Part;
-use Discord\Parts\Permissions\RolePermission;
 use Discord\Parts\WebSockets\VoiceStateUpdate as VoiceState;
 use Discord\Voice\Manager;
 use Discord\WebSockets\Event;
+use Monolog\Handler\AbstractHandler;
 use Monolog\Handler\NullHandler;
 use Monolog\Logger;
+use Monolog\LogRecord;
 use PHPUnit\Framework\Attributes\DataProvider;
 use React\EventLoop\LoopInterface;
 use React\EventLoop\StreamSelectLoop;
@@ -59,8 +61,6 @@ final class MeetCommandTest extends CommandTestCase
     private const string CATEGORY = '40';
 
     /** Bits of the permissions, as Discord numbers them. */
-    private const int MANAGE_CHANNELS = 1 << 4;
-
     private const int VIEW_CHANNEL = 1 << 10;
 
     private const int CONNECT = 1 << 20;
@@ -84,9 +84,6 @@ final class MeetCommandTest extends CommandTestCase
 
     /** The server's channels: what was made and deleted in it, and what Discord answers. */
     private object $channels;
-
-    /** The permissions the bot has in the server, or null when the bot doesn't know them. */
-    private ?int $botPermissions = self::MANAGE_CHANNELS | self::VIEW_CHANNEL | self::CONNECT | self::SPEAK;
 
     /** @var list<array{Channel, bool, bool}> Calls to joinVoiceChannel: channel, mute, deaf. */
     private array $joins = [];
@@ -696,17 +693,7 @@ final class MeetCommandTest extends CommandTestCase
 
     public function testSaysSoWhenTheBotMayNotManageChannels(): void
     {
-        $this->botPermissions = self::VIEW_CHANNEL | self::CONNECT | self::SPEAK;
-
-        $this->meet(['666']);
-
-        $this->assertRefused(self::MISSING_PERMISSION);
-    }
-
-    public function testSaysSoWhenDiscordRefusesToMakeTheChannel(): void
-    {
-        // The bot doesn't know what it may do, as when Discord hasn't sent its roles yet.
-        $this->botPermissions = null;
+        // Discord is asked, and refuses: the bot's roles alone don't tell, as a category can allow what they don't.
         $this->channels->makeError = new NoPermissionsException('Forbidden - {"message": "Missing Permissions", "code": 50013}');
 
         $this->meet(['666']);
@@ -728,6 +715,77 @@ final class MeetCommandTest extends CommandTestCase
         $this->assertSame(['Could not make the meeting\'s channel: Maximum number of server channels reached (500)'], $this->updates);
         $this->assertSame([], $this->joins);
         $this->assertSame(['Could not make the meeting\'s channel: Maximum number of server channels reached (500)'], $this->loggedProblems());
+    }
+
+    public function testRefusesWhileTheBotIsStillJoiningAnotherCall(): void
+    {
+        $joining = new Deferred();
+        $this->joinsWith($joining->promise());
+        $this->meet(['666']);
+
+        // Until the bot has joined, there is no call to find in the server, and Discord lets a bot be in one voice channel there.
+        $this->meet(['777']);
+        (new RecordCommand($this->discord))->handle($this->interaction($this->voiceChannel()));
+
+        $refusal = ['content' => 'I am already joining a voice channel in this server.', 'ephemeral' => true];
+        $this->assertSame([$refusal, $refusal], $this->responses);
+        $this->assertCount(1, $this->channels->made, 'No channel is made to be deleted right away.');
+        $this->assertCount(1, $this->joins);
+        $this->assertSame([['guild' => self::GUILD_ID]], $this->logged('/meet refused: I am already joining a voice channel in this server.'));
+
+        // In another server, nothing is in the way.
+        (new RecordCommand($this->discord))->handle($this->interaction($this->voiceChannel(), guildId: '101'));
+
+        $this->assertCount(2, $this->responses);
+        $this->assertCount(2, $this->joins);
+
+        // Once the bot could not join, nothing is in the way of another meeting.
+        $joining->reject(new RuntimeException('Voice client closed.'));
+        $this->meet(['777']);
+
+        $this->assertCount(2, $this->channels->made);
+        $this->assertCount(2, $this->responses);
+    }
+
+    public function testAnotherMeetingCanStartOnceOneIsOver(): void
+    {
+        // The bot joins the first meeting, and is still joining the second one.
+        $this->discord->method('joinVoiceChannel')->willReturnOnConsecutiveCalls(
+            resolve($this->voiceClient($this->channels->channel)),
+            (new Deferred())->promise(),
+        );
+        $this->meet(['666']);
+        $this->joins('666');
+        $this->leaves('666');
+
+        $this->meet(['777']);
+
+        $this->assertSame([], $this->responses, 'It is not refused.');
+        $this->assertCount(2, $this->channels->made);
+    }
+
+    public function testDeletesTheChannelWhenTheCallCannotBeStopped(): void
+    {
+        // It expects to be closed exactly once.
+        $this->joinsWith(resolve($this->voiceClient($this->channels->channel, connected: true)));
+        $this->meet(['666']);
+        $this->joins('666');
+        // The disk is full: stopping the call fails when it logs that it stopped.
+        $this->discord->getLogger()->pushHandler(new class () extends AbstractHandler {
+            public function handle(LogRecord $record): bool
+            {
+                return $record->message === 'Voice session stopped' ? throw new RuntimeException('No space left on device') : false;
+            }
+        });
+
+        $this->voiceState('666', channel: null);
+
+        // Nothing else would delete a channel that only its people see.
+        $this->assertSame([self::MEETING], $this->channels->deleted);
+        $this->assertSame(
+            ['Event "followMeetings" failed with the following error: No space left on device'],
+            preg_grep('/^Event "/', $this->loggedProblems()),
+        );
     }
 
     public function testRefusesOutsideAServer(): void
@@ -860,7 +918,7 @@ final class MeetCommandTest extends CommandTestCase
     }
 
     /**
-     * The server: its channels are {@see $channels}, and the bot may do in it what {@see $botPermissions} say.
+     * The server: its channels are {@see $channels}.
      */
     private function guild(): Guild
     {
@@ -871,16 +929,13 @@ final class MeetCommandTest extends CommandTestCase
             }
         };
 
-        $guild = static::getStubBuilder(Guild::class)->disableOriginalConstructor()->onlyMethods(['__get', 'getBotPermissions'])->getStub();
+        $guild = static::getStubBuilder(Guild::class)->disableOriginalConstructor()->onlyMethods(['__get'])->getStub();
         $guild->method('__get')->willReturnCallback(fn (string $name) => match ($name) {
             'id' => self::GUILD_ID,
             'channels' => $this->channels,
             'members' => $members,
             default => null,
         });
-        $guild->method('getBotPermissions')->willReturnCallback(
-            fn () => $this->botPermissions === null ? null : new RolePermission($this->client, ['bitwise' => $this->botPermissions], true),
-        );
 
         return $guild;
     }
@@ -937,12 +992,20 @@ final class MeetCommandTest extends CommandTestCase
      */
     private function joins(string $userId, ?string $channel = self::MEETING, ?bool $bot = false, string $guild = self::GUILD_ID): void
     {
+        $this->voiceState($userId, $channel, $bot, $guild);
+        $this->assertSame([], preg_grep('/^(Event "|Error while handling event)/', $this->loggedProblems()), 'The event was handled.');
+    }
+
+    /**
+     * Discord says which voice channel someone is in now, or that they are in none.
+     */
+    private function voiceState(string $userId, ?string $channel, ?bool $bot = false, string $guild = self::GUILD_ID): void
+    {
         $user = ['id' => $userId, 'username' => strtolower(self::USERS[$userId])] + ($bot === null ? [] : ['bot' => $bot]);
         $state = new VoiceState($this->client, ['guild_id' => $guild, 'channel_id' => $channel, 'user_id' => $userId, 'member' => (object) ['user' => (object) $user]], true);
 
         // Through the bot as it starts, which has app/Events/VoiceStateUpdate.php handle the event.
         $this->app->discord->emit(Event::VOICE_STATE_UPDATE, [$state, $this->discord]);
-        $this->assertSame([], preg_grep('/^(Event "|Error while handling event)/', $this->loggedProblems()), 'The event was handled.');
     }
 
     /**

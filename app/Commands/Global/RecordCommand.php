@@ -33,7 +33,7 @@ final class RecordCommand extends CommandAbstract
         }
 
         // Joining can take longer than the 3 seconds Discord waits for a response.
-        $interaction->acknowledgeWithResponse()
+        $this->starting($interaction, fn () => $interaction->acknowledgeWithResponse()
             ->then(fn () => $this->record($interaction, $voiceChannel, $interaction->channel ?? $voiceChannel, $settings))
             ->then(
                 fn (VoiceSession $session) => $interaction->updateOriginalResponse(MessageBuilder::new()->setContent(
@@ -42,6 +42,6 @@ final class RecordCommand extends CommandAbstract
                     . ' Use /stop to end the recording, or /optout if you don\'t want to be recorded.'
                 )),
                 fn (Throwable $e) => $interaction->updateOriginalResponse(MessageBuilder::new()->setContent($e->getMessage())),
-            );
+            ));
     }
 }

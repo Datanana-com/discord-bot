@@ -130,6 +130,8 @@ abstract class VoiceTestCase extends TestCase
     {
         // A call is summarized after it stopped, which must be over before its recordings are deleted.
         await(all(array_map(fn (VoiceSession $session) => $session->stop(), VoiceSession::unfinished())));
+        // A call a test left starting, as when the bot never got to join, is not starting in the next test.
+        (new ReflectionProperty(VoiceSession::class, 'starting'))->setValue(null, []);
 
         foreach ($this->originalEnv as $name => $value) {
             if (str_starts_with($name, 'FAKE_')) {

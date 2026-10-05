@@ -29,6 +29,8 @@ trait RecordsCalls
     {
         return match (true) {
             VoiceSession::forGuild((string) $interaction->guild_id) !== null => 'I am already recording in this server. Use /stop first.',
+            // Discord lets a bot be in one voice channel per server, and joining one takes a while.
+            VoiceSession::isStarting((string) $interaction->guild_id) => 'I am already joining a voice channel in this server.',
             $this->discord->voice === null => 'Voice is not available: libdave or ext-ffi could not be loaded. Check the bot logs.',
             default => VoiceSession::missingSetup($settings) ?? $this->optOutsProblem($interaction),
         };
@@ -41,6 +43,19 @@ trait RecordsCalls
     {
         $this->log->info("{$command} refused: {$problem}", ['guild' => $interaction->guild_id]);
         $interaction->respondWithMessage(MessageBuilder::new()->setContent($problem), ephemeral: true);
+    }
+
+    /**
+     * Has other calls refused in the server until this one has started, or couldn't.
+     *
+     * @param callable(): PromiseInterface<mixed> $start Starts the call. Its promise settles once it is known how that went.
+     */
+    private function starting(Interaction $interaction, callable $start): void
+    {
+        $guildId = (string) $interaction->guild_id;
+        VoiceSession::starting($guildId);
+
+        $start()->finally(fn () => VoiceSession::starting($guildId, false));
     }
 
     /**

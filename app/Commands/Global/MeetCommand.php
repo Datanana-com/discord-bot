@@ -60,10 +60,7 @@ final class MeetCommand extends CommandAbstract
         // Read once, so the call starts with the settings that are checked and announced here.
         $settings = (new GuildSettings($this->log))->for((string) $interaction->guild_id);
 
-        // What the bot may do is unknown until Discord has sent its roles: making the channel then tells.
-        $problem = $guild->getBotPermissions()?->manage_channels === false
-            ? self::MISSING_PERMISSION
-            : $this->recordingProblem($interaction, $settings);
+        $problem = $this->recordingProblem($interaction, $settings);
 
         if ($problem !== null) {
             $this->refuse($interaction, '/meet', $problem);
@@ -74,7 +71,7 @@ final class MeetCommand extends CommandAbstract
         $invited = $this->invited($interaction);
 
         // Making the channel and joining it can take longer than the 3 seconds Discord waits for a response.
-        $interaction->acknowledgeWithResponse()
+        $this->starting($interaction, fn () => $interaction->acknowledgeWithResponse()
             ->then(fn () => $guild->channels->save($guild->channels->create($this->channel($interaction, $guild, $invited))))
             ->then(
                 fn (Channel $channel) => $this->meet($interaction, $guild, $channel, $invited, $settings),
@@ -82,11 +79,12 @@ final class MeetCommand extends CommandAbstract
                     $this->log->error('Could not make the meeting\'s channel: ' . $e->getMessage(), ['guild' => $interaction->guild_id]);
 
                     return $interaction->updateOriginalResponse(MessageBuilder::new()->setContent(
-                        // Discord also refuses when the bot lacks a permission it gives the people in the meeting.
+                        // Only Discord knows whether the bot may: a category can allow what its roles don't. It also
+                        // refuses when the bot lacks a permission it gives the people in the meeting.
                         $e instanceof NoPermissionsException ? self::MISSING_PERMISSION : 'Could not make the meeting\'s channel: ' . $e->getMessage()
                     ));
                 },
-            );
+            ));
     }
 
     /**

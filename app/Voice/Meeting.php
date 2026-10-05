@@ -106,16 +106,19 @@ final class Meeting
         unset(self::$meetings[$this->channel->id]);
         $this->discord->getLoop()->cancelTimer($this->timer);
 
-        // The meeting only started once the bot joined: there is no call when it couldn't.
-        if ($this->session !== null) {
-            // Already stopped when someone used /stop, or disconnected the bot.
-            $this->session->stop();
-            $this->log('info', 'Meeting ended');
+        try {
+            // The meeting only started once the bot joined: there is no call when it couldn't.
+            if ($this->session !== null) {
+                // Already stopped when someone used /stop, or disconnected the bot.
+                $this->session->stop();
+                $this->log('info', 'Meeting ended');
+            }
+        } finally {
+            // Also when the call couldn't be stopped: nothing else would delete a channel only its people see.
+            $this->guild->channels->delete($this->channel)->catch(function (Throwable $e) {
+                $this->log('warning', 'Could not delete the meeting\'s channel: ' . $e->getMessage());
+            });
         }
-
-        $this->guild->channels->delete($this->channel)->catch(function (Throwable $e) {
-            $this->log('warning', 'Could not delete the meeting\'s channel: ' . $e->getMessage());
-        });
     }
 
     private function see(VoiceStateUpdate $state): void
