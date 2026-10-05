@@ -85,6 +85,9 @@ abstract class VoiceTestCase extends TestCase
     /** @var list<string> Files played into the call. */
     protected array $played = [];
 
+    /** @var list<string> The files among them that were being played when the voice client was told to stop. */
+    protected array $cutOff = [];
+
     /** When set, posting in the text channel fails with this error. */
     protected ?\Throwable $sendError = null;
 
@@ -395,7 +398,7 @@ abstract class VoiceTestCase extends TestCase
      */
     protected function voiceClient(Channel $channel, bool $connected = false, bool $findsReceiveStreams = true): VoiceClient
     {
-        $methods = ['createDecoder', 'playFile', 'isReady', 'close', ...($findsReceiveStreams ? [] : ['getReceiveStream'])];
+        $methods = ['createDecoder', 'playFile', 'stop', 'isReady', 'close', ...($findsReceiveStreams ? [] : ['getReceiveStream'])];
 
         if ($connected) {
             $vc = $this->getMockBuilder(VoiceClient::class)->disableOriginalConstructor()->onlyMethods($methods)->getMock();
@@ -419,19 +422,36 @@ abstract class VoiceTestCase extends TestCase
             $vc->method('getReceiveStream')->willReturn(null);
         }
 
-        $busy = false;
+        // The file being played, when one is.
+        $busy = null;
         $vc->method('playFile')->willReturnCallback(function (string $file) use (&$busy): PromiseInterface {
             // Like the voice library, which plays one file at a time.
-            if ($busy) {
+            if ($busy !== null) {
                 return reject(new AudioAlreadyPlayingException());
             }
 
-            $busy = true;
+            $busy = $file;
             $this->played[] = $file;
+            $finished = new Deferred();
 
-            return ($this->playing ?? $this->after($this->playSeconds))->then(function () use (&$busy) {
-                $busy = false;
+            ($this->playing ?? $this->after($this->playSeconds))->then(function () use (&$busy, $file, $finished) {
+                // Like the voice library, which never says a file finished once it was told to stop playing it.
+                if ($busy === $file) {
+                    $busy = null;
+                    $finished->resolve(null);
+                }
             });
+
+            return $finished->promise();
+        });
+        $vc->method('stop')->willReturnCallback(function () use (&$busy): void {
+            // Like the voice library.
+            if ($busy === null) {
+                throw new \RuntimeException('Audio must be playing to stop it.');
+            }
+
+            $this->cutOff[] = $busy;
+            $busy = null;
         });
         // The ffmpeg decoder process is not needed: PCM comes from the Opus decoder below.
         $vc->method('createDecoder')->willReturnCallback(function (object $ss) use ($vc): void {

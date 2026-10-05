@@ -162,6 +162,42 @@ final class VoiceCallTest extends VoiceTestCase
         $this->assertSame([], $this->loggedProblems());
     }
 
+    public function testStopsSpeakingOverTheNetworkWhenTheAnswerIsTalkedOver(): void
+    {
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is a quarter past four. ', 'Time for a cup of tea.')]);
+        $session = VoiceSession::start($vc = $this->connectedVoiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $frames = $this->opusFrames(440);
+
+        $this->announceSpeaker($vc, self::ALICE_SSRC, '555');
+        $this->sendAudio($frames, from: self::ALICE_SSRC, to: $this->udp->getLocalAddress());
+        $this->waitUntil(fn () => count($this->sentPackets) >= 5, 'the bot to start speaking', timeout: 20.0);
+
+        // The bot has just started on its first sentence, a second of tone, when Alice says something else, for a second.
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => 'Sorry, never mind.']);
+        $this->sendAudio($frames, from: self::ALICE_SSRC, to: $this->udp->getLocalAddress(), offset: count($frames));
+        $this->waitUntil(fn () => count($this->logged('Transcribed')) === 2, 'what Alice said over the answer to be transcribed', timeout: 20.0);
+        await($session->stop());
+
+        // The real voice client was stopped in the middle of the sentence, and never given the second one.
+        $this->assertCount(1, $this->logged('Interrupted'));
+        $this->assertSame(
+            [VoiceClient::MICROPHONE, VoiceClient::NOT_SPEAKING],
+            array_column(array_column($this->gatewayPayloads, 'd'), 'speaking'),
+        );
+        $answer = $this->decodeSentAudio();
+        $this->assertGreaterThan(0.2, $this->seconds($answer), 'The bot had started its answer.');
+        $this->assertLessThan(0.95, $this->seconds($answer), 'It did not finish its first sentence.');
+
+        // The call went on, though the voice client never said the sentence was over: what Alice said was
+        // transcribed, after the answer she interrupted, which is in the transcript and the text chat as a whole.
+        $this->assertMatchesRegularExpression(
+            '/\] Claude: It is a quarter past four\. Time for a cup of tea\.\n\[[\d:]+\] Alice: Sorry, never mind\.\n$/',
+            $this->transcript($session),
+        );
+        $this->assertSame("> **Alice:** Hey Claude, what time is it?\nIt is a quarter past four. Time for a cup of tea.", $this->sent[0]);
+        $this->assertSame([], $this->loggedProblems());
+    }
+
     public function testKeepsNoCopyOfAnyonesAudioInTheTempFolder(): void
     {
         // This is about the audio: whisper hears nothing in it.
@@ -280,11 +316,13 @@ final class VoiceCallTest extends VoiceTestCase
      * Sends Opus frames from the media server like Discord does: encrypted, one every 20 ms.
      *
      * @param list<string> $frames
+     * @param int $offset How many frames the speaker has sent before these.
      */
-    private function sendAudio(array $frames, int $from, string $to): void
+    private function sendAudio(array $frames, int $from, string $to, int $offset = 0): void
     {
         foreach ($frames as $i => $frame) {
-            Loop::addTimer($i * 0.02, function () use ($frame, $i, $from, $to) {
+            Loop::addTimer($i * 0.02, function () use ($frame, $i, $from, $to, $offset) {
+                $i += $offset;
                 $packet = new Packet($frame, $from, $i, $i * 960, false, $this->secretKey, nonce: $i, mode: self::MODE);
                 $this->mediaServer->send($packet->getEncryptedMessage(), $to);
             });

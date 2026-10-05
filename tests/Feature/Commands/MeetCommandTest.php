@@ -408,7 +408,7 @@ final class MeetCommandTest extends CommandTestCase
         $this->meet(['666']);
         $session = VoiceSession::forGuild(self::GUILD_ID);
 
-        $this->assertSame([300.0], array_values(array_diff($this->timers->pending(), [0.25])), 'The people invited have 5 minutes to join.');
+        $this->assertSame([300.0], array_values(array_diff($this->timers->pending(), [0.05])), 'The people invited have 5 minutes to join.');
         $this->assertSame([], $this->channels->deleted);
 
         $this->assertSame(1, $this->timers->elapse(Meeting::JOIN_SECONDS));

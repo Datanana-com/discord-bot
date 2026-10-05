@@ -107,6 +107,10 @@ A command can take options and be shown only to members with a permission: set i
 
 `/stop` finishes the recordings and leaves the channel, and `/stats` shows how the server has used the bot (see [Logs and statistics](#logs-and-statistics)). `/settings` gives a server its own wake word, language, voice and Claude model (see [Settings for each server](#settings-for-each-server)). `/recall` asks Claude a question about the server's saved calls (see [Asking about past calls](#asking-about-past-calls)). `/optout` stops the bot from recording, transcribing or answering whoever uses it, and `/optin` undoes that (see [Opting out of being recorded](#opting-out-of-being-recorded)). `/meet` makes a private voice channel for the people you pick, and records it (see [Private meetings](#private-meetings)).
 
+You can interrupt the bot: it stops speaking when the person it is answering starts talking. Half a second of their voice does it, which is also what it takes for something said to be transcribed, so a cough doesn't. The sentence being spoken is cut off, and the rest of the answer is neither synthesized nor spoken, but the whole answer is still posted in the text channel and added to the transcript. What they said over it is handled like anything else they say: transcribed, and answered when it mentions the wake word. Only the person being answered can interrupt: other people talking in the call don't stop the bot.
+
+What someone says is over once they have been silent for 0.6 seconds, which the bot checks for every 0.05 seconds. Set `VOICE_PAUSE_SECONDS` to more for people who pause longer in the middle of a sentence: the bot then waits that much longer before it answers.
+
 A call ends with `/stop`, or when someone disconnects the bot from the voice channel. An answer the bot is speaking at that moment is cut off, but still posted in the text channel. For the summary, the whole transcript is sent to Claude, including what was said without the wake word. The summary is written in the language of the call, once everything said is transcribed, so it includes the last thing said. A summary that doesn't fit in one Discord message is split into several, never in the middle of a sentence. When nobody said anything, there is no summary. When Claude can't make one (it isn't logged in, the usage limit is reached, ...), the bot says so in the text channel, and why.
 
 > [!IMPORTANT]
@@ -297,6 +301,7 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 | `RECORDINGS_PATH` | `recordings` | Where recordings, transcripts and summaries are saved. `/recall` answers from them. |
 | `RECORDINGS_RETENTION_DAYS` | | Calls older than this many days are deleted, with their recordings, transcript and summary. A whole number, 1 or more. Leave it empty to keep everything. |
 | `VOICE_WAKE_WORD` | `claude` | Claude only answers what mentions this word or phrase. A phrase also counts when punctuation is heard between its words: "Okay, computer" mentions `okay computer`. Leave it empty to answer everything. |
+| `VOICE_PAUSE_SECONDS` | `0.6` | How long someone has to be silent for what they said to be over. A number of seconds, 0.1 or more: raise it for people who pause longer in the middle of a sentence. |
 | `WHISPER_BINARY` | `whisper-cli` | Path to whisper.cpp's `whisper-cli`. |
 | `WHISPER_MODEL` | | Path to the whisper model, e.g. `~/whisper.cpp/models/ggml-base.bin`. |
 | `WHISPER_LANGUAGE` | `auto` | Language spoken in the call, e.g. `en` or `pt`, or `auto` to detect it. Detecting it takes time, for everything anyone says: on an utterance of 2.2 s, whisper `base` took 1.8 to 3.1 s with `auto` and 1.05 s with `en`. When one language is spoken, set it, here or with `/settings`. |
@@ -363,6 +368,8 @@ jq 'select(.message == "Started speaking") | .context.ms' logs/*.log
 jq -c 'select(.level >= 300) | [.datetime, .message, .context]' logs/*.log
 ```
 
+A call also logs `Interrupted` when the person the bot is answering talks over it, with the `user`, the call's `session` and how long the bot had been speaking (`ms`). Three warnings are about the programs a call keeps running: `No Claude Code process was waiting for the question` and `The waiting Claude Code process did not answer`, each with the `user` who asked, when a question had to start its own Claude Code, and `Piper had stopped: starting it again`. A `VOICE_PAUSE_SECONDS` that isn't a number of seconds, 0.1 or more, is logged as a warning when a call starts, and the call then uses 0.6.
+
 **Statistics** are kept in `STATS_DATABASE`, one row per event in the `events` table: `call_started`, `call_ended` (with the call's length), `utterance` (with its length), `answered` (with the time from the end of the question to the answer being posted) and `failed` (something said couldn't be transcribed or answered, or the answer couldn't be spoken), each with the server, channel, user and session. `/stats` shows the server it is used in its totals: calls and minutes recorded, utterances and people speaking, questions answered and how long that took on average, and failures. Summaries, `/recall` and direct messages aren't counted. Only whoever used `/stats` sees them. To query the statistics yourself:
 
 ```bash
@@ -371,8 +378,8 @@ sqlite3 databases/stats.sqlite "SELECT guild_id, COUNT(*) AS answers FROM events
 
 ### Known limitations
 
-- The bot starts speaking a few seconds after a question: transcription, Claude Code starting up, and the synthesis of the first sentence each add some. The rest of the answer no longer adds to the wait, but there is a pause of about half a second between sentences.
-- The bot doesn't stop speaking when someone talks over it.
+- The bot starts on its answer about two seconds after a short question, as measured on a 10-core desktop CPU (i9-10900K) with whisper `base`, `WHISPER_LANGUAGE=en`, `WHISPER_THREADS=8`, `CLAUDE_MODEL=haiku` and the `en_US-lessac-medium` voice: 0.6 to 0.65 s of silence before the question counts as over, about 0.7 s of transcription, about 0.5 s until Claude's first words, and 0.1 to 0.25 s for Piper to speak the first sentence. With `WHISPER_LANGUAGE=auto`, transcription takes a second or two longer, and a bigger whisper model or a slower CPU adds to it as well. The voice library then waits half a second before it sends a sentence's audio, which is also the pause between two sentences.
+- Only the person the bot is answering can interrupt it. Someone who listens to the bot on speakers, without echo cancellation, may interrupt it with its own voice.
 - Speech recognition sometimes mishears the wake word (e.g. "cloud"). Change it, with `VOICE_WAKE_WORD` or `/settings`, if that happens often.
 - The wake word is looked for as whole words. In languages written without spaces between words, such as Japanese or Thai, it is only heard when whisper writes a space or punctuation around it.
 - The voice library (`discord-php-helpers/voice` 8.3.0) keeps every decoded audio frame in memory until `/stop`, roughly 12 MB per speaker per minute of speech. That's fine for normal calls; for very long ones, `/stop` and `/record` again now and then.

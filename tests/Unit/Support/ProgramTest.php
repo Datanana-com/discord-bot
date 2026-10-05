@@ -186,6 +186,8 @@ final class ProgramTest extends TestCase
         $program = $this->open(['sh', '-c', 'exec sleep 10']);
 
         $program->stop('was no longer needed');
+        // Stopping it again doesn't take the reason back.
+        $program->stop();
 
         $this->expectException(CommandFailedException::class);
         $this->expectExceptionMessage('sh was no longer needed');
@@ -214,8 +216,10 @@ final class ProgramTest extends TestCase
 
     public function testATimeoutThatIsNotNeededDoesNotKeepTheBotFromEnding(): void
     {
-        // PHP only exits once nothing is left on the event loop: a timer of 30 seconds would be.
-        $script = 'require "vendor/autoload.php"; App\Support\Shell::open(["cat"])->end("", 30.0);';
+        // PHP only exits once nothing is left on the event loop: a timer of 30 seconds would be. Not the one of a
+        // program that ended in time, nor one for a program that was already told to end, or has ended.
+        $script = 'require "vendor/autoload.php"; $program = App\Support\Shell::open(["cat"]); $program->end("", 30.0); $program->end("", 30.0);'
+            . ' React\Async\await($program->done()); $program->end("", 30.0);';
         $started = microtime(true);
 
         await(Shell::run([PHP_BINARY, '-r', $script], cwd: dirname(__DIR__, 3)));

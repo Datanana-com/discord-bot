@@ -81,7 +81,8 @@ final class VoiceClaudeTest extends VoiceTestCase
         $calls = $this->claudeCalls();
         $this->assertCount(2, $calls);
         $this->assertSame([true, true], array_column($calls, 'waited'));
-        $this->assertSame($this->waitingClaudes(), [...array_column($calls, 'pid'), $this->waitingClaudes()[2] ?? 0], 'Each by its own process, and a third one waits.');
+        $this->waitUntil(fn () => count($this->waitingClaudes()) === 3, 'Claude Code to wait for a third question');
+        $this->assertSame(array_slice($this->waitingClaudes(), 0, 2), array_column($calls, 'pid'), 'Each was answered by its own process.');
 
         // The first process was told what the bot remembers about Alice. The second one only knows the call
         // from its own prompt: the transcript, which holds what Alice asked and what she was answered.
@@ -105,12 +106,18 @@ final class VoiceClaudeTest extends VoiceTestCase
         posix_kill($this->waitingClaudes()[0], SIGTERM);
         $this->waitUntil(fn () => count($this->waitingClaudes()) === 2, 'Claude Code to be replaced');
 
-        // That is expected, so nothing is logged about it, and the question is still answered by a process that was waiting.
+        // That is expected, so nothing is logged about it, and the question is still answered by a process that was
+        // waiting: here, for long enough to be replaced too, had it ended by itself.
+        $this->runFor(2.1);
         $this->ask($vc, '555', self::QUESTION);
 
         $calls = $this->claudeCalls();
         $this->assertSame([[true, $this->waitingClaudes()[1], self::PROMPT]], [[$calls[0]['waited'], $calls[0]['pid'], $calls[0]['prompt']]]);
         $this->assertSame([], $this->loggedProblems());
+
+        // Having answered, it is replaced once: by the process that waits for the next question.
+        $this->runFor(0.3);
+        $this->assertCount(3, $this->waitingClaudes());
     }
 
     public function testAQuestionIsNotLostWhenNoProcessIsWaiting(): void
