@@ -64,6 +64,12 @@ final class VoiceSession
     private const int MESSAGE_LIMIT = 2000;
 
     /**
+     * A Claude Code process that ended sooner than this many seconds after it started to wait isn't
+     * replaced: one that can't start would otherwise be started over and over.
+     */
+    private const float WAITING_SECONDS = 2.0;
+
+    /**
      * The voice client's decoders leave a copy of each speaker's audio in the temp folder, named
      * after when the decoder started and the speaker's SSRC: <date>_<time>-<SSRC>.ogg.
      */
@@ -131,6 +137,9 @@ final class VoiceSession
     private array $shared = [];
 
     private readonly MemoryWriter $writer;
+
+    /** The Claude Code process that is already running for the next question, when there is one: see {@see wait()}. */
+    private ?WaitingClaude $waiting = null;
 
     /** @var array{utterances: int, answers: int, failures: int} */
     private array $counts = ['utterances' => 0, 'answers' => 0, 'failures' => 0];
@@ -286,6 +295,7 @@ final class VoiceSession
             Memory::fromEnv(),
         );
         $session->listen();
+        $session->wait();
         $session->log('info', 'Voice session started', ['channel' => $vc->channel->id, 'directory' => $directory]);
         $session->track(Usage::CALL_STARTED, ['channel' => $vc->channel->id]);
 
@@ -428,6 +438,10 @@ final class VoiceSession
         $this->stopped = true;
         unset(self::$sessions[$this->vc->channel->guild_id]);
         $this->discord->getLoop()->cancelTimer($this->ticker);
+
+        // No question is coming for the Claude Code process that waited for one. One that is answering ends once it has.
+        $this->waiting?->stop();
+        $this->waiting = null;
 
         // Speech still in progress is transcribed for the transcript, but no longer answered.
         $this->splitter->flushAll();
@@ -687,7 +701,7 @@ final class VoiceSession
             });
         });
 
-        return $this->claude->ask($this->prompt($userId, $name, $people, $sharers), onText: $sentences->push(...), thinks: false)->then(
+        return $this->ask($userId, $this->prompt($userId, $name, $people, $sharers), $sentences->push(...))->then(
             function (string $answer) use ($sentences, &$spoken, $userId, $sharers, $name, $question, $endedAt, $asking, $people) {
                 $this->log('info', 'Claude answered', ['user' => $userId, 'ms' => $this->msSince($asking), 'characters' => mb_strlen($answer)]);
                 $sentences->flush();
@@ -720,6 +734,71 @@ final class VoiceSession
                 return $spoken->finally(fn () => throw $e);
             },
         );
+    }
+
+    /**
+     * Starts the Claude Code process that waits for the next question, so that the question doesn't wait
+     * for Claude Code to start. It answers that one question: every question gets a process of its own,
+     * which knows nothing of the questions before it but what its prompt says.
+     *
+     * A process doesn't wait for a whole call: Claude Code ends by itself after some minutes without a
+     * prompt. It is then replaced.
+     */
+    private function wait(): void
+    {
+        if ($this->stopped) {
+            return;
+        }
+
+        $waiting = $this->waiting = $this->claude->wait(thinks: false);
+        $startedAt = microtime(true);
+
+        $waiting->ended()->then(function () use ($waiting, $startedAt) {
+            // It was asked, or the call stopped.
+            if ($this->waiting !== $waiting) {
+                return;
+            }
+
+            $this->waiting = null;
+
+            if (microtime(true) - $startedAt >= self::WAITING_SECONDS) {
+                $this->wait();
+            }
+        });
+    }
+
+    /**
+     * Asks Claude what someone in the call said to it, without thinking first: that takes seconds before
+     * the first word of an answer.
+     *
+     * The process that was waiting is asked. When there is none, or it ends without having written anything,
+     * one is started for the question, which takes longer. Either way, another one then waits for the next question.
+     *
+     * @param callable(string $text): void $onText Called with each piece of the answer while Claude is writing it.
+     * @return PromiseInterface<string> Claude's answer.
+     */
+    private function ask(string $userId, string $prompt, callable $onText): PromiseInterface
+    {
+        $waiting = $this->waiting;
+        $this->waiting = null;
+
+        if ($waiting === null) {
+            $this->log('warning', 'No Claude Code process was waiting for the question', ['user' => $userId]);
+            $answer = $this->claude->ask($prompt, onText: $onText, thinks: false);
+        } else {
+            $answer = $waiting->ask($prompt, $onText)->catch(function (Throwable $e) use ($waiting, $userId, $prompt, $onText) {
+                // Part of the answer was spoken, or Claude said why there is none: asking again would not help.
+                if ($waiting->answered()) {
+                    throw $e;
+                }
+
+                $this->log('warning', 'The waiting Claude Code process did not answer: ' . $e->getMessage(), ['user' => $userId]);
+
+                return $this->claude->ask($prompt, onText: $onText, thinks: false);
+            });
+        }
+
+        return $answer->finally($this->wait(...));
     }
 
     /**

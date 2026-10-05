@@ -6,6 +6,7 @@ namespace Tests\Unit\Voice;
 
 use App\Support\CommandFailedException;
 use App\Voice\Claude;
+use App\Voice\WaitingClaude;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 use Tests\FakesClaudeOutput;
@@ -30,6 +31,9 @@ final class ClaudeTest extends TestCase
     /** How much Claude thinks, when whoever runs the tests has set it. */
     private string|false $thinking;
 
+    /** @var list<WaitingClaude> The processes a test started to wait for a prompt. */
+    private array $waiting = [];
+
     protected function setUp(): void
     {
         $this->thinking = getenv('MAX_THINKING_TOKENS');
@@ -44,6 +48,15 @@ final class ClaudeTest extends TestCase
 
     protected function tearDown(): void
     {
+        foreach ($this->waiting as $waiting) {
+            $waiting->stop();
+            await($waiting->ended());
+        }
+
+        putenv('FAKE_CLAUDE_WAITING');
+        putenv('FAKE_CLAUDE_WAITING_FAILS');
+        putenv('FAKE_CLAUDE_WAITING_LEAVES');
+        @unlink("{$this->log}.waiting");
         putenv('FAKE_CLAUDE_LOG');
         putenv('FAKE_CLAUDE_OUTPUT');
         putenv('FAKE_CLAUDE_EXIT');
@@ -331,9 +344,191 @@ final class ClaudeTest extends TestCase
         await($this->claude()->ask('Hello'));
     }
 
+    public function testAWaitingProcessIsStartedBeforeItsPromptAndRunLikeAnyOther(): void
+    {
+        putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeStream('It is a quarter', ' past four.'));
+        putenv("FAKE_CLAUDE_WAITING={$this->log}.waiting");
+
+        $waiting = $this->waiting($this->claude()->wait());
+
+        // It is running, and was given nothing yet.
+        $pid = $this->waitingPid();
+        $this->assertTrue(posix_kill($pid, 0));
+        $this->assertSame('', file_get_contents($this->log));
+        $this->assertFalse($waiting->answered());
+
+        $answer = await($waiting->ask("Alice: \"Claude\", what time is it?\nBob: Yes, please. ⏰", $this->collect(...)));
+
+        $this->assertSame('It is a quarter past four.', $answer);
+        $this->assertSame(['It is a quarter', ' past four.'], $this->pieces);
+        $this->assertTrue($waiting->answered());
+
+        // The process that was waiting answered, and got the prompt as one message on one line.
+        $log = file_get_contents($this->log);
+        $this->assertStringContainsString("pid={$pid}\n", $log);
+        $this->assertStringEndsWith(
+            'stdin={"type":"user","message":{"role":"user","content":"Alice: \"Claude\", what time is it?\nBob: Yes, please. \\u23f0"}}' . "\n",
+            $log,
+        );
+
+        // Everything else is as for a process started for the prompt.
+        $args = $this->arguments($log);
+        $this->assertSame(
+            ['--print', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--model', 'haiku'],
+            array_slice($args, 0, 7),
+        );
+        $this->assertStringContainsString('Discord voice call', $this->option($args, '--system-prompt'));
+        $this->assertSame('', $this->option($args, '--tools'));
+        $this->assertContains('--strict-mcp-config', $args);
+        $this->assertContains('--no-session-persistence', $args);
+        $this->assertSame('', $this->option($args, '--setting-sources'));
+        $this->assertSame('stream-json', $this->option($args, '--input-format'));
+        $this->assertStringContainsString("cwd={$this->workingDirectory}\n", $log);
+        $this->assertStringContainsString("api_key=unset\nthinking=unset\nnonessential_traffic=1\nautoupdater=1\n", $log);
+
+        // It answers one prompt, and has ended once it did.
+        await($waiting->ended());
+        $this->assertFalse(posix_kill($pid, 0));
+    }
+
+    public function testAWaitingProcessCanBeToldWhatToDoAndNotToThink(): void
+    {
+        putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeResult('They agreed to meet on Friday.'));
+
+        $waiting = $this->waiting($this->claude()->wait('You summarize voice calls.', thinks: false));
+
+        // Without a callback, and an answer that wasn't streamed.
+        $this->assertSame('They agreed to meet on Friday.', await($waiting->ask("Alice: Let's meet on Friday.")));
+
+        $log = file_get_contents($this->log);
+        $this->assertSame('You summarize voice calls.', $this->option($this->arguments($log), '--system-prompt'));
+        $this->assertStringContainsString("thinking=0\n", $log);
+    }
+
+    public function testAWaitingProcessNeverBreaksItsMessageOnWhatWasMisheard(): void
+    {
+        putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeResult('Sorry?'));
+
+        $waiting = $this->waiting($this->claude()->wait());
+
+        // Bytes that aren't UTF-8 can't be written as JSON: without a message, Claude Code would wait forever.
+        $this->assertSame('Sorry?', await($waiting->ask("Alice: Caf\xE9?")));
+        $this->assertStringEndsWith('"content":"Alice: Caf\\ufffd?"}}' . "\n", file_get_contents($this->log));
+    }
+
+    public function testAWaitingProcessRejectsLikeAnyOtherWhenClaudeCodeReportsAnError(): void
+    {
+        putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeResult('Not logged in · Please run /login', isError: true));
+        putenv('FAKE_CLAUDE_EXIT=1');
+
+        $waiting = $this->waiting($this->claude()->wait());
+
+        try {
+            await($waiting->ask('Hello', $this->collect(...)));
+            $this->fail('The question should have failed.');
+        } catch (RuntimeException $e) {
+            $this->assertSame('Claude Code: Not logged in · Please run /login', $e->getMessage());
+        }
+
+        $this->assertSame([], $this->pieces);
+        $this->assertTrue($waiting->answered(), 'Claude said why there is no answer: asking again would not help.');
+    }
+
+    public function testAWaitingProcessThatFailsWhileWritingHasAnswered(): void
+    {
+        putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeText('It is a quarter past four.'));
+        putenv('FAKE_CLAUDE_EXIT=3');
+
+        $waiting = $this->waiting($this->claude()->wait());
+
+        try {
+            await($waiting->ask('Hello', $this->collect(...)));
+            $this->fail('The question should have failed.');
+        } catch (CommandFailedException $e) {
+            // Like a process started for the prompt, it never quotes what Claude wrote.
+            $this->assertStringEndsWith('fake-claude exited with code 3', $e->getMessage());
+        }
+
+        $this->assertSame(['It is a quarter past four.'], $this->pieces);
+        $this->assertTrue($waiting->answered(), 'Part of the answer was handed over: asking again would repeat it.');
+    }
+
+    public function testAWaitingProcessThatEndsWithoutWritingAnythingHasNotAnswered(): void
+    {
+        putenv('FAKE_CLAUDE_WAITING_FAILS=1');
+
+        $waiting = $this->waiting($this->claude()->wait());
+
+        try {
+            await($waiting->ask('Hello', $this->collect(...)));
+            $this->fail('The question should have failed.');
+        } catch (CommandFailedException $e) {
+            $this->assertStringEndsWith('fake-claude exited with code 1', $e->getMessage());
+        }
+
+        $this->assertFalse($waiting->answered(), 'The prompt can be given to another process.');
+        $this->assertSame([], $this->pieces);
+    }
+
+    public function testAWaitingProcessThatEndedByItselfHasNotAnswered(): void
+    {
+        // Claude Code ends by itself when it is left waiting for some minutes.
+        putenv('FAKE_CLAUDE_WAITING_LEAVES=1');
+
+        $waiting = $this->waiting($this->claude()->wait());
+        $this->assertNull(await($waiting->ended()), 'Nothing is wrong with that.');
+
+        try {
+            await($waiting->ask('Hello', $this->collect(...)));
+            $this->fail('The question should have failed.');
+        } catch (RuntimeException $e) {
+            $this->assertSame('Unexpected output from Claude Code: no result.', $e->getMessage());
+        }
+
+        $this->assertFalse($waiting->answered());
+        $this->assertSame('', file_get_contents($this->log), 'Nobody got the prompt.');
+    }
+
+    public function testAWaitingProcessIsStoppedWhenNothingIsLeftToWaitFor(): void
+    {
+        putenv("FAKE_CLAUDE_WAITING={$this->log}.waiting");
+
+        $waiting = $this->waiting($this->claude()->wait());
+        $pid = $this->waitingPid();
+        $this->assertTrue(posix_kill($pid, 0));
+
+        $waiting->stop();
+
+        // Having been stopped is no failure for whoever waits for it to end.
+        $this->assertNull(await($waiting->ended()));
+        $this->assertFalse(posix_kill($pid, 0));
+        $this->assertFalse($waiting->answered());
+        $this->assertSame('', file_get_contents($this->log));
+    }
+
     private function claude(): Claude
     {
         return new Claude(__DIR__ . '/../../Fixtures/fake-claude', 'haiku', $this->workingDirectory);
+    }
+
+    /**
+     * Remembers a waiting process, so that it is stopped when the test is over: left running, it would keep the tests from ending.
+     */
+    private function waiting(WaitingClaude $waiting): WaitingClaude
+    {
+        return $this->waiting[] = $waiting;
+    }
+
+    /**
+     * The process ID of the Claude Code that was started to wait, once it is running.
+     */
+    private function waitingPid(): int
+    {
+        for ($i = 0; $i < 100 && ! is_file("{$this->log}.waiting"); $i++) {
+            delay(0.05);
+        }
+
+        return (int) file_get_contents("{$this->log}.waiting");
     }
 
     private function collect(string $text): void

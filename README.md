@@ -118,6 +118,8 @@ Claude runs with every tool disabled, no MCP servers and from an empty directory
 
 Claude Code never loads the settings of the user the bot runs as (`--setting-sources ""`), in calls, summaries, `/recall`, direct messages and memory updates: their plugins, skills and hooks would be loaded for every question, which takes seconds, and a plugin can change how Claude answers. The subscription login still works. Answers in a call are written without thinking first (`MAX_THINKING_TOKENS=0`), as thinking takes seconds before the first word of a one-line answer. Everything else thinks as much as Claude Code does by default, or as `MAX_THINKING_TOKENS` says when it is set for the bot.
 
+During a call, a Claude Code process is already running and waiting for the next question, so a question doesn't wait for Claude Code to start. It answers that one question and ends, and another one is started for the next: every question still gets its own process and its own prompt, so nothing is carried over from one question to the next but what the transcript holds. Claude Code ends by itself when it waits for some minutes, and is then replaced. When no process is waiting, or the one that was ends without writing anything, the question is asked the way it was before, by a process started for it, and a warning is logged. The waiting process is ended when the call ends, and with the bot.
+
 ### Opting out of being recorded
 
 Anyone can use `/optout`, in any server the bot is in or in a direct message with it. From then on, in every server:

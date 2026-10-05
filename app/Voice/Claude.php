@@ -4,10 +4,8 @@ declare(strict_types=1);
 
 namespace App\Voice;
 
-use App\Support\CommandFailedException;
 use App\Support\Shell;
 use React\Promise\PromiseInterface;
-use RuntimeException;
 
 /**
  * Asks Claude through the Claude Code CLI, so replies use the Claude subscription
@@ -64,43 +62,31 @@ final readonly class Claude
      */
     public function ask(string $prompt, string $systemPrompt = self::SYSTEM_PROMPT, ?callable $onText = null, bool $thinks = true): PromiseInterface
     {
-        $result = null;
-        $streamed = false;
+        $answer = new ClaudeAnswer($onText === null ? null : $onText(...));
 
-        return Shell::stream(
+        return $answer->after(Shell::stream(
             $this->command($systemPrompt),
-            // Most events are about the session, hooks, rate limits or Claude's thinking: only two matter here.
-            function (string $line) use (&$result, &$streamed, $onText) {
-                $event = json_decode($line, true);
-                $type = is_array($event) ? $event['type'] ?? null : null;
-
-                if ($type === 'result') {
-                    $result = $event;
-                } elseif ($onText !== null && $type === 'stream_event' && ($event['event']['delta']['type'] ?? null) === 'text_delta') {
-                    $streamed = true;
-                    $onText($event['event']['delta']['text']);
-                }
-            },
+            $answer->read(...),
             $prompt,
             $this->directory(),
             $this->environment($thinks),
-        )->then(function () use (&$result, &$streamed, $onText) {
-            $answer = self::answer($result);
+        ));
+    }
 
-            // A Claude Code that doesn't send the text while it is written still hands over its answer.
-            if ($onText !== null && ! $streamed) {
-                $onText($answer);
-            }
-
-            return $answer;
-        })->catch(function (CommandFailedException $e) use (&$result) {
-            // Claude Code exits with code 1 on errors (not logged in, usage limit reached, ...)
-            // and explains why in its result. A result that isn't an error is the answer, which
-            // must not end up in the logs, e.g. when Claude Code hangs after giving it.
-            throw is_string($result['result'] ?? null) && ($result['is_error'] ?? false) === true
-                ? new RuntimeException('Claude Code: ' . $result['result'])
-                : $e;
-        });
+    /**
+     * Starts a Claude Code process that waits for its prompt, so that asking it doesn't wait for Claude Code
+     * to start. It is run like one that ask() starts, and answers one prompt.
+     *
+     * @param string $systemPrompt What Claude is asked to do; by default, to answer in a voice call.
+     * @param bool $thinks Whether Claude may think before it answers.
+     */
+    public function wait(string $systemPrompt = self::SYSTEM_PROMPT, bool $thinks = true): WaitingClaude
+    {
+        return new WaitingClaude(
+            [...$this->command($systemPrompt), '--input-format', 'stream-json'],
+            $this->directory(),
+            $this->environment($thinks),
+        );
     }
 
     /**
@@ -163,24 +149,5 @@ final readonly class Claude
         }
 
         return $this->workingDirectory;
-    }
-
-    /**
-     * Extracts the answer from the `result` event, the last one Claude Code prints.
-     *
-     * @param array<string, mixed>|null $result
-     */
-    private static function answer(?array $result): string
-    {
-        // Without quoting the output: it may hold the answer, and this message is logged.
-        if (! is_string($result['result'] ?? null)) {
-            throw new RuntimeException('Unexpected output from Claude Code: no result.');
-        }
-
-        if ($result['is_error'] ?? false) {
-            throw new RuntimeException('Claude Code: ' . $result['result']);
-        }
-
-        return trim($result['result']);
     }
 }
