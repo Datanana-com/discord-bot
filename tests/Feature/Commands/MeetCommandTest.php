@@ -334,6 +334,16 @@ final class MeetCommandTest extends CommandTestCase
         $this->assertSame([], $this->loggedProblems());
     }
 
+    public function testTellsPeopleToSayTheFirstSpellingOnly(): void
+    {
+        $this->setEnv(['VOICE_WAKE_WORD' => 'claude, cloud, claud']);
+        $this->joinsWith(resolve($this->voiceClient($this->channels->channel)));
+
+        $this->meet(['666']);
+
+        $this->assertSame([self::RECORDING], $this->updates);
+    }
+
     public function testAnnouncesThatEverythingIsAnsweredWithoutAWakeWord(): void
     {
         $this->setEnv(['VOICE_WAKE_WORD' => '']);

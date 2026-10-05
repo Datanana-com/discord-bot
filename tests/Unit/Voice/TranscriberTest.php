@@ -14,7 +14,7 @@ final class TranscriberTest extends TestCase
 {
     protected function tearDown(): void
     {
-        unset($_ENV['WHISPER_LANGUAGE'], $_ENV['WHISPER_THREADS']);
+        unset($_ENV['WHISPER_LANGUAGE'], $_ENV['WHISPER_PROMPT'], $_ENV['WHISPER_THREADS']);
     }
 
     public function testUsesAsManyThreadsAsEnvSays(): void
@@ -75,13 +75,42 @@ final class TranscriberTest extends TestCase
         );
 
         // More threads transcribe faster, up to what the CPU has.
-        $transcriber = new Transcriber(__DIR__ . '/../../Fixtures/fake-whisper', '/models/ggml-base.bin', 'en', 8);
+        $transcriber = new Transcriber(__DIR__ . '/../../Fixtures/fake-whisper', '/models/ggml-base.bin', 'en', threads: 8);
         await($transcriber->transcribe('/recordings/utterance-2.wav'));
 
         $this->assertStringContainsString("arg=--language\narg=en\narg=--threads\narg=8\n", file_get_contents($log));
 
         putenv('FAKE_WHISPER_LOG');
         unlink($log);
+    }
+
+    public function testPassesTheWhisperPromptToWhisper(): void
+    {
+        $log = tempnam(sys_get_temp_dir(), 'fake-whisper-pr23-');
+        putenv("FAKE_WHISPER_LOG={$log}");
+
+        $transcriber = new Transcriber(__DIR__ . '/../../Fixtures/fake-whisper', '/models/ggml-base.bin', 'en', 'A voice call with the assistant Claude.');
+        await($transcriber->transcribe('/recordings/utterance-1.wav'));
+
+        $this->assertSame(
+            "arg=--model\narg=/models/ggml-base.bin\narg=--language\narg=en\narg=--threads\narg=4\narg=--prompt\narg=A voice call with the assistant Claude.\narg=--no-timestamps\narg=--no-prints\narg=--file\narg=/recordings/utterance-1.wav\n",
+            file_get_contents($log),
+        );
+
+        putenv('FAKE_WHISPER_LOG');
+        unlink($log);
+    }
+
+    public function testReadsThePromptFromTheEnvironment(): void
+    {
+        $_ENV['WHISPER_PROMPT'] = '  Hey Claude.  ';
+        $this->assertSame('Hey Claude.', Transcriber::fromEnv()->prompt);
+
+        $_ENV['WHISPER_PROMPT'] = '';
+        $this->assertSame('', Transcriber::fromEnv()->prompt, 'Empty means no prompt.');
+
+        unset($_ENV['WHISPER_PROMPT']);
+        $this->assertSame('', Transcriber::fromEnv()->prompt, 'So does not setting it.');
     }
 
     #[DataProvider('outputs')]

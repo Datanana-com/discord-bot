@@ -33,6 +33,7 @@ final readonly class Transcriber
         public string $binary,
         public string $model,
         public string $language,
+        public string $prompt = '',
         public int $threads = self::THREADS,
     ) {
     }
@@ -49,6 +50,7 @@ final readonly class Transcriber
             env('WHISPER_BINARY', 'whisper-cli'),
             env('WHISPER_MODEL', ''),
             $language ?? env('WHISPER_LANGUAGE', 'auto'),
+            trim(env('WHISPER_PROMPT', '')),
             $threads === false ? self::THREADS : $threads,
         );
     }
@@ -66,6 +68,7 @@ final readonly class Transcriber
             '--model', $this->model,
             '--language', $this->language,
             '--threads', (string) $this->threads,
+            ...($this->prompt === '' ? [] : ['--prompt', $this->prompt]),
             '--no-timestamps',
             '--no-prints',
             '--file', $wavPath,
