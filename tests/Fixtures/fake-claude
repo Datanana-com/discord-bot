@@ -6,6 +6,8 @@
 # FAKE_CLAUDE_LOG holds the last call. When FAKE_CLAUDE_CALLS is set, every call is also appended to it.
 # A call to update a memory prints FAKE_CLAUDE_OUTPUT_MEMORY, when it is set, instead. It first
 # waits for as long as the file FAKE_CLAUDE_HOLD exists, for 10 seconds at most.
+# A call to look something up prints FAKE_CLAUDE_OUTPUT_LOOKUP, when it is set, instead. When FAKE_CLAUDE_LOOKUP_GO
+# is set, it first waits until that file exists, and deletes it: each time the file is made, one lookup goes on.
 #
 # With --input-format stream-json it waits for its prompt, like Claude Code then does: it prints and logs
 # nothing until a line arrives on its stdin, answers it, and ends once its stdin is closed. Its PID is
@@ -29,7 +31,10 @@ if [ -n "$waits" ]; then
 else
     input=$(cat)
 fi
+# Written to a file of its own first: a lookup and an answer can start at the same moment.
+call=$(mktemp)
 {
+    printf '=== call ===\n'
     printf 'pid=%s\n' "$$"
     printf 'cwd=%s\n' "$PWD"
     printf 'api_key=%s\n' "${ANTHROPIC_API_KEY-unset}"
@@ -38,12 +43,15 @@ fi
     printf 'autoupdater=%s\n' "${DISABLE_AUTOUPDATER-unset}"
     for arg in "$@"; do printf 'arg=%s\n' "$arg"; done
     printf 'stdin=%s\n' "$input"
-} > "${FAKE_CLAUDE_LOG:-/dev/null}"
+} > "$call"
+tail -n +2 "$call" > "${FAKE_CLAUDE_LOG:-/dev/null}"
 if [ -n "${FAKE_CLAUDE_CALLS:-}" ]; then
-    { printf '=== call ===\n'; cat "$FAKE_CLAUDE_LOG"; } >> "$FAKE_CLAUDE_CALLS"
+    cat "$call" >> "$FAKE_CLAUDE_CALLS"
 fi
+rm -f "$call"
 output=$FAKE_CLAUDE_OUTPUT
 previous=
+lookup=
 for arg in "$@"; do
     if [ "$previous" = --system-prompt ]; then
         case "$arg" in "You keep a Discord bot's memory"*)
@@ -55,9 +63,19 @@ for arg in "$@"; do
             done
             ;;
         esac
+        case "$arg" in "You look things up"*) lookup=1; output=${FAKE_CLAUDE_OUTPUT_LOOKUP:-$output} ;; esac
     fi
     previous=$arg
 done
+if [ -n "$lookup" ] && [ -n "${FAKE_CLAUDE_LOOKUP_GO:-}" ]; then
+    # At most 30 seconds, so a test that never lets it go on doesn't leave it running.
+    held=600
+    while [ ! -e "$FAKE_CLAUDE_LOOKUP_GO" ] && [ "$held" -gt 0 ]; do
+        sleep 0.05
+        held=$((held - 1))
+    done
+    rm -f "$FAKE_CLAUDE_LOOKUP_GO"
+fi
 sleep "${FAKE_CLAUDE_DELAY:-0}"
 ticks=$((${FAKE_CLAUDE_PAUSE:-0} * 20))
 printf '%s' "$output" | while IFS= read -r line || [ -n "$line" ]; do
