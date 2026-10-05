@@ -26,11 +26,18 @@ final readonly class Transcriber
         'sr', 'su', 'sv', 'sw', 'ta', 'te', 'tg', 'th', 'tk', 'tl', 'tr', 'tt', 'uk', 'ur', 'uz', 'vi', 'yi', 'yo', 'yue', 'zh',
     ];
 
+    /** How long whisper.cpp may take for each second of audio: a big model on a slow CPU can be slower than the speech itself. */
+    public const float SECONDS_PER_SECOND_OF_AUDIO = 3.0;
+
+    /** How long whisper.cpp may take at least, whatever the length of the audio: it has to load its model first. */
+    public const float MINIMUM_TIMEOUT = 120.0;
+
     public function __construct(
         public string $binary,
         public string $model,
         public string $language,
         public string $prompt = '',
+        public float $minimumTimeout = self::MINIMUM_TIMEOUT,
     ) {
     }
 
@@ -51,9 +58,11 @@ final readonly class Transcriber
      * Transcribes a WAV file. whisper.cpp resamples the audio itself,
      * so Discord's 48 kHz stereo recordings can be passed as they are.
      *
+     * @param float $seconds How long the audio is, when it is known: whisper.cpp is given {@see SECONDS_PER_SECOND_OF_AUDIO}
+     *                       for each of them, and at least the minimum timeout, before it is killed.
      * @return PromiseInterface<string> The spoken text, or an empty string when nothing was said.
      */
-    public function transcribe(string $wavPath): PromiseInterface
+    public function transcribe(string $wavPath, float $seconds = 0.0): PromiseInterface
     {
         return Shell::run([
             $this->binary,
@@ -63,7 +72,7 @@ final readonly class Transcriber
             '--no-timestamps',
             '--no-prints',
             '--file', $wavPath,
-        ])->then(self::clean(...));
+        ], timeout: max($this->minimumTimeout, self::SECONDS_PER_SECOND_OF_AUDIO * $seconds))->then(self::clean(...));
     }
 
     /**

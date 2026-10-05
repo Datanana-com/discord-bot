@@ -10,6 +10,7 @@ use App\Voice\Transcriber;
 use Discord\Parts\Channel\Message;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
+use Tests\Fixtures\FakeCdn;
 
 use function React\Async\await;
 
@@ -93,6 +94,30 @@ final class VoiceMessageTest extends TestCase
             $this->assertSame('The folder for voice messages is not private to the bot.', $e->getMessage());
         } finally {
             exec('rm -rf ' . escapeshellarg($target));
+        }
+    }
+
+    public function testGivesWhisperTimeForTheLengthOfTheAudio(): void
+    {
+        $cdn = new FakeCdn();
+        $cdn->install();
+        // 1 second of 16 kHz mono 16-bit audio, which whisper takes 2 seconds to transcribe: more than the 0.1 second
+        // it is given at least, less than the 3 it is given for 1 second of audio.
+        putenv('FAKE_FFMPEG_BYTES=32000');
+        putenv('FAKE_WHISPER_DELAY=2');
+
+        try {
+            $voiceMessage = new VoiceMessage(
+                new Transcriber(__DIR__ . '/../../Fixtures/fake-whisper', '/models/ggml-base.bin', 'auto', minimumTimeout: 0.1),
+                __DIR__ . '/../../Fixtures/fake-ffmpeg',
+                $this->folder,
+            );
+
+            $this->assertSame('Hey Claude, what time is it?', await($voiceMessage->transcribe($this->message(attachments: [(object) ['url' => 'https://cdn.discordapp.com/voice.ogg', 'duration_secs' => 1.0]]))));
+        } finally {
+            putenv('FAKE_FFMPEG_BYTES');
+            putenv('FAKE_WHISPER_DELAY');
+            $cdn->close();
         }
     }
 

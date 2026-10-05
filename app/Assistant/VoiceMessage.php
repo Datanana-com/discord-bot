@@ -91,7 +91,7 @@ final readonly class VoiceMessage
             ->then(fn () => Shell::run([$this->ffmpeg, '-loglevel', 'error', '-y', '-i', $ogg, '-t', (string) (self::MAX_SECONDS + 1), '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', $wav]))
             ->then(fn () => filesize($wav) > (self::MAX_SECONDS + 0.5) * self::WAV_BYTES_PER_SECOND
                 ? reject(new VoiceMessageTooLongException())
-                : $this->transcriber->transcribe($wav))
+                : $this->transcriber->transcribe($wav, filesize($wav) / self::WAV_BYTES_PER_SECOND))
             ->finally(function () use ($ogg, $wav) {
                 foreach ([$ogg, $wav] as $file) {
                     is_file($file) && unlink($file);
