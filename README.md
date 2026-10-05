@@ -101,12 +101,12 @@ A command can take options and be shown only to members with a permission: set i
 1. Each speaker is recorded to their own WAV file in `recordings/<server id>/<date>/`, next to a `transcript.txt` of the call.
 2. When someone stops talking, what they said is transcribed on your machine with [whisper.cpp](https://github.com/ggml-org/whisper.cpp).
 3. If it mentions the wake word ("Claude" by default), the recent transcript is sent to Claude through the [Claude Code CLI](https://code.claude.com/docs/en/headless), so it uses the Claude subscription you're logged in with instead of an API key.
-4. Claude's answer is posted in the text channel and spoken back into the call with [Piper](https://github.com/OHF-Voice/piper1-gpl).
+4. Claude's answer is spoken back into the call with [Piper](https://github.com/OHF-Voice/piper1-gpl), sentence by sentence while Claude is still writing it, and posted in the text channel once it is whole. Each spoken sentence is saved as a `claude-<n>.ogg` file next to the recordings.
 5. When the call ends, Claude summarizes its whole transcript: what was discussed, what was decided, and who does what next. The summary is posted in the text channel where `/record` was used, and saved as `summary.md` next to `transcript.txt`.
 
 `/stop` finishes the recordings and leaves the channel, and `/stats` shows how the server has used the bot (see [Logs and statistics](#logs-and-statistics)). `/settings` gives a server its own wake word, language, voice and Claude model (see [Settings for each server](#settings-for-each-server)). `/recall` asks Claude a question about the server's saved calls (see [Asking about past calls](#asking-about-past-calls)). `/optout` stops the bot from recording, transcribing or answering whoever uses it, and `/optin` undoes that (see [Opting out of being recorded](#opting-out-of-being-recorded)).
 
-A call ends with `/stop`, or when someone disconnects the bot from the voice channel. For the summary, the whole transcript is sent to Claude, including what was said without the wake word. The summary is written in the language of the call, once everything said is transcribed, so it includes the last thing said. A summary that doesn't fit in one Discord message is split into several, never in the middle of a sentence. When nobody said anything, there is no summary. When Claude can't make one (it isn't logged in, the usage limit is reached, ...), the bot says so in the text channel, and why.
+A call ends with `/stop`, or when someone disconnects the bot from the voice channel. An answer the bot is speaking at that moment is cut off, but still posted in the text channel. For the summary, the whole transcript is sent to Claude, including what was said without the wake word. The summary is written in the language of the call, once everything said is transcribed, so it includes the last thing said. A summary that doesn't fit in one Discord message is split into several, never in the middle of a sentence. When nobody said anything, there is no summary. When Claude can't make one (it isn't logged in, the usage limit is reached, ...), the bot says so in the text channel, and why.
 
 > [!IMPORTANT]
 > Only record people who have agreed to it. The bot announces in the channel when it starts recording, and that anyone who doesn't want to be recorded can use `/optout`.
@@ -268,13 +268,15 @@ Anyone who can use slash commands can use `/recall`, and so ask about any call s
 
 Neither the logs nor the statistics contain what anyone said or what Claude answered: that is only in the call's `transcript.txt` and `summary.md`, and for direct messages in the DM itself and in the person's memory.
 
-**Logs** are printed to the console and written to `logs/<date>.log`, one JSON object per line. Each step of a call is logged with the server (`guild`), a `session` ID for the call, the `user` it concerns, and how long it took in milliseconds: the call starting, each new speaker, each utterance, its transcription, Claude's answer, the speech synthesis, failures, the call ending with its totals, and its summary. A speaker who opted out is logged once, as `Skipping a speaker who opted out` with their user ID, and nothing else about them is. Slash commands are logged with who used them, and where, and `/settings changed` with the settings that changed and their new values: settings aren't speech. `/recall answered` is logged with how long the answer took (`ms`), how many calls were sent to Claude (`calls`) and the answer's length (`characters`), never with the question or the answer. Direct messages are logged as `Answered a DM`, with the `user`, how long the answer took and its length in characters, and memory updates as `Updated memory`, with the `user` and the memory's length. To search the log with [jq](https://jqlang.org/):
+**Logs** are printed to the console and written to `logs/<date>.log`, one JSON object per line. Each step of a call is logged with the server (`guild`), a `session` ID for the call, the `user` it concerns, and how long it took in milliseconds: the call starting, each new speaker, each utterance, its transcription, the bot starting to speak, Claude's answer, failures, the call ending with its totals, and its summary. A speaker who opted out is logged once, as `Skipping a speaker who opted out` with their user ID, and nothing else about them is. Slash commands are logged with who used them, and where, and `/settings changed` with the settings that changed and their new values: settings aren't speech. `/recall answered` is logged with how long the answer took (`ms`), how many calls were sent to Claude (`calls`) and the answer's length (`characters`), never with the question or the answer. Direct messages are logged as `Answered a DM`, with the `user`, how long the answer took and its length in characters, and memory updates as `Updated memory`, with the `user` and the memory's length. To search the log with [jq](https://jqlang.org/):
 
 ```bash
 # Everything that happened in one call
 jq -c 'select(.context.session == "1a2b3c4d") | [.datetime, .message, .context]' logs/2026-10-03.log
-# How long Claude took to answer, in milliseconds
+# How long Claude took to write its answer, in milliseconds
 jq 'select(.message == "Claude answered") | .context.ms' logs/*.log
+# How long the bot took to start speaking, from the end of the question
+jq 'select(.message == "Started speaking") | .context.ms' logs/*.log
 # Warnings and errors only
 jq -c 'select(.level >= 300) | [.datetime, .message, .context]' logs/*.log
 ```
@@ -287,7 +289,8 @@ sqlite3 databases/stats.sqlite "SELECT guild_id, COUNT(*) AS answers FROM events
 
 ### Known limitations
 
-- Answers take a few seconds: transcription, Claude Code starting up, and speech synthesis each add some.
+- The bot starts speaking a few seconds after a question: transcription, Claude Code starting up, and the synthesis of the first sentence each add some. The rest of the answer no longer adds to the wait, but there is a pause of about half a second between sentences.
+- The bot doesn't stop speaking when someone talks over it.
 - Speech recognition sometimes mishears the wake word (e.g. "cloud"). Change it, with `VOICE_WAKE_WORD` or `/settings`, if that happens often.
 - The wake word is looked for as whole words. In languages written without spaces between words, such as Japanese or Thai, it is only heard when whisper writes a space or punctuation around it.
 - The voice library (`discord-php-helpers/voice` 8.3.0) keeps every decoded audio frame in memory until `/stop`, roughly 12 MB per speaker per minute of speech. That's fine for normal calls; for very long ones, `/stop` and `/record` again now and then.
@@ -316,7 +319,7 @@ composer test:coverage
 
 `tests/Live` asks the bot a question in a real Discord voice call. A second bot plays the spoken question "Hey Claude, what time is it?" and records the answer.
 
-Everything except Claude is real: Discord with its end-to-end encryption, whisper.cpp and Piper. Claude is replaced by a fixed answer, so no Claude subscription is used. It runs in GitHub Actions (`.github/workflows/live-voice.yml`) every night, on demand, and on pull requests that change the bot once they're no longer drafts. Every run keeps its recordings as an artifact you can download and listen to.
+Everything except Claude is real: Discord with its end-to-end encryption, whisper.cpp and Piper. Claude is replaced by a fixed answer of two sentences, written one after the other like Claude Code does, so no Claude subscription is used. It runs in GitHub Actions (`.github/workflows/live-voice.yml`) every night, on demand, and on pull requests that change the bot once they're no longer drafts. Every run keeps its recordings as an artifact you can download and listen to.
 
 It needs its own private Discord server:
 

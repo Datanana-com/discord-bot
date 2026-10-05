@@ -49,9 +49,11 @@ final readonly class Claude
 
     /**
      * @param string $systemPrompt What Claude is asked to do; by default, to answer in a voice call.
+     * @param (callable(string $text): void)|null $onText Called with each piece of the answer while Claude is
+     *                                                    writing it. Together, the pieces are the whole answer.
      * @return PromiseInterface<string> Claude's answer.
      */
-    public function ask(string $prompt, string $systemPrompt = self::SYSTEM_PROMPT): PromiseInterface
+    public function ask(string $prompt, string $systemPrompt = self::SYSTEM_PROMPT, ?callable $onText = null): PromiseInterface
     {
         // An empty directory keeps Claude Code from picking up a CLAUDE.md or project settings.
         if (! is_dir($this->workingDirectory)) {
@@ -62,11 +64,18 @@ final readonly class Claude
         $env = getenv();
         unset($env['ANTHROPIC_API_KEY']);
 
-        return Shell::run(
+        $result = null;
+        $streamed = false;
+
+        return Shell::stream(
             [
                 $this->binary,
                 '--print',
-                '--output-format', 'json',
+                // One JSON event per line while Claude answers. --print only streams with --verbose,
+                // and only sends the text while it is being written with --include-partial-messages.
+                '--output-format', 'stream-json',
+                '--verbose',
+                '--include-partial-messages',
                 '--model', $this->model,
                 '--system-prompt', $systemPrompt,
                 // The prompt is built from whatever anyone says in the call,
@@ -75,27 +84,47 @@ final readonly class Claude
                 '--strict-mcp-config',
                 '--no-session-persistence',
             ],
+            // Most events are about the session, hooks, rate limits or Claude's thinking: only two matter here.
+            function (string $line) use (&$result, &$streamed, $onText) {
+                $event = json_decode($line, true);
+                $type = is_array($event) ? $event['type'] ?? null : null;
+
+                if ($type === 'result') {
+                    $result = $event;
+                } elseif ($onText !== null && $type === 'stream_event' && ($event['event']['delta']['type'] ?? null) === 'text_delta') {
+                    $streamed = true;
+                    $onText($event['event']['delta']['text']);
+                }
+            },
             $prompt,
             $this->workingDirectory,
             $env,
-        )->then(self::parse(...))->catch(function (CommandFailedException $e) {
-            // Claude Code exits with code 1 on errors (not logged in, usage limit reached, ...)
-            // and explains why in its JSON output.
-            $result = json_decode($e->stdout, true);
+        )->then(function () use (&$result, &$streamed, $onText) {
+            $answer = self::answer($result);
 
+            // A Claude Code that doesn't send the text while it is written still hands over its answer.
+            if ($onText !== null && ! $streamed) {
+                $onText($answer);
+            }
+
+            return $answer;
+        })->catch(function (CommandFailedException $e) use (&$result) {
+            // Claude Code exits with code 1 on errors (not logged in, usage limit reached, ...)
+            // and explains why in its result.
             throw is_string($result['result'] ?? null) ? new RuntimeException('Claude Code: ' . $result['result']) : $e;
         });
     }
 
     /**
-     * Extracts the answer from Claude Code's `--output-format json` result.
+     * Extracts the answer from the `result` event, the last one Claude Code prints.
+     *
+     * @param array<string, mixed>|null $result
      */
-    public static function parse(string $json): string
+    private static function answer(?array $result): string
     {
-        $result = json_decode($json, true);
-
-        if (! is_array($result) || ! is_string($result['result'] ?? null)) {
-            throw new RuntimeException('Unexpected output from Claude Code: ' . mb_substr($json, 0, 200));
+        // Without quoting the output: it may hold the answer, and this message is logged.
+        if (! is_string($result['result'] ?? null)) {
+            throw new RuntimeException('Unexpected output from Claude Code: no result.');
         }
 
         if ($result['is_error'] ?? false) {
