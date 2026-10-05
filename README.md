@@ -491,7 +491,7 @@ composer bench:baseline   # on master: save this machine's times as the baseline
 composer bench            # on the branch: fails when it is slower than the baseline
 ```
 
-Piper speaks the question, "Hey Claude, tell me two short facts about Canberra, one sentence each.", into the fake Discord of the feature tests, 5 times in one call. The call goes through the bot's own code from there: the wait for silence, whisper, Claude and Piper. The times come from the bot's log, in milliseconds:
+Piper speaks the question, "Hey Claude, tell me in two short sentences why people like the weekend.", into the fake Discord of the feature tests, 5 times in one call. It is one Claude answers at once: a question it hands off to be [looked up](#looking-things-up) starts a web search with a bigger model, and is no answer to time, so the bench fails if that ever happens. The call goes through the bot's own code from there: the wait for silence, whisper, Claude and Piper. The times come from the bot's log, in milliseconds:
 
 | Step | |
 |---|---|
@@ -508,7 +508,7 @@ It also shows the settings it ran with, and which of them differ from the baseli
 
 - The baseline is kept in `~/.cache/discord-bot-bench.json`, so every checkout of the bot on the machine compares with the same one. `BENCH_BASELINE` is another file to use.
 - The settings are read from the checkout's `.env`. In a checkout without one, `BENCH_ENV_FILE` is the `.env` to read. Only the settings of the programs are used (`WHISPER_*`, `CLAUDE_*`, `PIPER_*`, `FFMPEG_*`, `VOICE_*`), never the Discord token or where the bot keeps its recordings, memories and statistics, and the wake word is left out so the bench doesn't depend on whisper hearing it. A setting with `TOKEN`, `KEY`, `SECRET` or `PASSWORD` in its name is left out too: the settings are printed, and saved with the baseline.
-- A baseline file that can't be read as one fails the bench, with what to do: it is never taken for no baseline.
+- A baseline file that can't be read as one, or that was saved for another question, fails the bench, with what to do: it is never taken for no baseline.
 - Each run asks Claude 6 times with your subscription: the 5 questions and the call's summary.
 - Without a `.env`, or with a program or model it names missing, the bench is skipped and says why.
 

@@ -28,8 +28,11 @@ final class VoiceBenchTest extends VoiceTestCase
     /**
      * What is asked, spoken by Piper. Its answer always has two sentences, so the first one is spoken
      * while Claude still writes the second, like most answers in a call: the time to it is what counts.
+     *
+     * Nothing Claude would rather have looked up: asked for facts about a city, it handed the question off
+     * now and then, which starts a web search with a bigger model and is no answer to time.
      */
-    private const string QUESTION = 'Hey Claude, tell me two short facts about Canberra, one sentence each.';
+    private const string QUESTION = 'Hey Claude, tell me in two short sentences why people like the weekend.';
 
     /**
      * How often it is asked. The times compared are the fastest of them: whatever else the machine or
@@ -129,6 +132,8 @@ final class VoiceBenchTest extends VoiceTestCase
                 120.0,
             );
             $this->assertSame([], $this->loggedProblems(), 'The question was answered.');
+            // Handed off, its answer is one sentence that says so, and its times aren't those of an answer.
+            $this->assertSame([], $this->logged('Looking something up'), 'The question was answered at once, not looked up in the background.');
             // The rest of the answer is synthesized and spoken before the next question, which would wait for it.
             await((new ReflectionProperty(VoiceSession::class, 'queue'))->getValue($session));
         }
@@ -161,7 +166,7 @@ final class VoiceBenchTest extends VoiceTestCase
         $this->report($runs, $times, $medians, $baseline);
 
         if (getenv('BENCH_SAVE')) {
-            self::save(['settings' => $this->settings, 'commit' => self::commit(), 'saved' => date('Y-m-d H:i'), 'times' => $times]);
+            self::save(['question' => self::QUESTION, 'settings' => $this->settings, 'commit' => self::commit(), 'saved' => date('Y-m-d H:i'), 'times' => $times]);
             fwrite(STDOUT, 'Saved as the baseline in ' . self::baselineFile() . ".\n");
 
             return;
@@ -205,7 +210,7 @@ final class VoiceBenchTest extends VoiceTestCase
      * @param list<array<string, int>> $runs
      * @param array<string, int> $times The fastest of each step.
      * @param array<string, int> $medians
-     * @param array{settings: array<string, string>, commit: string, saved: string, times: array<string, int>}|null $baseline
+     * @param array{question: string, settings: array<string, string>, commit: string, saved: string, times: array<string, int>}|null $baseline
      */
     private function report(array $runs, array $times, array $medians, ?array $baseline): void
     {
@@ -262,9 +267,10 @@ final class VoiceBenchTest extends VoiceTestCase
 
     /**
      * The saved baseline, or null when none was saved yet. A file that isn't one fails the bench:
-     * taking it for no baseline would let a slower bot pass.
+     * taking it for no baseline would let a slower bot pass. So does the baseline of another question,
+     * whose times say nothing about this one's.
      *
-     * @return array{settings: array<string, string>, commit: string, saved: string, times: array<string, int>}|null
+     * @return array{question: string, settings: array<string, string>, commit: string, saved: string, times: array<string, int>}|null
      */
     private function baseline(): ?array
     {
@@ -286,11 +292,13 @@ final class VoiceBenchTest extends VoiceTestCase
             $this->assertIsInt($baseline['times'][$step] ?? null, $again);
         }
 
+        $this->assertSame(self::QUESTION, $baseline['question'] ?? null, $again);
+
         return $baseline;
     }
 
     /**
-     * @param array{settings: array<string, string>, commit: string, saved: string, times: array<string, int>} $baseline
+     * @param array{question: string, settings: array<string, string>, commit: string, saved: string, times: array<string, int>} $baseline
      */
     private static function save(array $baseline): void
     {
