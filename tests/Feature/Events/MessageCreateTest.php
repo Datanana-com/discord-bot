@@ -5,29 +5,46 @@ declare(strict_types=1);
 namespace Tests\Feature\Events;
 
 use App\Events\MessageCreate;
-use Discord\Discord;
 use Discord\Parts\Channel\Message;
-use Monolog\Handler\TestHandler;
-use Monolog\Logger;
-use PHPUnit\Framework\TestCase;
 use ReflectionClass;
+use Tests\Feature\ChatsInDirectMessages;
+use Tests\Feature\VoiceTestCase;
 
-final class MessageCreateTest extends TestCase
+/**
+ * What the bot does with direct messages is in {@see \Tests\Feature\DirectMessageTest}.
+ */
+final class MessageCreateTest extends VoiceTestCase
 {
-    public function testHandlesAMessage(): void
+    use ChatsInDirectMessages;
+
+    protected function setUp(): void
     {
-        $logs = new TestHandler();
-        $discord = static::getStubBuilder(Discord::class)->disableOriginalConstructor()->onlyMethods(['getLogger'])->getStub();
-        $discord->method('getLogger')->willReturn(new Logger('test', [$logs]));
+        parent::setUp();
+        $this->setUpDirectMessages();
+    }
+
+    protected function tearDown(): void
+    {
+        $this->endDirectMessages();
+        parent::tearDown();
+    }
+
+    public function testHasClaudeAnswerADirectMessage(): void
+    {
+        $this->write('Hello!');
+        $this->waitUntil(fn () => $this->sent !== [], 'the answer');
+
+        $this->assertSame([self::ANSWER], $this->sent);
+    }
+
+    public function testLeavesAMessageWithoutAnAuthorAlone(): void
+    {
+        // Not something Discord sends, but a message nobody wrote can't be answered.
         $message = (new ReflectionClass(Message::class))->newInstanceWithoutConstructor();
 
-        // The methods Application::handleEvent() finds on the class, in order.
-        $event = new MessageCreate($message, $discord, ['setUp', 'terminateExample']);
+        $this->assertNull((new MessageCreate($message, $this->discord, ['answerDirectMessage']))->handle());
 
-        $this->assertTrue($event->handle());
-        $this->assertSame(
-            ['Log stuff', 'another example', 'Event "terminateExample" was executed successfully.'],
-            array_map(fn ($record) => $record->message, $logs->getRecords()),
-        );
+        $this->assertSame([], $this->timers->pending());
+        $this->assertSame([], $this->logs->getRecords());
     }
 }

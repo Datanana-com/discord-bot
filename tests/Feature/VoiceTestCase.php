@@ -10,6 +10,7 @@ use Discord\Builders\MessageBuilder;
 use Discord\Discord;
 use Discord\Helpers\Collection;
 use Discord\Parts\Channel\Channel;
+use Discord\Voice\Exceptions\Channels\AudioAlreadyPlayingException;
 use Discord\Voice\Processes\OpusDecoderInterface;
 use Discord\Voice\Rtp\Packet;
 use Discord\Voice\Speaking;
@@ -19,14 +20,17 @@ use Monolog\Level;
 use Monolog\Logger;
 use PHPUnit\Framework\TestCase;
 use React\EventLoop\Loop;
+use React\EventLoop\LoopInterface;
 use React\Promise\Deferred;
 use React\Promise\PromiseInterface;
 use ReflectionClass;
 use ReflectionProperty;
+use Tests\FakesClaudeOutput;
 use Tests\UsesStatsDatabase;
 
 use function React\Async\await;
 use function React\Async\delay;
+use function React\Promise\all;
 use function React\Promise\reject;
 use function React\Promise\resolve;
 
@@ -38,6 +42,7 @@ use function React\Promise\resolve;
  */
 abstract class VoiceTestCase extends TestCase
 {
+    use FakesClaudeOutput;
     use UsesStatsDatabase;
 
     protected const string GUILD_ID = '100';
@@ -47,6 +52,9 @@ abstract class VoiceTestCase extends TestCase
     protected string $recordings;
 
     protected string $claudeLog;
+
+    /** Once FAKE_CLAUDE_PAUSE is set, Claude's stand-in stops after its first line until this file exists. */
+    protected string $claudeResume;
 
     protected TestHandler $logs;
 
@@ -60,6 +68,15 @@ abstract class VoiceTestCase extends TestCase
 
     /** When set, posting in the text channel fails with this error. */
     protected ?\Throwable $sendError = null;
+
+    /** When set, a message only arrives in the text channel once this resolves. */
+    protected ?PromiseInterface $sending = null;
+
+    /** When set, a file played into the call only finishes once this resolves. */
+    protected ?PromiseInterface $playing = null;
+
+    /** How long a file played into the call takes otherwise. */
+    protected float $playSeconds = 0.0;
 
     /** @var array<int, true> SSRCs that already sent a speaking event. */
     private array $speaking = [];
@@ -75,6 +92,7 @@ abstract class VoiceTestCase extends TestCase
         touch("{$this->recordings}/models/ggml-base.bin");
         touch("{$this->recordings}/models/voice.onnx");
         $this->claudeLog = "{$this->recordings}/claude.log";
+        $this->claudeResume = "{$this->recordings}/claude.resume";
 
         $this->setEnv([
             'RECORDINGS_PATH' => $this->recordings,
@@ -89,8 +107,10 @@ abstract class VoiceTestCase extends TestCase
         ]);
         $this->setProcessEnv([
             'FAKE_CLAUDE_LOG' => $this->claudeLog,
-            'FAKE_CLAUDE_OUTPUT' => json_encode(['type' => 'result', 'is_error' => false, 'result' => 'It is a quarter past four.']),
+            'FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is a quarter', ' past four.'),
             'FAKE_CLAUDE_EXIT' => '0',
+            'FAKE_CLAUDE_PAUSE' => '0',
+            'FAKE_CLAUDE_RESUME' => $this->claudeResume,
             'FAKE_WHISPER_OUTPUT' => 'Hey Claude, what time is it?',
         ]);
 
@@ -102,13 +122,14 @@ abstract class VoiceTestCase extends TestCase
             ->onlyMethods(['getLogger', 'getLoop', 'joinVoiceChannel'])
             ->getStub();
         $discord->method('getLogger')->willReturn($logger);
-        $discord->method('getLoop')->willReturn(Loop::get());
+        $discord->method('getLoop')->willReturn($this->loop());
         $this->discord = $discord;
     }
 
     protected function tearDown(): void
     {
-        VoiceSession::forGuild(self::GUILD_ID)?->stop();
+        // A call is summarized after it stopped, which must be over before its recordings are deleted.
+        await(all(array_map(fn (VoiceSession $session) => $session->stop(), VoiceSession::unfinished())));
 
         foreach ($this->originalEnv as $name => $value) {
             if (str_starts_with($name, 'FAKE_')) {
@@ -121,6 +142,14 @@ abstract class VoiceTestCase extends TestCase
         }
 
         exec('rm -rf ' . escapeshellarg($this->recordings));
+    }
+
+    /**
+     * The event loop the bot runs its timers on.
+     */
+    protected function loop(): LoopInterface
+    {
+        return Loop::get();
     }
 
     /**
@@ -183,7 +212,7 @@ abstract class VoiceTestCase extends TestCase
             $this->assertSame(['parse' => []], $message->jsonSerialize()['allowed_mentions'] ?? null, 'Mentions are disabled.');
             $this->sent[] = $message->getContent();
 
-            return $this->sendError === null ? resolve(null) : reject($this->sendError);
+            return $this->sendError === null ? $this->sending ?? resolve(null) : reject($this->sendError);
         });
 
         return $channel;
@@ -222,10 +251,19 @@ abstract class VoiceTestCase extends TestCase
             $vc->method('getReceiveStream')->willReturn(null);
         }
 
-        $vc->method('playFile')->willReturnCallback(function (string $file): PromiseInterface {
+        $busy = false;
+        $vc->method('playFile')->willReturnCallback(function (string $file) use (&$busy): PromiseInterface {
+            // Like the voice library, which plays one file at a time.
+            if ($busy) {
+                return reject(new AudioAlreadyPlayingException());
+            }
+
+            $busy = true;
             $this->played[] = $file;
 
-            return resolve(null);
+            return ($this->playing ?? $this->after($this->playSeconds))->then(function () use (&$busy) {
+                $busy = false;
+            });
         });
         // The ffmpeg decoder process is not needed: PCM comes from the Opus decoder below.
         $vc->method('createDecoder')->willReturnCallback(function (object $ss) use ($vc): void {
@@ -326,6 +364,21 @@ abstract class VoiceTestCase extends TestCase
         Loop::cancelTimer($deadline);
 
         $this->assertTrue((bool) $condition(), "Timed out waiting for {$what}.");
+    }
+
+    /**
+     * A promise that resolves after a while, or right away when that is no time at all.
+     */
+    protected function after(float $seconds): PromiseInterface
+    {
+        if ($seconds <= 0) {
+            return resolve(null);
+        }
+
+        $over = new Deferred();
+        Loop::addTimer($seconds, fn () => $over->resolve(null));
+
+        return $over->promise();
     }
 
     /**
