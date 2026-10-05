@@ -5,11 +5,13 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Analytics\Usage;
+use App\Assistant\Memory;
 use App\Voice\VoiceSession;
 use Discord\Builders\MessageBuilder;
 use Discord\Discord;
 use Discord\Helpers\Collection;
 use Discord\Parts\Channel\Channel;
+use Discord\Voice\Exceptions\Channels\AudioAlreadyPlayingException;
 use Discord\Voice\Processes\OpusDecoderInterface;
 use Discord\Voice\Rtp\Packet;
 use Discord\Voice\Speaking;
@@ -19,14 +21,17 @@ use Monolog\Level;
 use Monolog\Logger;
 use PHPUnit\Framework\TestCase;
 use React\EventLoop\Loop;
+use React\EventLoop\LoopInterface;
 use React\Promise\Deferred;
 use React\Promise\PromiseInterface;
 use ReflectionClass;
 use ReflectionProperty;
+use Tests\FakesClaudeOutput;
 use Tests\UsesStatsDatabase;
 
 use function React\Async\await;
 use function React\Async\delay;
+use function React\Promise\all;
 use function React\Promise\reject;
 use function React\Promise\resolve;
 
@@ -38,15 +43,31 @@ use function React\Promise\resolve;
  */
 abstract class VoiceTestCase extends TestCase
 {
+    use FakesClaudeOutput;
     use UsesStatsDatabase;
 
     protected const string GUILD_ID = '100';
 
-    protected const array MEMBERS = ['555' => 'Alice', '666' => 'Bob'];
+    protected const array MEMBERS = ['555' => 'Alice', '666' => 'Bob', '777' => 'Carol'];
+
+    /** The bot's own user ID: it is in the voice channel too, but it doesn't count as someone there. */
+    protected const string BOT_ID = '999';
 
     protected string $recordings;
 
     protected string $claudeLog;
+
+    /** Once FAKE_CLAUDE_PAUSE is set, Claude's stand-in stops after its first line until this file exists. */
+    protected string $claudeResume;
+
+    /** Every time Claude's stand-in ran, one after the other: see {@see claudeCalls()}. */
+    protected string $claudeCalls;
+
+    /** Where the bot keeps its memories. */
+    protected string $memories;
+
+    /** @var \ArrayObject<int, object> The voice states of the server, as the bot's cache holds them: who is in which voice channel. */
+    protected \ArrayObject $voiceStates;
 
     protected TestHandler $logs;
 
@@ -60,6 +81,15 @@ abstract class VoiceTestCase extends TestCase
 
     /** When set, posting in the text channel fails with this error. */
     protected ?\Throwable $sendError = null;
+
+    /** When set, a message only arrives in the text channel once this resolves. */
+    protected ?PromiseInterface $sending = null;
+
+    /** When set, a file played into the call only finishes once this resolves. */
+    protected ?PromiseInterface $playing = null;
+
+    /** How long a file played into the call takes otherwise. */
+    protected float $playSeconds = 0.0;
 
     /** @var array<int, true> SSRCs that already sent a speaking event. */
     private array $speaking = [];
@@ -75,8 +105,13 @@ abstract class VoiceTestCase extends TestCase
         touch("{$this->recordings}/models/ggml-base.bin");
         touch("{$this->recordings}/models/voice.onnx");
         $this->claudeLog = "{$this->recordings}/claude.log";
+        $this->claudeResume = "{$this->recordings}/claude.resume";
+        $this->claudeCalls = "{$this->recordings}/claude.calls";
+        $this->memories = "{$this->recordings}/memories";
+        $this->voiceStates = new \ArrayObject();
 
         $this->setEnv([
+            'MEMORY_PATH' => $this->memories,
             'RECORDINGS_PATH' => $this->recordings,
             'VOICE_WAKE_WORD' => 'claude',
             'WHISPER_BINARY' => "{$fixtures}/fake-whisper",
@@ -89,8 +124,11 @@ abstract class VoiceTestCase extends TestCase
         ]);
         $this->setProcessEnv([
             'FAKE_CLAUDE_LOG' => $this->claudeLog,
-            'FAKE_CLAUDE_OUTPUT' => json_encode(['type' => 'result', 'is_error' => false, 'result' => 'It is a quarter past four.']),
+            'FAKE_CLAUDE_CALLS' => $this->claudeCalls,
+            'FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is a quarter', ' past four.'),
             'FAKE_CLAUDE_EXIT' => '0',
+            'FAKE_CLAUDE_PAUSE' => '0',
+            'FAKE_CLAUDE_RESUME' => $this->claudeResume,
             'FAKE_WHISPER_OUTPUT' => 'Hey Claude, what time is it?',
         ]);
 
@@ -99,16 +137,24 @@ abstract class VoiceTestCase extends TestCase
         $logger = new Logger('test', [$this->logs]);
         $discord = static::getStubBuilder(Discord::class)
             ->disableOriginalConstructor()
-            ->onlyMethods(['getLogger', 'getLoop', 'joinVoiceChannel'])
+            ->onlyMethods(['getLogger', 'getLoop', 'joinVoiceChannel', '__get'])
             ->getStub();
+        $discord->method('__get')->willReturnCallback(fn (string $name) => match ($name) {
+            'id' => self::BOT_ID,
+            'users' => $this->userNames(),
+            default => null,
+        });
         $discord->method('getLogger')->willReturn($logger);
-        $discord->method('getLoop')->willReturn(Loop::get());
+        $discord->method('getLoop')->willReturn($this->loop());
         $this->discord = $discord;
     }
 
     protected function tearDown(): void
     {
-        VoiceSession::forGuild(self::GUILD_ID)?->stop();
+        // A call is summarized after it stopped, which must be over before its recordings are deleted.
+        await(all(array_map(fn (VoiceSession $session) => $session->stop(), VoiceSession::unfinished())));
+        // A call a test left starting, as when the bot never got to join, is not starting in the next test.
+        (new ReflectionProperty(VoiceSession::class, 'starting'))->setValue(null, []);
 
         foreach ($this->originalEnv as $name => $value) {
             if (str_starts_with($name, 'FAKE_')) {
@@ -121,6 +167,14 @@ abstract class VoiceTestCase extends TestCase
         }
 
         exec('rm -rf ' . escapeshellarg($this->recordings));
+    }
+
+    /**
+     * The event loop the bot runs its timers on.
+     */
+    protected function loop(): LoopInterface
+    {
+        return Loop::get();
     }
 
     /**
@@ -151,10 +205,45 @@ abstract class VoiceTestCase extends TestCase
 
     /**
      * A voice channel whose members are {@see MEMBERS}. Messages sent to it are collected in {@see $sent}.
+     *
+     * @param string $id      The channel's ID: the bot's call is in 200.
+     * @param string $guildId The server it is in.
      */
-    protected function voiceChannel(): Channel
+    protected function voiceChannel(string $id = '200', string $guildId = self::GUILD_ID): Channel
     {
-        $members = new class (self::MEMBERS) {
+        $members = $this->userNames();
+
+        $channel = static::getStubBuilder(Channel::class)
+            ->disableOriginalConstructor()
+            ->onlyMethods(['__get', '__isset', 'sendMessage'])
+            ->getStub();
+        $attributes = fn (string $name) => match ($name) {
+            'id' => $id,
+            'guild_id' => $guildId,
+            'guild' => (object) ['members' => $members, 'voice_states' => $this->voiceStates],
+            default => null,
+        };
+        $channel->method('__get')->willReturnCallback($attributes);
+        $channel->method('__isset')->willReturnCallback(fn (string $name) => $attributes($name) !== null);
+        $channel->method('sendMessage')->willReturnCallback(function (MessageBuilder $message): PromiseInterface {
+            // Messages repeat what people said and what Claude answered, so they must never ping anyone.
+            $this->assertSame(['parse' => []], $message->jsonSerialize()['allowed_mentions'] ?? null, 'Mentions are disabled.');
+            $this->sent[] = $message->getContent();
+
+            return $this->sendError === null ? $this->sending ?? resolve(null) : reject($this->sendError);
+        });
+
+        return $channel;
+    }
+
+    /**
+     * What looks up a user by ID in the bot's caches, for the members of {@see MEMBERS} unless told otherwise.
+     *
+     * @param array<string, string> $names The display name of each user, by ID.
+     */
+    protected function userNames(array $names = self::MEMBERS): object
+    {
+        return new class ($names) {
             /** @param array<string, string> $names */
             public function __construct(private array $names)
             {
@@ -165,28 +254,74 @@ abstract class VoiceTestCase extends TestCase
                 return isset($this->names[$id]) ? (object) ['displayname' => $this->names[$id]] : null;
             }
         };
+    }
 
-        $channel = static::getStubBuilder(Channel::class)
-            ->disableOriginalConstructor()
-            ->onlyMethods(['__get', '__isset', 'sendMessage'])
-            ->getStub();
-        $attributes = fn (string $name) => match ($name) {
-            'id' => '200',
-            'guild_id' => self::GUILD_ID,
-            'guild' => (object) ['members' => $members],
-            default => null,
-        };
-        $channel->method('__get')->willReturnCallback($attributes);
-        $channel->method('__isset')->willReturnCallback(fn (string $name) => $attributes($name) !== null);
-        $channel->method('sendMessage')->willReturnCallback(function (MessageBuilder $message): PromiseInterface {
-            // Messages repeat what people said and what Claude answered, so they must never ping anyone.
-            $this->assertSame(['parse' => []], $message->jsonSerialize()['allowed_mentions'] ?? null, 'Mentions are disabled.');
-            $this->sent[] = $message->getContent();
+    /**
+     * Who is in the voice channel, as the bot's cache knows it: the bot, and these people. Nothing is
+     * known of who is there until this is called, like when the bot's cache has no voice states yet.
+     */
+    protected function inCall(string ...$userIds): void
+    {
+        $this->voiceStates->exchangeArray([]);
 
-            return $this->sendError === null ? resolve(null) : reject($this->sendError);
-        });
+        foreach ([self::BOT_ID, ...$userIds] as $userId) {
+            $this->voiceStates[] = (object) ['user_id' => $userId, 'channel_id' => '200'];
+        }
+    }
 
-        return $channel;
+    /**
+     * Someone leaves the voice channel: Discord then says they are in none.
+     */
+    protected function leaves(string $userId): void
+    {
+        foreach ($this->voiceStates as $state) {
+            if ($state->user_id === $userId) {
+                $state->channel_id = null;
+            }
+        }
+    }
+
+    /**
+     * Someone joins the voice channel.
+     */
+    protected function joins(string $userId): void
+    {
+        $this->leaves($userId);
+        $this->voiceStates[] = (object) ['user_id' => $userId, 'channel_id' => '200'];
+    }
+
+    /**
+     * Claude Code's output for an answer.
+     */
+    protected function claudeSays(string $answer): string
+    {
+        return json_encode(['type' => 'result', 'is_error' => false, 'result' => $answer]);
+    }
+
+    protected function memory(): Memory
+    {
+        return new Memory($this->memories);
+    }
+
+    /**
+     * @return list<array{prompt: string, system: string}> What Claude Code was given each time it ran:
+     *                                                       the prompt on its standard input, and the system prompt on one line.
+     */
+    protected function claudeCalls(): array
+    {
+        if (! is_file($this->claudeCalls)) {
+            return [];
+        }
+
+        $calls = [];
+
+        foreach (array_slice(explode("=== call ===\n", file_get_contents($this->claudeCalls)), 1) as $call) {
+            preg_match('/^stdin=(.*)\n\z/ms', $call, $prompt);
+            preg_match('/^arg=--system-prompt\narg=(.*?)\narg=--tools$/ms', $call, $system);
+            $calls[] = ['prompt' => $prompt[1] ?? '', 'system' => preg_replace('/\s+/', ' ', $system[1] ?? '')];
+        }
+
+        return $calls;
     }
 
     /**
@@ -222,10 +357,19 @@ abstract class VoiceTestCase extends TestCase
             $vc->method('getReceiveStream')->willReturn(null);
         }
 
-        $vc->method('playFile')->willReturnCallback(function (string $file): PromiseInterface {
+        $busy = false;
+        $vc->method('playFile')->willReturnCallback(function (string $file) use (&$busy): PromiseInterface {
+            // Like the voice library, which plays one file at a time.
+            if ($busy) {
+                return reject(new AudioAlreadyPlayingException());
+            }
+
+            $busy = true;
             $this->played[] = $file;
 
-            return resolve(null);
+            return ($this->playing ?? $this->after($this->playSeconds))->then(function () use (&$busy) {
+                $busy = false;
+            });
         });
         // The ffmpeg decoder process is not needed: PCM comes from the Opus decoder below.
         $vc->method('createDecoder')->willReturnCallback(function (object $ss) use ($vc): void {
@@ -329,6 +473,21 @@ abstract class VoiceTestCase extends TestCase
     }
 
     /**
+     * A promise that resolves after a while, or right away when that is no time at all.
+     */
+    protected function after(float $seconds): PromiseInterface
+    {
+        if ($seconds <= 0) {
+            return resolve(null);
+        }
+
+        $over = new Deferred();
+        Loop::addTimer($seconds, fn () => $over->resolve(null));
+
+        return $over->promise();
+    }
+
+    /**
      * Runs the event loop for a while, to show that something does not happen.
      */
     protected function runFor(float $seconds): void
@@ -371,6 +530,37 @@ abstract class VoiceTestCase extends TestCase
             fn ($record) => $record->message,
             array_filter($this->logs->getRecords(), fn ($record) => $record->level->value >= Level::Warning->value),
         ));
+    }
+
+    /**
+     * Someone says something to Claude and gets the answer.
+     */
+    protected function ask(VoiceClient $vc, string $userId, string $text): void
+    {
+        $answers = count($this->sent);
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => $text]);
+        $this->speak($vc, ssrc: (int) $userId, userId: $userId, seconds: 1.0);
+        $this->waitUntil(fn () => count($this->sent) > $answers, 'the answer');
+    }
+
+    /**
+     * A prompt without the time of each line of the transcript, which is the time of the test.
+     */
+    protected function untimed(string $prompt): string
+    {
+        return preg_replace('/^\[\d\d:\d\d:\d\d\] /m', '', $prompt);
+    }
+
+    /**
+     * The logs hold IDs, counts, lengths and durations, never what anyone wrote, what Claude answered or the memory.
+     */
+    protected function assertLogsNeverMention(string ...$texts): void
+    {
+        $logs = implode("\n", array_map(fn ($record) => $record->message . ' ' . json_encode($record->context), $this->logs->getRecords()));
+
+        foreach ($texts as $text) {
+            $this->assertStringNotContainsString($text, $logs);
+        }
     }
 
     protected function assertWavDuration(float $seconds, string $path): void

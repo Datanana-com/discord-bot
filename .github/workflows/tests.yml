@@ -1,16 +1,36 @@
 # Runs the unit and feature tests (composer test), with code coverage.
+#
+# Only when something the tests depend on changed: PHP code, the tests and their fixtures,
+# the dependencies or PHPUnit's configuration. Not on draft pull requests: they run once
+# marked ready for review.
 name: Tests
 
 on:
   push:
     branches: [master]
+    paths:
+      - '**.php'
+      - 'tests/**'
+      - 'composer.json'
+      - 'composer.lock'
+      - 'phpunit.xml'
+      - '.github/workflows/tests.yml'
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - '**.php'
+      - 'tests/**'
+      - 'composer.json'
+      - 'composer.lock'
+      - 'phpunit.xml'
+      - '.github/workflows/tests.yml'
 
 permissions:
   contents: read
 
 jobs:
   tests:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:

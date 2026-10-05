@@ -14,6 +14,18 @@ use React\Promise\PromiseInterface;
  */
 final readonly class Transcriber
 {
+    /**
+     * The codes of the languages whisper transcribes: g_lang in whisper.cpp's src/whisper.cpp, as of v1.9.4.
+     * Models whose name ends in ".en" only know English.
+     */
+    public const array LANGUAGES = [
+        'af', 'am', 'ar', 'as', 'az', 'ba', 'be', 'bg', 'bn', 'bo', 'br', 'bs', 'ca', 'cs', 'cy', 'da', 'de', 'el', 'en', 'es',
+        'et', 'eu', 'fa', 'fi', 'fo', 'fr', 'gl', 'gu', 'ha', 'haw', 'he', 'hi', 'hr', 'ht', 'hu', 'hy', 'id', 'is', 'it', 'ja',
+        'jw', 'ka', 'kk', 'km', 'kn', 'ko', 'la', 'lb', 'ln', 'lo', 'lt', 'lv', 'mg', 'mi', 'mk', 'ml', 'mn', 'mr', 'ms', 'mt',
+        'my', 'ne', 'nl', 'nn', 'no', 'oc', 'pa', 'pl', 'ps', 'pt', 'ro', 'ru', 'sa', 'sd', 'si', 'sk', 'sl', 'sn', 'so', 'sq',
+        'sr', 'su', 'sv', 'sw', 'ta', 'te', 'tg', 'th', 'tk', 'tl', 'tr', 'tt', 'uk', 'ur', 'uz', 'vi', 'yi', 'yo', 'yue', 'zh',
+    ];
+
     public function __construct(
         public string $binary,
         public string $model,
@@ -21,12 +33,15 @@ final readonly class Transcriber
     ) {
     }
 
-    public static function fromEnv(): self
+    /**
+     * @param string|null $language The language spoken, when it is not the one in .env.
+     */
+    public static function fromEnv(?string $language = null): self
     {
         return new self(
             env('WHISPER_BINARY', 'whisper-cli'),
             env('WHISPER_MODEL', ''),
-            env('WHISPER_LANGUAGE', 'auto'),
+            $language ?? env('WHISPER_LANGUAGE', 'auto'),
         );
     }
 
