@@ -376,6 +376,19 @@ final class VoiceOpenConversationTest extends VoiceTestCase
         $this->assertSame([], $this->quietTimers());
     }
 
+    public function testHasNoConversationsWhenTheWakeWordHasNoSpellingLeft(): void
+    {
+        // Only commas: like an empty wake word, everything is answered.
+        $this->setEnv(['VOICE_WAKE_WORD' => ' , ']);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->assertSame('', $session->stopPhrase);
+
+        $this->ask($vc, '555', 'What time is it?');
+
+        $this->assertSame([], $this->logged('Conversation opened'));
+        $this->assertSame([], $this->quietTimers());
+    }
+
     public function testClosesTheConversationEvenWhenOkayCannotBeSpoken(): void
     {
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
