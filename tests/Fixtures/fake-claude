@@ -10,8 +10,9 @@
 # nothing until a line arrives on its stdin, answers it, and ends once its stdin is closed. Its PID is
 # appended to FAKE_CLAUDE_WAITING when it starts. With FAKE_CLAUDE_WAITING_LEAVES it ends at once instead
 # of waiting, and with FAKE_CLAUDE_WAITING_FAILS it ends with code 1 when its prompt arrives, having
-# printed nothing. A test may set these variables after the process started: it reads them again from
-# the file FAKE_ENV, when there is one, once its prompt is there.
+# printed nothing. With FAKE_CLAUDE_WAITING_GREETS it prints that line when it starts, as a Claude Code that
+# says something about its session before it is asked anything would. A test may set these variables after
+# the process started: it reads them again from the file FAKE_ENV, when there is one, once its prompt is there.
 waits=
 for arg in "$@"; do
     if [ "$arg" = --input-format ]; then waits=1; fi
@@ -19,6 +20,7 @@ done
 if [ -n "$waits" ]; then
     if [ -n "${FAKE_CLAUDE_WAITING:-}" ]; then printf '%s\n' "$$" >> "$FAKE_CLAUDE_WAITING"; fi
     if [ -n "${FAKE_CLAUDE_WAITING_LEAVES:-}" ]; then exit 0; fi
+    if [ -n "${FAKE_CLAUDE_WAITING_GREETS:-}" ]; then printf '%s\n' "$FAKE_CLAUDE_WAITING_GREETS"; fi
     # Without a prompt, Claude Code ends quietly once its stdin is closed.
     IFS= read -r input || exit 0
     if [ -r "${FAKE_ENV:-}" ]; then . "$FAKE_ENV"; fi

@@ -895,7 +895,7 @@ final class VoiceSession
      * which knows nothing of the questions before it but what its prompt says.
      *
      * A process doesn't wait for a whole call: Claude Code ends by itself after some minutes without a
-     * prompt. It is then replaced.
+     * prompt. It is then replaced, unless it had only just started: see {@see WAITING_SECONDS}.
      */
     private function wait(): void
     {

@@ -198,8 +198,9 @@ final class Program
             $signal !== null => "was killed by signal {$signal}",
             default => 'exited with code ' . ($code ?? 'unknown'),
         };
-        // Scrubbed: only the end of what it printed is kept, which may start in the middle of a character.
-        $output = trim(mb_scrub($this->stderr));
+        // Only the end of what it printed is kept, which may start in the middle of a character: mb_substr()
+        // turns what is left of that character into question marks.
+        $output = trim($this->stderr);
         $this->done->reject(new CommandFailedException("{$this->command[0]} {$reason}" . ($output !== '' ? ': ' . mb_substr($output, -500) : ''), ''));
     }
 }

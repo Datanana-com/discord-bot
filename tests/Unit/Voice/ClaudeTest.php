@@ -56,6 +56,7 @@ final class ClaudeTest extends TestCase
         putenv('FAKE_CLAUDE_WAITING');
         putenv('FAKE_CLAUDE_WAITING_FAILS');
         putenv('FAKE_CLAUDE_WAITING_LEAVES');
+        putenv('FAKE_CLAUDE_WAITING_GREETS');
         @unlink("{$this->log}.waiting");
         putenv('FAKE_CLAUDE_LOG');
         putenv('FAKE_CLAUDE_OUTPUT');
@@ -403,6 +404,27 @@ final class ClaudeTest extends TestCase
         $log = file_get_contents($this->log);
         $this->assertSame('You summarize voice calls.', $this->option($this->arguments($log), '--system-prompt'));
         $this->assertStringContainsString("thinking=0\n", $log);
+    }
+
+    public function testAWaitingProcessMaySaySomethingBeforeItIsAsked(): void
+    {
+        // Claude Code 2.1.289 prints nothing until it is asked, but its events about the session come first
+        // in its output, and another version may send them before the prompt is there.
+        putenv('FAKE_CLAUDE_WAITING_GREETS={"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000000"}');
+        putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeStream('Paris.'));
+        putenv("FAKE_CLAUDE_WAITING={$this->log}.waiting");
+
+        $waiting = $this->waiting($this->claude()->wait());
+        $pid = $this->waitingPid();
+        delay(0.3);
+
+        // It is still waiting, and what it said was no answer.
+        $this->assertTrue(posix_kill($pid, 0));
+        $this->assertFalse($waiting->answered());
+
+        $this->assertSame('Paris.', await($waiting->ask('Hello', $this->collect(...))));
+        $this->assertSame(['Paris.'], $this->pieces);
+        $this->assertStringContainsString("pid={$pid}\n", file_get_contents($this->log));
     }
 
     public function testAWaitingProcessNeverBreaksItsMessageOnWhatWasMisheard(): void

@@ -42,7 +42,11 @@ final class VoiceInterruptionTest extends VoiceTestCase
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 0.1);
         $this->assertSame(["{$session->directory}/claude-2.ogg"], $this->cutOff);
 
-        // It is logged with who interrupted, in which call, and how long the bot had been speaking.
+        // She goes on talking, which interrupts nothing more: the bot is silent, and Claude is still writing.
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 0.6);
+        $this->assertSame(["{$session->directory}/claude-2.ogg"], $this->cutOff);
+
+        // It is logged once, with who interrupted, in which call, and how long the bot had been speaking.
         $interrupted = $this->logged('Interrupted');
         $this->assertCount(1, $interrupted);
         $this->assertSame(['guild', 'session', 'user', 'ms'], array_keys($interrupted[0]));
