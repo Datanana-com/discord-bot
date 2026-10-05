@@ -195,8 +195,9 @@ final class VoiceSession
             preg_split('/\s+/u', $wakeWord, flags: PREG_SPLIT_NO_EMPTY),
         );
 
-        // Between two of its words: anything but letters, their accents, and numbers.
-        return $words === [] || preg_match('/\b' . implode('[^\p{L}\p{M}\p{N}]+', $words) . '\b/iu', $text) === 1;
+        // Between two of its words: anything but letters, their accents, and numbers. Around it too:
+        // \b would also end a word before a vowel sign, which is how Hindi or Bengali write vowels.
+        return $words === [] || preg_match('/(?<![\p{L}\p{M}\p{N}])' . implode('[^\p{L}\p{M}\p{N}]+', $words) . '(?![\p{L}\p{M}\p{N}])/iu', $text) === 1;
     }
 
     /**
