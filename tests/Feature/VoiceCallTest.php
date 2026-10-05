@@ -105,15 +105,15 @@ final class VoiceCallTest extends VoiceTestCase
         );
 
         // Alice's question was decrypted and decoded into her recording: a second of her 440 Hz tone.
-        $session->stop();
+        await($session->stop());
         $recording = $this->pcm(file_get_contents("{$session->directory}/555-1.wav"), wavHeader: true);
         $this->assertEqualsWithDelta(1.0, $this->seconds($recording), 0.05, 'Length of the recording.');
         $this->assertEqualsWithDelta(440, $this->frequency($recording), 20, 'Pitch of the recording.');
 
-        // She was understood and answered.
+        // She was understood and answered, and the call was summarized when it ended. Claude's stand-in gives both the same text.
         $this->assertStringContainsString('] Alice: Hey Claude, what time is it?', $this->transcript($session));
         $this->assertStringContainsString('] Claude: It is a quarter past four.', $this->transcript($session));
-        $this->assertSame(["> **Alice:** Hey Claude, what time is it?\nIt is a quarter past four."], $this->sent);
+        $this->assertSame(["> **Alice:** Hey Claude, what time is it?\nIt is a quarter past four.", 'It is a quarter past four.'], $this->sent);
         $this->assertFileExists("{$session->directory}/claude-2.ogg");
 
         // The bot said it was speaking, then sent the answer: a second of Piper's 660 Hz tone.
