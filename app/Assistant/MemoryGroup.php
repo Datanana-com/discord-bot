@@ -13,6 +13,9 @@ use Discord\Parts\Interactions\Interaction;
  */
 final class MemoryGroup
 {
+    /** The most people a group memory can have: whoever uses /memory or /forget, and the other people the four options name. */
+    public const int MAX_PEOPLE = 5;
+
     /** What /memory and /forget take: the other people of the group, one in each option. */
     public const array OPTIONS = [
         ['type' => Option::USER, 'name' => 'with', 'description' => 'Someone in the group the memory belongs to.'],

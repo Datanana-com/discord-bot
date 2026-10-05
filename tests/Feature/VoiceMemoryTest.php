@@ -4,8 +4,11 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Assistant\MemoryGroup;
 use App\Privacy\OptOuts;
 use App\Voice\VoiceSession;
+
+use PHPUnit\Framework\Attributes\TestWith;
 
 use function React\Async\await;
 
@@ -416,5 +419,167 @@ final class VoiceMemoryTest extends VoiceTestCase
         $this->assertSame(self::NEW_MEMORY, $this->memory()->read('555'));
         $this->assertFileDoesNotExist("{$this->memories}/groups/555-666.md");
         $this->assertSame([1], array_column($this->logged('Updated memory'), 'people'));
+    }
+
+    public function testSomeoneWhoOptedOutOfBeingRecordedButIsNotInTheCallChangesNothing(): void
+    {
+        // Opt-outs count in every server: only whoever is in this call matters here.
+        (new OptOuts())->add('888');
+        $this->memory()->save(['555', '666'], self::TRIP);
+        $this->inCall('555', '666');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->ask($vc, '555', 'Hey Claude, what time is it?');
+        VoiceSession::optOut('777');
+
+        $this->assertStringContainsString('Lisbon', $this->claudeCalls()[0]['prompt']);
+
+        await($session->stop());
+
+        $this->assertCount(3, $this->claudeCalls());
+        $this->assertSame(self::NEW_MEMORY, $this->memory()->read(['555', '666']));
+    }
+
+    public function testPeopleInAnotherVoiceChannelOfTheServerAreNotInTheCall(): void
+    {
+        $this->memory()->save(['555', '666'], self::TRIP);
+        $this->memory()->save(['555', '666', '777'], '- The three of them run a chess club.');
+        $this->inCall('555', '666');
+        // Carol is in another channel of the same server: its voice states are all in the cache.
+        $this->voiceStates[] = (object) ['user_id' => '777', 'channel_id' => '300'];
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->ask($vc, '555', 'Hey Claude, what time is it?');
+
+        $this->assertStringContainsString('Lisbon', $this->claudeCalls()[0]['prompt']);
+        $this->assertStringNotContainsString('chess', $this->claudeCalls()[0]['prompt']);
+
+        await($session->stop());
+
+        $this->assertSame(self::NEW_MEMORY, $this->memory()->read(['555', '666']));
+        $this->assertSame('- The three of them run a chess club.', $this->memory()->read(['555', '666', '777']));
+    }
+
+    #[TestWith([['555', '666', '777', '888', '901'], true], 'five people')]
+    #[TestWith([['555', '666', '777', '888', '901', '902'], false], 'six people')]
+    public function testHasNoGroupMemoryForMorePeopleThanTheCommandsCanName(array $people, bool $remembered): void
+    {
+        // /memory and /forget name the person using them and four others: a bigger group's memory couldn't be seen or deleted.
+        $this->assertSame(5, MemoryGroup::MAX_PEOPLE);
+        $this->assertSame(count(MemoryGroup::OPTIONS) + 1, MemoryGroup::MAX_PEOPLE);
+        $this->memory()->save($people, self::TRIP);
+        $this->inCall(...$people);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->ask($vc, '555', 'Hey Claude, what time is it?');
+        await($session->stop());
+
+        $this->assertSame($remembered, str_contains($this->claudeCalls()[0]['prompt'], 'Lisbon'));
+        $this->assertCount($remembered ? 3 : 2, $this->claudeCalls());
+        $this->assertSame($remembered ? self::NEW_MEMORY : self::TRIP, $this->memory()->read($people));
+    }
+
+    public function testStillUpdatesTheMemoriesWhenTheSummaryFails(): void
+    {
+        $this->inCall('555');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', 'Hey Claude, what time is it?');
+
+        // Claude gives an empty summary.
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => $this->claudeSays('')]);
+        await($session->stop());
+
+        $this->assertSame("Sorry, I couldn't summarize the call. (Claude gave an empty summary.)", end($this->sent));
+        $this->assertSame(self::NEW_MEMORY, $this->memory()->read('555'));
+    }
+
+    public function testDoesNotUseAGroupMemoryWhenSomeoneInTheCallOptsOutWhileAQuestionWaitsForItsTurn(): void
+    {
+        $this->memory()->save(['555', '666'], self::TRIP);
+        $this->inCall('555', '666');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        // Transcribing takes a while, and Bob opts out after Alice's question ended.
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => 'Hey Claude, what time is it?', 'FAKE_WHISPER_DELAY' => '0.7']);
+        $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->logged('Utterance ended') !== [], 'the utterance to end');
+        VoiceSession::optOut('666');
+        $this->waitUntil(fn () => $this->sent !== [], 'the answer');
+
+        $this->assertStringNotContainsString('Lisbon', $this->claudeCalls()[0]['prompt']);
+
+        await($session->stop());
+
+        $this->assertCount(2, $this->claudeCalls(), 'The answer and the summary: nothing is updated.');
+        $this->assertSame(self::TRIP, $this->memory()->read(['555', '666']));
+    }
+
+    public function testDoesNotSaveAMemoryWhenSomeoneOptsOutWhileClaudeIsWritingIt(): void
+    {
+        $this->inCall('555', '666');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', 'Hey Claude, what time is it?');
+
+        $this->setProcessEnv(['FAKE_CLAUDE_DELAY' => '0.5']);
+        $ended = $session->stop();
+        $this->waitUntil(fn () => count($this->claudeCalls()) === 3, 'Claude to be asked for the new memory');
+        VoiceSession::optOut('666');
+        await($ended);
+
+        $this->assertFileDoesNotExist("{$this->memories}/groups/555-666.md");
+        $this->assertSame([], $this->logged('Updated memory'));
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testAMemoryThatCannotBeReadDoesNotStopTheOthersFromBeingUpdated(): void
+    {
+        $this->memory()->save('555', self::ALICE);
+        $this->inCall('555');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', 'Hey Claude, first.');
+        $this->joins('666');
+        $this->ask($vc, '555', 'Hey Claude, second.');
+        // Alice's memory is only unreadable once the call is over, when it is updated first.
+        chmod("{$this->memories}/555.md", 0000);
+        $this->assertFalse(is_readable("{$this->memories}/555.md"), 'The test needs a user the file\'s mode applies to.');
+
+        // PHP warns that it can't open the file, which the test expects.
+        $warnings = [];
+        set_error_handler(function (int $level, string $message) use (&$warnings): bool {
+            $warnings[] = $message;
+
+            return true;
+        }, E_WARNING);
+
+        try {
+            await($session->stop());
+        } finally {
+            restore_error_handler();
+            chmod("{$this->memories}/555.md", 0600);
+        }
+
+        $this->assertCount(1, $warnings);
+        $this->assertStringContainsString('Permission denied', $warnings[0]);
+        $problems = $this->loggedProblems();
+        $this->assertCount(1, $problems);
+        $this->assertStringStartsWith('Could not update the memory: ', $problems[0]);
+        $this->assertSame(self::NEW_MEMORY, $this->memory()->read(['555', '666']));
+        $this->assertSame([2], array_column($this->logged('Updated memory'), 'people'));
+    }
+
+    public function testForgettingOneMemoryLeavesWhatWasSaidForAnotherAlone(): void
+    {
+        $this->inCall('555');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', 'Hey Claude, first.');
+        $this->joins('666');
+        $this->ask($vc, '555', 'Hey Claude, second.');
+
+        VoiceSession::forget('555');
+        await($session->stop());
+
+        $this->assertCount(4, $this->claudeCalls(), 'Two answers, the summary, and the update of the group\'s memory only.');
+        $this->assertFileDoesNotExist("{$this->memories}/555.md");
+        $this->assertSame(self::NEW_MEMORY, $this->memory()->read(['555', '666']));
     }
 }

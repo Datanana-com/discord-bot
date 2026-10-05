@@ -170,7 +170,7 @@ Most things are discussed and decided in calls, so the bot remembers those too. 
 - When people join or leave, the next question uses the memory of the new group. What was said is kept with the people who were there when it was said, also for someone who left right after speaking.
 - Whenever you ask Claude something in a call with others, your personal memory is added to the prompt as well, labeled with your name, even with others listening. The other people's personal memories are never used. Claude's instructions say whose memory is whose, that everyone in the call hears its answer, and that it should only bring up what the question needs.
 - Personal memories are never updated from calls with other people: what Spartan says there goes into the group's memory, never into yours.
-- While someone who opted out of being recorded (see [Opting out of being recorded](#opting-out-of-being-recorded)) is in the channel, no group memory is used or updated. What is said then is not remembered, and a memory belonging to someone who opts out during the call is not updated from it either.
+- While someone who opted out of being recorded (see [Opting out of being recorded](#opting-out-of-being-recorded)) is in the channel, no group memory is used or updated. What is said then is not remembered, and a memory belonging to someone who opts out is not used or updated from then on, even for a question already waiting for its turn or an update Claude is already writing.
 - When the voice states of the bot's cache don't show the bot in its voice channel, who is there is not known, and no group memory is used or updated either. Voice states come from the `GUILD_VOICE_STATES` intent, which the default intents include.
 
 **Updates** run after the call ends and its summary is posted (also when the summary failed), one after the other, with one Claude request for each memory, however often the same people came back to the call: it gets the memory and the part of `transcript.txt` that was said while they were there. A memory that can't be updated is logged as a warning, and the others still are.
@@ -183,7 +183,7 @@ Most things are discussed and decided in calls, so the bot remembers those too. 
 - Anyone in a group can see and delete its memory. Only they see the reply.
 - Memories of calls recorded before this feature don't exist: only what is said from now on is remembered.
 
-A group's file name has to stay within the 255 bytes most file systems allow, which holds the IDs of about 12 people. A call with more people can't save its group memory; it is logged as a warning.
+A call with more than five people uses and updates no group memory: `/memory` and `/forget` can only name you and four others, so the memory of a bigger group couldn't be seen or deleted. It also keeps a group's file name within what file systems allow.
 
 Updates are logged as `Updated memory`, with the call's `session`, how many `people` the memory belongs to and its length in `characters`. The memory itself is never logged.
 

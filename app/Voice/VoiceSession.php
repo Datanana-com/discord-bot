@@ -6,6 +6,7 @@ namespace App\Voice;
 
 use App\Analytics\Usage;
 use App\Assistant\Memory;
+use App\Assistant\MemoryGroup;
 use App\Assistant\MemoryWriter;
 use App\Privacy\OptOuts;
 use App\Settings\GuildSettings;
@@ -523,6 +524,8 @@ final class VoiceSession
                     return null;
                 }
 
+                // Someone else in the call may have opted out since it was said, while it waited for its turn.
+                $people = $this->unlessOptedOut($people);
                 $name = $this->nameOf($userId);
                 $this->remember("{$name}: {$text}", $people);
 
@@ -696,8 +699,10 @@ final class VoiceSession
      * just left. Memories are of who was there, not only of who spoke.
      *
      * @return list<string>|null Their user IDs, lowest first. Null when no group memory may be used or
-     *                           updated: someone in the call opted out, or the voice states don't show
-     *                           the bot in its channel, so who else is there isn't known.
+     *                           updated: someone in the call opted out, the voice states don't show the
+     *                           bot in its channel, so who else is there isn't known, or there are more
+     *                           people than /memory and /forget can name, so nobody could see or delete
+     *                           their memory.
      */
     private function group(string $speaker): ?array
     {
@@ -717,7 +722,16 @@ final class VoiceSession
 
         $people = Memory::people($people);
 
-        return $known && array_intersect($people, array_keys($this->optedOut)) === [] ? $people : null;
+        return $known && count($people) <= MemoryGroup::MAX_PEOPLE ? $this->unlessOptedOut($people) : null;
+    }
+
+    /**
+     * @param list<string>|null $people Who was in the call: see {@see group()}.
+     * @return list<string>|null The same people, or null when one of them has opted out since.
+     */
+    private function unlessOptedOut(?array $people): ?array
+    {
+        return $people !== null && array_intersect($people, array_keys($this->optedOut)) === [] ? $people : null;
     }
 
     /**
@@ -747,13 +761,20 @@ final class VoiceSession
         $said = $this->said[$key] ?? [];
 
         // Someone opted out since: what they said is no longer remembered.
-        if ($said === [] || array_intersect($people, array_keys($this->optedOut)) !== []) {
+        if ($said === [] || $this->unlessOptedOut($people) === null) {
             return resolve(null);
         }
 
         $forgotten = $this->forgotten[$key] ?? 0;
 
-        return $this->writer->update($people, $said, fn () => ($this->forgotten[$key] ?? 0) === $forgotten)
+        // Reading the memory can throw, and that must not skip the memories after this one.
+        return resolve(null)
+            ->then(fn () => $this->writer->update(
+                $people,
+                $said,
+                // Not saved when it was forgotten, or someone opted out, while Claude was writing it.
+                fn () => ($this->forgotten[$key] ?? 0) === $forgotten && $this->unlessOptedOut($people) !== null,
+            ))
             ->then(function (?string $memory) use ($people) {
                 if ($memory !== null) {
                     $this->log('info', 'Updated memory', ['people' => count($people), 'characters' => mb_strlen($memory)]);
