@@ -59,6 +59,26 @@ final class ClaudeTest extends TestCase
         $this->assertNotContains('--bare', $args, '--bare ignores the subscription login.');
     }
 
+    public function testAsksWithAnotherSystemPromptUnderTheSameSafetyMeasures(): void
+    {
+        putenv('FAKE_CLAUDE_OUTPUT=' . json_encode(['type' => 'result', 'is_error' => false, 'result' => 'They agreed to meet on Friday.']));
+
+        $answer = await($this->claude()->ask("Alice: Let's meet on Friday.", 'You summarize voice calls.'));
+
+        $this->assertSame('They agreed to meet on Friday.', $answer);
+
+        $log = file_get_contents($this->log);
+        $args = $this->arguments($log);
+        $this->assertSame('You summarize voice calls.', $this->option($args, '--system-prompt'));
+
+        // What Claude is asked to do changes nothing about what it can do.
+        $this->assertSame('', $this->option($args, '--tools'));
+        $this->assertContains('--strict-mcp-config', $args);
+        $this->assertContains('--no-session-persistence', $args);
+        $this->assertStringContainsString("cwd={$this->workingDirectory}\n", $log);
+        $this->assertStringContainsString("api_key=unset\n", $log);
+    }
+
     public function testRejectsWhenClaudeCodeReportsAnError(): void
     {
         putenv('FAKE_CLAUDE_OUTPUT=' . json_encode(['is_error' => true, 'result' => 'Not logged in · Please run /login']));
