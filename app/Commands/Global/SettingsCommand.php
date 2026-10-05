@@ -138,7 +138,7 @@ final class SettingsCommand extends CommandAbstract
      */
     private static function tidy(array $values): array
     {
-        // Transcripts have single spaces, so a wake word with other spacing would never be found in one.
+        // One space between words: a wake word is announced and shown the way it is saved.
         $values = array_map(fn (mixed $value) => trim(preg_replace('/\s+/u', ' ', (string) $value)), $values);
 
         if (isset($values['language'])) {

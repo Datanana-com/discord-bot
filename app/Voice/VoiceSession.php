@@ -184,10 +184,19 @@ final class VoiceSession
 
     /**
      * Whether the text mentions the wake word. An empty wake word matches everything.
+     *
+     * Whisper punctuates what it hears, so what it puts between the words of a wake word doesn't
+     * count: "Okay, computer" mentions "okay computer".
      */
     public static function mentions(string $text, string $wakeWord): bool
     {
-        return $wakeWord === '' || preg_match('/\b' . preg_quote($wakeWord, '/') . '\b/iu', $text) === 1;
+        $words = array_map(
+            fn (string $word) => preg_quote($word, '/'),
+            preg_split('/\s+/', $wakeWord, flags: PREG_SPLIT_NO_EMPTY),
+        );
+
+        // Between two of its words: anything but letters, their accents, and numbers.
+        return $words === [] || preg_match('/\b' . implode('[^\p{L}\p{M}\p{N}]+', $words) . '\b/iu', $text) === 1;
     }
 
     /**

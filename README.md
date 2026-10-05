@@ -174,7 +174,7 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 |---|---|---|
 | `BOT_SLASH_COMMANDS` | | Must be set for `/record`, `/stop`, `/stats` and `/settings` to be registered. |
 | `RECORDINGS_PATH` | `recordings` | Where recordings and transcripts are saved. |
-| `VOICE_WAKE_WORD` | `claude` | Claude only answers what mentions this word. Leave it empty to answer everything. |
+| `VOICE_WAKE_WORD` | `claude` | Claude only answers what mentions this word or phrase. A phrase also counts when punctuation is heard between its words: "Okay, computer" mentions `okay computer`. Leave it empty to answer everything. |
 | `WHISPER_BINARY` | `whisper-cli` | Path to whisper.cpp's `whisper-cli`. |
 | `WHISPER_MODEL` | | Path to the whisper model, e.g. `~/whisper.cpp/models/ggml-base.bin`. |
 | `WHISPER_LANGUAGE` | `auto` | Language spoken in the call, e.g. `en` or `pt`, or `auto` to detect it. |
@@ -234,7 +234,6 @@ sqlite3 databases/stats.sqlite "SELECT guild_id, COUNT(*) AS answers FROM events
 
 - Answers take a few seconds: transcription, Claude Code starting up, and speech synthesis each add some.
 - Speech recognition sometimes mishears the wake word (e.g. "cloud"). Change it, with `VOICE_WAKE_WORD` or `/settings`, if that happens often.
-- A wake word of several words only counts when they are transcribed with nothing but a space between them: "Okay, computer" doesn't mention "okay computer". A single word is more reliable.
 - The voice library (`discord-php-helpers/voice` 8.3.0) keeps every decoded audio frame in memory until `/stop`, roughly 12 MB per speaker per minute of speech. That's fine for normal calls; for very long ones, `/stop` and `/record` again now and then.
 
 ### Tests
