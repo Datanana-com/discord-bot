@@ -7,9 +7,9 @@ namespace Tests\Feature;
 use App\Assistant\MemoryGroup;
 use App\Privacy\OptOuts;
 use App\Voice\VoiceSession;
-
 use PHPUnit\Framework\Attributes\TestWith;
 use React\Promise\Deferred;
+use React\Promise\PromiseInterface;
 
 use function React\Async\await;
 use function React\Promise\all;
@@ -949,11 +949,8 @@ final class VoiceMemoryTest extends VoiceTestCase
         $this->memory()->save(['555', '666'], self::TRIP);
         [$first, $second] = $this->twoCallsOfAliceAndBob();
 
-        // Both calls end, and Claude is still writing the new memory for one of them.
-        $this->holdMemoryUpdates();
-        $ended = all([$first->stop(), $second->stop()]);
-        $this->waitUntil(fn () => count($this->logged('Summarized the call')) === 2, 'both summaries');
-        $this->waitUntil(fn () => $this->memoryUpdates() !== [], 'Claude to be asked for the new memory');
+        // One call ends, and Claude is still writing its new memory when the other one ends too.
+        $ended = $this->endOneAfterTheOther($first, $second);
         $this->runFor(0.3);
         $this->assertCount(1, $this->memoryUpdates(), 'The other call\'s update waits.');
 
@@ -976,10 +973,7 @@ final class VoiceMemoryTest extends VoiceTestCase
     {
         [$first, $second] = $this->twoCallsOfAliceAndBob();
 
-        $this->holdMemoryUpdates();
-        $ended = all([$first->stop(), $second->stop()]);
-        $this->waitUntil(fn () => count($this->logged('Summarized the call')) === 2, 'both summaries');
-        $this->waitUntil(fn () => $this->memoryUpdates() !== [], 'Claude to be asked for the new memory');
+        $ended = $this->endOneAfterTheOther($first, $second);
         VoiceSession::forget(['555', '666']);
         $this->releaseMemoryUpdates();
         await($ended);
@@ -1014,5 +1008,26 @@ final class VoiceMemoryTest extends VoiceTestCase
         $this->waitUntil(fn () => count($this->sent) === 2, 'the answer in the other call');
 
         return [$first, $second];
+    }
+
+    /**
+     * Ends two calls, the second one while Claude is still writing the new memory the first one asked for,
+     * which it goes on doing until {@see releaseMemoryUpdates()}.
+     *
+     * One after the other, not at once: Claude's stand-ins share the file they log their call in, so two of
+     * them starting together would mix up what the test reads of them.
+     *
+     * @return PromiseInterface<mixed> Resolves once both calls are over.
+     */
+    private function endOneAfterTheOther(VoiceSession $first, VoiceSession $second): PromiseInterface
+    {
+        $this->holdMemoryUpdates();
+        $ended = $first->stop();
+        $this->waitUntil(fn () => $this->memoryUpdates() !== [], 'Claude to be asked for the new memory');
+        $ended = all([$ended, $second->stop()]);
+        // By then the other call has asked for its update too.
+        $this->waitUntil(fn () => count($this->logged('Summarized the call')) === 2, 'the other call to be summarized');
+
+        return $ended;
     }
 }
