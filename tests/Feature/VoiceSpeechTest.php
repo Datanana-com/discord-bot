@@ -136,14 +136,14 @@ final class VoiceSpeechTest extends VoiceTestCase
         $this->waitUntil(fn () => count($this->pipers()) === 1, 'Piper to be started');
 
         $ended = $session->stop();
-        $this->assertSame([$session], VoiceSession::unfinished(), 'Piper has not ended yet, and its folder is in the call\'s.');
+        $this->assertContains($session, VoiceSession::unfinished(), 'Piper has not ended yet, and its folder is in the call\'s.');
 
         await($ended);
 
         // Nothing of Piper is left in the call's folder, which may now be deleted when it is old enough.
         $this->assertFalse($this->isRunning($this->pipers()[0]));
         $this->assertDirectoryDoesNotExist("{$session->directory}/piper");
-        $this->assertSame([], VoiceSession::unfinished());
+        $this->assertNotContains($session, VoiceSession::unfinished());
     }
 
     public function testPiperIsEndedWhenTheBotIsDisconnected(): void

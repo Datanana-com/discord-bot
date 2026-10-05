@@ -412,6 +412,8 @@ composer test -- --testsuite Unit      # or Feature
 
 Unit tests cover each class on its own. Feature tests run the whole voice flow, the direct messages with their memory, and the slash commands against a fake Discord, with whisper.cpp, Claude Code, Piper and, for voice messages, ffmpeg replaced by the scripts in `tests/Fixtures`, and Discord's attachment hosts by a small web server on your machine, so they need no models, Claude login or Discord connection.
 
+The stand-ins for Claude Code and Piper keep running like the real programs do in a call: `fake-claude` waits for its question when it is started with `--input-format stream-json`, and `fake-piper` speaks a sentence for each line it reads.
+
 `tests/Feature/VoiceCallTest.php` goes further: the call's audio travels over a local UDP socket standing in for Discord's media server, encrypted and Opus-encoded like in a real call, and the spoken answer is encoded by ffmpeg. It needs ffmpeg and libopus, like the bot itself, and is skipped without them.
 
 GitHub Actions runs these tests with coverage on pull requests and pushes to `master` that change PHP code, the tests, the dependencies or `phpunit.xml` (`.github/workflows/tests.yml`), with ffmpeg and libopus installed so `VoiceCallTest` runs too. Draft pull requests aren't tested until they're marked ready for review.
@@ -426,7 +428,7 @@ composer test:coverage
 
 `tests/Live` asks the bot a question in a real Discord voice call. A second bot plays the spoken question "Hey Claude, what time is it?" and records the answer.
 
-Everything except Claude is real: Discord with its end-to-end encryption, whisper.cpp and Piper. Claude is replaced by a fixed answer of two sentences, written one after the other like Claude Code does, so no Claude subscription is used. It runs in GitHub Actions (`.github/workflows/live-voice.yml`) every night, on demand, and on pull requests that change the bot once they're no longer drafts. Every run keeps its recordings as an artifact you can download and listen to.
+Everything except Claude is real: Discord with its end-to-end encryption, whisper.cpp and Piper. Claude is replaced by a fixed answer of two sentences, written one after the other like Claude Code does, so no Claude subscription is used. Like in any call, the stand-in is already running and waiting when the question comes, and one Piper process, the real one, speaks both sentences; the test fails when either had to be started for the answer. It runs in GitHub Actions (`.github/workflows/live-voice.yml`) every night, on demand, and on pull requests that change the bot once they're no longer drafts. Every run keeps its recordings as an artifact you can download and listen to.
 
 It needs its own private Discord server:
 

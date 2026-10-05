@@ -152,6 +152,13 @@ final class VoiceRoundTripTest extends TestCase
         $this->assertCount(2, glob("{$session->directory}/claude-*.ogg"), 'Each sentence was synthesized on its own.');
         $this->assertCount(1, array_keys($logged, 'Started speaking', true), 'The bot started speaking the answer.');
 
+        // The question was answered by the Claude Code process that waited for it, and spoken by the Piper the call
+        // started with, the real one: neither had to be started for it.
+        $this->assertEmpty(
+            preg_grep('/^(No Claude Code process was waiting|The waiting Claude Code process did not answer|Piper had stopped)/', $logged),
+            'The programs the call keeps running were there for the answer.',
+        );
+
         // When the call ended, it was summarized. Claude's stand-in gives the summary the same text as the answer.
         $this->assertContains('Summarized the call', $logged);
         $this->assertStringEqualsFile("{$session->directory}/summary.md", "It is a quarter past four. The meeting starts at five.\n");
