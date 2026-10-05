@@ -234,6 +234,7 @@ sqlite3 databases/stats.sqlite "SELECT guild_id, COUNT(*) AS answers FROM events
 
 - Answers take a few seconds: transcription, Claude Code starting up, and speech synthesis each add some.
 - Speech recognition sometimes mishears the wake word (e.g. "cloud"). Change it, with `VOICE_WAKE_WORD` or `/settings`, if that happens often.
+- The wake word is looked for as whole words. In languages written without spaces between words, such as Japanese or Thai, it is only heard when whisper writes a space or punctuation around it.
 - The voice library (`discord-php-helpers/voice` 8.3.0) keeps every decoded audio frame in memory until `/stop`, roughly 12 MB per speaker per minute of speech. That's fine for normal calls; for very long ones, `/stop` and `/record` again now and then.
 
 ### Tests

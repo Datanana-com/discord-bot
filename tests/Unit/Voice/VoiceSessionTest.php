@@ -37,7 +37,9 @@ final class VoiceSessionTest extends TestCase
         yield 'a dash between the words' => ['Okay - computer, play some music', 'okay computer', true];
         yield 'three words' => ['Hey, there. Jarvis?', 'hey there jarvis', true];
         yield 'more than one space in the wake word' => ['Okay computer, play some music', 'okay  computer', true];
+        yield 'a wide space in the wake word, as typed on a Japanese keyboard' => ['ヘイ、クロード、今何時？', "ヘイ\u{3000}クロード", true];
         yield 'another word between the words' => ['Okay, my computer is slow', 'okay computer', false];
+        yield 'a number between the words' => ['Okay 2 computer', 'okay computer', false];
         yield 'the words the other way around' => ['Computer, okay?', 'okay computer', false];
         yield 'the words run together' => ['Okaycomputer, play some music', 'okay computer', false];
         yield 'only the first word' => ['Okay, play some music', 'okay computer', false];
