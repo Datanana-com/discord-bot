@@ -776,9 +776,18 @@ final class VoiceSession
             $this->conversations[$userId] = null;
 
             // Something they said is waiting for its turn, or being answered: it starts again once that is over.
-            if (($this->waiting[$userId] ?? 0) === 0) {
-                $this->closeConversation($userId, 'quiet');
+            if (($this->waiting[$userId] ?? 0) > 0) {
+                return;
             }
+
+            // They are saying something that hasn't ended yet, so it isn't quiet: a minute from now, unless it is answered first.
+            if ($this->splitter->isSpeaking($userId)) {
+                $this->startQuiet($userId);
+
+                return;
+            }
+
+            $this->closeConversation($userId, 'quiet');
         });
     }
 
@@ -792,7 +801,8 @@ final class VoiceSession
         $path = sprintf('%s/claude-%d.ogg', $this->directory, ++$this->files);
 
         return $this->speech->synthesize(self::OKAY, $path)
-            ->then(fn () => $this->stillAnswering($userId, []) ? race([$this->vc->playFile($path), $this->left->promise()]) : null)
+            // It holds nothing of anyone's memory, so only the call ending, or them opting out, stops it.
+            ->then(fn () => ! $this->stopped && ! isset($this->optedOut[$userId]) ? race([$this->vc->playFile($path), $this->left->promise()]) : null)
             ->catch(fn (Throwable $e) => $this->log('warning', 'Could not say okay: ' . $e->getMessage(), ['user' => $userId]));
     }
 

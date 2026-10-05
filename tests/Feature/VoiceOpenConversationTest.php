@@ -203,6 +203,58 @@ final class VoiceOpenConversationTest extends VoiceTestCase
         $this->hearsNoAnswer($vc, $session, '555', 'Anything else?');
     }
 
+    public function testOnlyTheConversationOfWhoWasQuietCloses(): void
+    {
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', 'Hey Claude, what time is it?');
+        $this->waitUntil(fn () => $this->quietTimers() !== [], 'the conversation to be quiet');
+
+        // Bob's conversation is open too, but he is still being answered, so only Alice has a minute running out.
+        $this->setProcessEnv(['FAKE_CLAUDE_PAUSE' => '10']);
+        $this->say($vc, '666', 'Claude, what is the date?');
+        $this->waitUntil(fn () => count($this->claudeCalls()) === 2, 'Claude to be asked');
+        $this->setProcessEnv(['FAKE_CLAUDE_PAUSE' => '0']);
+        $this->assertSame(1, $this->timers->elapse(60.0));
+        $this->assertSame([['user' => '555', 'reason' => 'quiet']], $this->contexts('Conversation closed'));
+
+        touch($this->claudeResume);
+        $this->waitUntil(fn () => count($this->sent) === 2, 'Bob to be answered');
+        $this->hearsNoAnswer($vc, $session, '555', 'Anything else?');
+        $this->ask($vc, '666', 'And me?');
+    }
+
+    public function testDoesNotCloseWhileTheyAreStillSpeaking(): void
+    {
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', 'Hey Claude, what time is it?');
+        $this->waitUntil(fn () => $this->quietTimers() !== [], 'the conversation to be quiet');
+
+        // Alice is saying something when the minute is over: it ends after the timer ran out, and is still answered.
+        $this->say($vc, '555', 'And what is the date?');
+        $this->assertSame(1, $this->timers->elapse(60.0));
+
+        $this->assertSame([], $this->logged('Conversation closed'));
+        $this->assertSame([60.0], $this->quietTimers(), 'A minute from now, unless it is answered first.');
+        $this->waitUntil(fn () => count($this->sent) === 2, 'the answer');
+        $this->assertSame('> **Alice:** And what is the date?' . "\n" . self::ANSWER, $this->sent[1]);
+    }
+
+    public function testClosesOnceWhatTheySaidWhenTheMinuteRanOutTurnsOutTooShortToCount(): void
+    {
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', 'Hey Claude, what time is it?');
+        $this->waitUntil(fn () => $this->quietTimers() !== [], 'the conversation to be quiet');
+
+        // A cough: dropped once it ends, so nothing answers it and nothing starts the minute again.
+        $this->speak($vc, ssrc: 555, userId: '555', seconds: 0.2);
+        $this->assertSame(1, $this->timers->elapse(60.0));
+        $this->waitUntil(fn () => glob("{$session->directory}/utterances/*") === [], 'the cough to be dropped');
+        $this->assertSame([], $this->logged('Conversation closed'));
+
+        $this->assertSame(1, $this->timers->elapse(60.0));
+        $this->assertSame([['user' => '555', 'reason' => 'quiet']], $this->contexts('Conversation closed'));
+    }
+
     public function testDoesNotCloseWhileAnAnswerIsBeingSpoken(): void
     {
         VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
