@@ -71,8 +71,9 @@ final class Shell
      * @param (callable(string $line): void)|null $onLine Called with each line of stdout, without its line ending.
      *                                                    When it throws, the program is stopped.
      * @param (callable(string $line): mixed)|null $onErrorLine Called with each line of stderr, likewise. It returns
-     *                                                          true for a line it expected. The end of what it didn't
-     *                                                          expect is kept, to say why the program failed.
+     *                                                          true for a line it expected. The end of what the
+     *                                                          program said since the last such line is kept, to
+     *                                                          say why it failed.
      * @param string|null $cwd Working directory, or null for the bot's own.
      * @param array<string, string>|null $env Environment variables, or null to inherit the bot's.
      */

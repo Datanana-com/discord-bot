@@ -10,7 +10,7 @@ use App\EventAbstract;
 use Discord\Discord;
 use Discord\Parts\Channel\Message;
 
-class MessageCreate extends EventAbstract
+final class MessageCreate extends EventAbstract
 {
     /**
      * Has Claude answer direct messages, including voice messages. Nothing happens for messages in servers.

@@ -10,6 +10,7 @@ use React\EventLoop\Loop;
 use React\EventLoop\TimerInterface;
 use React\Promise\Deferred;
 use React\Promise\PromiseInterface;
+use RuntimeException;
 use Throwable;
 
 /**
@@ -63,7 +64,17 @@ final class Program
 
         // "exec" replaces the wrapping shell, so terminate() reaches the program itself.
         $this->process = new Process('exec ' . implode(' ', array_map(escapeshellarg(...), $command)), $cwd, $env);
-        $this->process->start();
+
+        try {
+            $this->process->start();
+        } catch (RuntimeException $e) {
+            // It can't be started, as when the bot has no file descriptors or processes left: that is why it
+            // has ended. Whoever started it for later, like a call does for its next question, goes on without it.
+            $this->running = false;
+            $this->done->reject($e);
+
+            return;
+        }
 
         $this->process->stdout->on('data', fn (string $chunk) => $this->read('stdout', $chunk));
         $this->process->stderr->on('data', fn (string $chunk) => $this->read('stderr', $chunk));
@@ -75,7 +86,9 @@ final class Program
      */
     public function write(string $input): void
     {
-        $this->process->stdin->write($input);
+        if ($this->running) {
+            $this->process->stdin->write($input);
+        }
     }
 
     /**
@@ -120,8 +133,9 @@ final class Program
 
     /**
      * @return PromiseInterface<null> Resolves when it has ended; rejects with a {@see CommandFailedException} when it
-     *                                failed, was stopped or timed out, or with what a listener threw. Like with
-     *                                {@see Shell::stream()}, the exception never quotes stdout.
+     *                                failed, was stopped or timed out, with what a listener threw, or with why it
+     *                                could not be started. Like with {@see Shell::stream()}, the exception never
+     *                                quotes stdout.
      */
     public function done(): PromiseInterface
     {
@@ -161,9 +175,11 @@ final class Program
             }
         }
 
-        // What it says on stderr that nobody expected may be why it fails.
-        if ($stream === 'stderr' && ! $expected) {
-            $this->stderr = substr("{$this->stderr}{$line}\n", -self::STDERR_BYTES);
+        // What it says on stderr that nobody expected may be why it fails. A line that was expected says that it
+        // didn't fail over what came before: what is kept starts over, so that a failure is only told with what
+        // the program said since, and not with what it said about work it finished long ago.
+        if ($stream === 'stderr') {
+            $this->stderr = $expected ? '' : substr("{$this->stderr}{$line}\n", -self::STDERR_BYTES);
         }
     }
 

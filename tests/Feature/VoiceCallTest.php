@@ -172,8 +172,9 @@ final class VoiceCallTest extends VoiceTestCase
         $this->sendAudio($frames, from: self::ALICE_SSRC, to: $this->udp->getLocalAddress());
         $this->waitUntil(fn () => count($this->sentPackets) >= 5, 'the bot to start speaking', timeout: 20.0);
 
-        // The bot has just started on its first sentence, a second of tone, when Alice says something else, for a second.
-        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => 'Sorry, never mind.']);
+        // The bot has just started on its first sentence, a second of tone, when Alice laughs for a second, which
+        // whisper makes no words of.
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => '(laughs)']);
         $this->sendAudio($frames, from: self::ALICE_SSRC, to: $this->udp->getLocalAddress(), offset: count($frames));
         $this->waitUntil(fn () => count($this->logged('Transcribed')) === 2, 'what Alice said over the answer to be transcribed', timeout: 20.0);
         await($session->stop());
@@ -188,12 +189,9 @@ final class VoiceCallTest extends VoiceTestCase
         $this->assertGreaterThan(0.2, $this->seconds($answer), 'The bot had started its answer.');
         $this->assertLessThan(0.95, $this->seconds($answer), 'It did not finish its first sentence.');
 
-        // The call went on, though the voice client never said the sentence was over: what Alice said was
-        // transcribed, after the answer she interrupted, which is in the transcript and the text chat as a whole.
-        $this->assertMatchesRegularExpression(
-            '/\] Claude: It is a quarter past four\. Time for a cup of tea\.\n\[[\d:]+\] Alice: Sorry, never mind\.\n$/',
-            $this->transcript($session),
-        );
+        // The call went on, though the voice client never said the sentence was over: what Alice did was transcribed,
+        // after the answer she interrupted, which is in the transcript and the text chat as a whole.
+        $this->assertStringEndsWith("] Claude: It is a quarter past four. Time for a cup of tea.\n", $this->transcript($session));
         $this->assertSame("> **Alice:** Hey Claude, what time is it?\nIt is a quarter past four. Time for a cup of tea.", $this->sent[0]);
         $this->assertSame([], $this->loggedProblems());
     }

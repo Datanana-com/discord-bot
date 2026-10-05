@@ -26,15 +26,23 @@ final readonly class Transcriber
         'sr', 'su', 'sv', 'sw', 'ta', 'te', 'tg', 'th', 'tk', 'tl', 'tr', 'tt', 'uk', 'ur', 'uz', 'vi', 'yi', 'yo', 'yue', 'zh',
     ];
 
-    /** The threads whisper uses unless told otherwise. */
-    private const int THREADS = 4;
+    /** How long whisper.cpp may take for each second of audio: a big model on a slow CPU can be slower than the speech itself. */
+    public const float SECONDS_PER_SECOND_OF_AUDIO = 3.0;
 
+    /** How long whisper.cpp may take at least, whatever the length of the audio: it has to load its model first. */
+    public const float MINIMUM_TIMEOUT = 120.0;
+
+    /**
+     * @param int|null $threads How many threads whisper uses, or null for as many as it takes by itself: 4, or
+     *                          as many as the CPU has when that is fewer.
+     */
     public function __construct(
         public string $binary,
         public string $model,
         public string $language,
         public string $prompt = '',
-        public int $threads = self::THREADS,
+        public float $minimumTimeout = self::MINIMUM_TIMEOUT,
+        public ?int $threads = null,
     ) {
     }
 
@@ -43,15 +51,15 @@ final readonly class Transcriber
      */
     public static function fromEnv(?string $language = null): self
     {
-        // Anything but a whole number of threads, 1 or more, is whisper's own default.
-        $threads = filter_var(env('WHISPER_THREADS', self::THREADS), FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+        // Anything but a whole number of threads, 1 or more, leaves it to whisper.
+        $threads = filter_var(env('WHISPER_THREADS', ''), FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
 
         return new self(
             env('WHISPER_BINARY', 'whisper-cli'),
             env('WHISPER_MODEL', ''),
             $language ?? env('WHISPER_LANGUAGE', 'auto'),
             trim(env('WHISPER_PROMPT', '')),
-            $threads === false ? self::THREADS : $threads,
+            threads: $threads === false ? null : $threads,
         );
     }
 
@@ -59,20 +67,22 @@ final readonly class Transcriber
      * Transcribes a WAV file. whisper.cpp resamples the audio itself,
      * so Discord's 48 kHz stereo recordings can be passed as they are.
      *
+     * @param float $seconds How long the audio is, when it is known: whisper.cpp is given {@see SECONDS_PER_SECOND_OF_AUDIO}
+     *                       for each of them, and at least the minimum timeout, before it is killed.
      * @return PromiseInterface<string> The spoken text, or an empty string when nothing was said.
      */
-    public function transcribe(string $wavPath): PromiseInterface
+    public function transcribe(string $wavPath, float $seconds = 0.0): PromiseInterface
     {
         return Shell::run([
             $this->binary,
             '--model', $this->model,
             '--language', $this->language,
-            '--threads', (string) $this->threads,
+            ...($this->threads === null ? [] : ['--threads', (string) $this->threads]),
             ...($this->prompt === '' ? [] : ['--prompt', $this->prompt]),
             '--no-timestamps',
             '--no-prints',
             '--file', $wavPath,
-        ])->then(self::clean(...));
+        ], timeout: max($this->minimumTimeout, self::SECONDS_PER_SECOND_OF_AUDIO * $seconds))->then(self::clean(...));
     }
 
     /**

@@ -35,6 +35,10 @@ use function React\Promise\resolve;
  * the call with Piper, sentence by sentence while Claude is writing it, and then posted in the
  * text channel. When the call ends, Claude's summary of it is posted in the text channel as well.
  *
+ * Saying the wake word opens a conversation for that person: until they say the stop phrase, are quiet
+ * for a minute, opt out or the call ends, everything they say is answered, without the wake word. What
+ * other people say is only answered when it mentions the wake word, which opens their own conversation.
+ *
  * For an answer to start soon after its question, the call keeps two programs running: a Claude
  * Code process that waits for the next question, and Piper, with its voice loaded. Both are ended
  * with the call. Whoever is being answered can stop the answer by talking over it.
@@ -49,6 +53,11 @@ use function React\Promise\resolve;
  * but personal memories are never updated from calls with others. While someone who opted out is
  * in the channel, no group memory is used or updated. The memories are updated once the call is
  * over and summarized, one Claude request for each.
+ *
+ * Other bots in the channel, like a music bot, are nobody to a memory. A group's memory is only
+ * added to a question when the same people are still there once Claude is asked, and an answer made
+ * from it is cut off when someone else joins. What Claude answers is only remembered for someone
+ * alone with the bot, while nobody shares a memory: elsewhere it may quote a memory of someone else.
  *
  * Whoever is in the call can also share their personal memory with it, with /share, until the call
  * ends: it is then added to every question, labeled with their name, whoever asks.
@@ -78,6 +87,12 @@ final class VoiceSession
 
     /** Characters that fit in a Discord message. */
     private const int MESSAGE_LIMIT = 2000;
+
+    /** Seconds of quiet that close someone's conversation. */
+    private const float CONVERSATION_QUIET = 60.0;
+
+    /** What the bot says when the stop phrase closed a conversation. */
+    private const string OKAY = 'Okay.';
 
     /**
      * A Claude Code process that ended sooner than this many seconds after it started to wait isn't
@@ -154,8 +169,14 @@ final class VoiceSession
 
     private readonly MemoryWriter $writer;
 
+    /** @var array<string, ?TimerInterface> Who has a conversation open, by user ID, with the timer that closes it once they are quiet. */
+    private array $conversations = [];
+
+    /** @var array<string, int> How many utterances of each person wait for their turn or are being answered, by user ID. */
+    private array $waiting = [];
+
     /** The Claude Code process that is already running for the next question, when there is one: see {@see wait()}. */
-    private ?WaitingClaude $waiting = null;
+    private ?WaitingClaude $waitingClaude = null;
 
     /** How long someone has to be silent for what they said to be over. */
     private readonly float $pauseSeconds;
@@ -181,6 +202,7 @@ final class VoiceSession
         private readonly Claude $claude,
         private readonly Speech $speech,
         public readonly string $wakeWord,
+        public readonly string $stopPhrase,
         private readonly Usage $usage,
         /** @var array<string, true> Who opted out of being recorded, by user ID. */
         private array $optedOut,
@@ -250,6 +272,24 @@ final class VoiceSession
         $seconds = filter_var($value, FILTER_VALIDATE_FLOAT, ['options' => ['min_range' => 0.1]]);
 
         return $seconds === false ? null : $seconds;
+    }
+
+    /**
+     * The phrase that ends a conversation, for a server with this wake word: "stop <spelling>" for each of
+     * its spellings, unless VOICE_STOP_PHRASE replaces it. Empty when there is no wake word, as there are no
+     * conversations then.
+     */
+    public static function defaultStopPhrase(string $wakeWord): string
+    {
+        $spellings = self::spellings($wakeWord);
+
+        if ($spellings === []) {
+            return '';
+        }
+
+        // The stop phrase can have several spellings too, and the default has one for each of the wake word's.
+        return implode(', ', self::spellings(env('VOICE_STOP_PHRASE', '')))
+            ?: implode(', ', array_map(fn (string $spelling) => "stop {$spelling}", $spellings));
     }
 
     public static function forGuild(string $guildId): ?self
@@ -329,6 +369,7 @@ final class VoiceSession
             date('Y-m-d_H-i-s'),
         );
         mkdir($directory, 0755, true);
+        $wakeWord = $settings['wake_word'] ?? self::defaultWakeWord();
 
         $session = new self(
             $vc,
@@ -338,7 +379,8 @@ final class VoiceSession
             Transcriber::fromEnv($settings['language']),
             Claude::fromEnv($settings['model']),
             Speech::fromEnv($settings['voice']),
-            $settings['wake_word'] ?? self::defaultWakeWord(),
+            $wakeWord,
+            self::defaultStopPhrase($wakeWord),
             new Usage($discord->getLogger()),
             $optedOut,
             Memory::fromEnv(),
@@ -364,12 +406,13 @@ final class VoiceSession
      * Stops recording, transcribing and answering someone in every call that isn't over, as they used /optout.
      *
      * What they say from now on is dropped, and what was recorded of them is deleted. Their lines
-     * already in the transcript stay.
+     * already in the transcript stay, and their conversation is closed.
      */
     public static function optOut(string $userId): void
     {
         foreach (self::$unfinished as $session) {
             $session->optedOut[$userId] = true;
+            $session->closeConversation($userId, 'opted out');
             // Their memory is no longer used for anyone, whatever they agreed to before.
             unset($session->shared[$userId]);
 
@@ -533,9 +576,18 @@ final class VoiceSession
         unset(self::$sessions[$this->vc->channel->guild_id]);
         $this->discord->getLoop()->cancelTimer($this->ticker);
 
+        // Conversations end with the call. What is still waiting to be handled isn't answered any more.
+        foreach ($this->conversations as $timer) {
+            if ($timer !== null) {
+                $this->discord->getLoop()->cancelTimer($timer);
+            }
+        }
+
+        $this->conversations = [];
+
         // No question is coming for the Claude Code process that waited for one. One that is answering ends once it has.
-        $this->waiting?->stop();
-        $this->waiting = null;
+        $this->waitingClaude?->stop();
+        $this->waitingClaude = null;
         // Piper ends too, once it has spoken the sentence it may be working on.
         $piperEnded = $this->speech->stop();
 
@@ -710,12 +762,20 @@ final class VoiceSession
         $this->log('info', 'Utterance ended', ['user' => $userId, 'ms' => $ms]);
         $this->track(Usage::UTTERANCE, ['user' => $userId, 'duration_ms' => $ms]);
 
+        // Counted from when it ended, not when its turn comes: their conversation can't end quietly meanwhile.
+        $this->waiting[$userId] = ($this->waiting[$userId] ?? 0) + 1;
+
         $this->queue = $this->queue
             ->then(fn () => $this->handleUtterance($userId, $wavPath, $endedAt, $people))
             ->catch(function (Throwable $e) use ($userId) {
                 $this->counts['failures']++;
                 $this->log('error', 'Voice reply failed: ' . $e->getMessage(), ['user' => $userId]);
                 $this->track(Usage::FAILED, ['user' => $userId]);
+            })
+            ->finally(function () use ($userId) {
+                // Answered and spoken, or not answered at all: their conversation is quiet from now on.
+                $this->waiting[$userId]--;
+                $this->startQuiet($userId);
             });
     }
 
@@ -749,14 +809,116 @@ final class VoiceSession
                 $name = $this->nameOf($userId);
                 $this->remember("{$name}: {$text}", $people);
 
-                if ($this->stopped || ! self::mentions($text, $this->wakeWord)) {
-                    $this->log('debug', 'Not answering', ['user' => $userId, 'reason' => $this->stopped ? 'the session stopped' : 'Claude was not addressed']);
+                if ($this->stopped) {
+                    $this->log('debug', 'Not answering', ['user' => $userId, 'reason' => 'the session stopped']);
 
                     return null;
                 }
 
+                // Before the wake word: by default, the stop phrase contains it.
+                if ($this->stopPhrase !== '' && self::mentions($text, $this->stopPhrase)) {
+                    return $this->closeConversation($userId, 'stop phrase') ? $this->sayOkay($userId) : null;
+                }
+
+                if (! $this->hasConversation($userId) && ! self::mentions($text, $this->wakeWord)) {
+                    $this->log('debug', 'Not answering', ['user' => $userId, 'reason' => 'Claude was not addressed']);
+
+                    return null;
+                }
+
+                // Without a wake word, everything is answered already.
+                if (self::wakeWordName($this->wakeWord) !== '') {
+                    $this->openConversation($userId);
+                }
+
                 return $this->answer($userId, $name, $text, $endedAt, $people);
             });
+    }
+
+    /**
+     * Whether everything someone says is answered. Not isset(): a conversation without a timer holds null.
+     */
+    private function hasConversation(string $userId): bool
+    {
+        return array_key_exists($userId, $this->conversations);
+    }
+
+    /**
+     * Starts answering everything someone says, until they say the stop phrase or are quiet for a while.
+     */
+    private function openConversation(string $userId): void
+    {
+        if (! $this->hasConversation($userId)) {
+            $this->conversations[$userId] = null;
+            $this->log('info', 'Conversation opened', ['user' => $userId]);
+        }
+    }
+
+    /**
+     * @param string $reason Why it closed, for the log: "stop phrase", "quiet" or "opted out".
+     * @return bool False when they had no conversation open.
+     */
+    private function closeConversation(string $userId, string $reason): bool
+    {
+        if (! $this->hasConversation($userId)) {
+            return false;
+        }
+
+        if ($this->conversations[$userId] !== null) {
+            $this->discord->getLoop()->cancelTimer($this->conversations[$userId]);
+        }
+
+        unset($this->conversations[$userId]);
+        $this->log('info', 'Conversation closed', ['user' => $userId, 'reason' => $reason]);
+
+        return true;
+    }
+
+    /**
+     * Has their conversation, if one is open, close after a minute of quiet.
+     */
+    private function startQuiet(string $userId): void
+    {
+        if (! $this->hasConversation($userId)) {
+            return;
+        }
+
+        if ($this->conversations[$userId] !== null) {
+            $this->discord->getLoop()->cancelTimer($this->conversations[$userId]);
+        }
+
+        $this->conversations[$userId] = $this->discord->getLoop()->addTimer(self::CONVERSATION_QUIET, function () use ($userId) {
+            $this->conversations[$userId] = null;
+
+            // Something they said is waiting for its turn, or being answered: it starts again once that is over.
+            if (($this->waiting[$userId] ?? 0) > 0) {
+                return;
+            }
+
+            // They are saying something that hasn't ended yet, so it isn't quiet: a minute from now, unless it is answered first.
+            if ($this->splitter->isSpeaking($userId)) {
+                $this->startQuiet($userId);
+
+                return;
+            }
+
+            $this->closeConversation($userId, 'quiet');
+        });
+    }
+
+    /**
+     * Tells someone, in the call, that their conversation is closed.
+     *
+     * @return PromiseInterface<mixed> Resolves once it is said. It never rejects.
+     */
+    private function sayOkay(string $userId): PromiseInterface
+    {
+        $path = sprintf('%s/claude-%d.ogg', $this->directory, ++$this->files);
+
+        return $this->synthesize(self::OKAY, $path)
+            // It holds nothing of anyone's memory, so only the call ending, or them opting out, stops it.
+            ->then(fn () => ! $this->stopped && ! isset($this->optedOut[$userId]) ? race([$this->vc->playFile($path), $this->left->promise()]) : null)
+            ->catch(fn (Throwable $e) => $this->log('warning', 'Could not say okay: ' . $e->getMessage(), ['user' => $userId]));
     }
 
     /**
@@ -773,11 +935,16 @@ final class VoiceSession
         // when sharing it is all that lets it in.
         $sharers = $this->sharers($userId);
         $depends = $basis === self::SHARED ? [...$sharers, $userId] : $sharers;
+        // Who is in the call is taken again: someone may have joined or left while the question waited for its
+        // turn and was transcribed, and a group's memory is only brought up among exactly its people.
+        $group = $this->group($userId) === $people ? $people : null;
+        // Whose memory together this answer is made from, when it is from one: nobody else may hear it.
+        $among = count($group ?? []) > 1 && $this->memory->read($group) !== '' ? $group : null;
         // What the last sentence so far waits for: Piper to be done with it, and the bot to have said it.
         $synthesized = $spoken = resolve(null);
 
-        $sentences = new SentenceSplitter(function (string $sentence) use (&$synthesized, &$spoken, $userId, $depends, $basis, $endedAt) {
-            if (! $this->stillAnswering($userId, $depends, $basis)) {
+        $sentences = new SentenceSplitter(function (string $sentence) use (&$synthesized, &$spoken, $userId, $depends, $basis, $among, $endedAt) {
+            if (! $this->stillAnswering($userId, $depends, $basis, $among)) {
                 return;
             }
 
@@ -788,9 +955,9 @@ final class VoiceSession
             // A sentence is synthesized as soon as Piper is free, while the ones before it are spoken. It is
             // spoken once they are over: the voice client refuses to play a file while it is playing another.
             // Once the call stops, they opt out or talk over the answer, the sentences still waiting for Piper are no longer synthesized either.
-            $synthesized = $synthesized->then(fn () => $this->stillAnswering($userId, $depends, $basis) ? $this->synthesize($sentence, $oggPath) : null);
-            $spoken = $synthesized->finally(fn () => $before)->then(function () use ($userId, $depends, $basis, $oggPath, $endedAt) {
-                if (! $this->stillAnswering($userId, $depends, $basis)) {
+            $synthesized = $synthesized->then(fn () => $this->stillAnswering($userId, $depends, $basis, $among) ? $this->synthesize($sentence, $oggPath) : null);
+            $spoken = $synthesized->finally(fn () => $before)->then(function () use ($userId, $depends, $basis, $among, $oggPath, $endedAt) {
+                if (! $this->stillAnswering($userId, $depends, $basis, $among)) {
                     return null;
                 }
 
@@ -805,8 +972,8 @@ final class VoiceSession
             });
         });
 
-        return $this->ask($userId, $this->prompt($userId, $name, $people, $sharers, $basis !== null), $sentences->push(...))->then(
-            function (string $answer) use ($sentences, &$spoken, $userId, $depends, $basis, $name, $question, $endedAt, $asking, $people) {
+        return $this->ask($userId, $this->prompt($userId, $name, $group, $sharers, $basis !== null), $sentences->push(...))->then(
+            function (string $answer) use ($sentences, &$spoken, $userId, $sharers, $depends, $basis, $among, $name, $question, $endedAt, $asking, $people) {
                 $this->log('info', 'Claude answered', ['user' => $userId, 'ms' => $this->msSince($asking), 'characters' => mb_strlen($answer)]);
                 $sentences->flush();
 
@@ -831,7 +998,17 @@ final class VoiceSession
                     return $spoken;
                 }
 
-                $this->remember("Claude: {$answer}", $people);
+                // Someone joined, or one of the group opted out, while Claude was answering: the answer may quote
+                // a group's memory that isn't for who is in the call any more.
+                if (! $this->stillAmong($userId, $among)) {
+                    $this->log('debug', 'Not answering', ['user' => $userId, 'reason' => 'the people in the call changed']);
+
+                    return $spoken;
+                }
+
+                // The answer may quote a memory that isn't the one it would be remembered in: the asker's own, in a
+                // call with others, or one that was shared. So it only counts for someone alone with the bot.
+                $this->remember("Claude: {$answer}", count($people ?? []) === 1 && $sharers === [] ? $people : null);
                 $this->post("> **{$name}:** {$question}\n{$answer}");
                 $this->counts['answers']++;
                 $this->track(Usage::ANSWERED, ['user' => $userId, 'duration_ms' => $this->msSince($endedAt)]);
@@ -903,16 +1080,16 @@ final class VoiceSession
             return;
         }
 
-        $waiting = $this->waiting = $this->claude->wait(thinks: false);
+        $waiting = $this->waitingClaude = $this->claude->wait(thinks: false);
         $startedAt = microtime(true);
 
         $waiting->ended()->then(function () use ($waiting, $startedAt) {
             // It was asked, or the call stopped.
-            if ($this->waiting !== $waiting) {
+            if ($this->waitingClaude !== $waiting) {
                 return;
             }
 
-            $this->waiting = null;
+            $this->waitingClaude = null;
 
             if (microtime(true) - $startedAt >= self::WAITING_SECONDS) {
                 $this->wait();
@@ -932,8 +1109,8 @@ final class VoiceSession
      */
     private function ask(string $userId, string $prompt, callable $onText): PromiseInterface
     {
-        $waiting = $this->waiting;
-        $this->waiting = null;
+        $waiting = $this->waitingClaude;
+        $this->waitingClaude = null;
 
         if ($waiting === null) {
             $this->log('warning', 'No Claude Code process was waiting for the question', ['user' => $userId]);
@@ -956,7 +1133,8 @@ final class VoiceSession
 
     /**
      * Has Piper speak a sentence into a file. Piper keeps running for the whole call. When it stopped by
-     * itself, as when the sentence before this one made it fail, it is started again.
+     * itself, as when a sentence of an earlier answer made it fail, it is started again. The rest of that
+     * answer wasn't spoken: after a sentence that can't be, none of its answer is.
      *
      * @return PromiseInterface<string> The path of the file.
      */
@@ -971,16 +1149,35 @@ final class VoiceSession
 
     /**
      * Whether an answer to someone is still spoken: not once the call stopped, they opted out or talked
-     * over it, someone took back the memory it was made from, or someone joined a call it was made for
-     * them alone in.
+     * over it, someone took back the memory it was made from, someone joined a call it was made for them
+     * alone in, or someone joined who the group memory it was made from isn't of.
      *
      * @param list<string> $sharers Whose shared memories the answer is made from.
      * @param string|null $basis What let the asker's personal memory in: see {@see personalMemoryBasis()}.
+     * @param list<string>|null $among Whose group memory the answer is made from, when it is from one.
      */
-    private function stillAnswering(string $userId, array $sharers, ?string $basis): bool
+    private function stillAnswering(string $userId, array $sharers, ?string $basis, ?array $among): bool
     {
         return ! $this->stopped && ! isset($this->optedOut[$userId]) && ! ($this->speaking['interrupted'] ?? false)
-            && $this->stillSharing($sharers) && $this->stillAlone($userId, $basis);
+            && $this->stillSharing($sharers) && $this->stillAlone($userId, $basis) && $this->stillAmong($userId, $among);
+    }
+
+    /**
+     * Whether everyone in the call is still one of the people whose group memory an answer is made from.
+     * Someone leaving changes nothing: they hear no more of it. Not knowing who is there does: see {@see group()}.
+     * So does one of the group opting out, also once they left the call: their memory is no longer used.
+     *
+     * @param list<string>|null $among Whose group memory the answer is made from, when it is from one.
+     */
+    private function stillAmong(string $userId, ?array $among): bool
+    {
+        if ($among === null) {
+            return true;
+        }
+
+        $people = $this->group($userId);
+
+        return $people !== null && $this->unlessOptedOut($among) !== null && array_diff($people, $among) === [];
     }
 
     /**
@@ -1074,7 +1271,7 @@ final class VoiceSession
     /**
      * What Claude is asked when someone talks to it: the memories it has of them, then the call so far.
      *
-     * @param list<string>|null $people Who is in the call: see {@see group()}.
+     * @param list<string>|null $people Who is in the call, when they are who was there when the question was asked: see {@see group()}.
      * @param list<string> $sharers Whose shared memories are added: see {@see sharers()}.
      * @param bool $personalAllowed Whether the asker's personal memory may be added: see {@see personalMemoryBasis()}.
      */
@@ -1128,34 +1325,40 @@ final class VoiceSession
     }
 
     /**
-     * Who is in the call: everyone in the voice channel but the bot, and the speaker, who may have
-     * just left. Memories are of who was there, not only of who spoke.
+     * Who is in the call: everyone in the voice channel, and the speaker, who may have just left.
+     * Memories are of who was there, not only of who spoke. Bots aren't people: not this one, and not
+     * another one in the channel or speaking in it, like a music bot. Someone Discord doesn't say is
+     * a bot counts as a person, so that no memory is brought up in front of them.
      *
-     * @return list<string>|null Their user IDs, lowest first. Null when no group memory may be used or
+     * @return list<string>|null Their user IDs, lowest first. Null when no memory may be used or
      *                           updated: someone in the call opted out, the voice states don't show the
-     *                           bot in its channel, so who else is there isn't known, or there are more
+     *                           bot in its channel, so who else is there isn't known, there are more
      *                           people than /memory and /forget can name, so nobody could see or delete
-     *                           their memory.
+     *                           their memory, or only bots are there.
      */
     private function group(string $speaker): ?array
     {
         $channel = $this->vc->channel;
-        $people = [$speaker];
+        $people = $this->discord->users->get('id', $speaker)?->bot ? [] : [$speaker];
         $known = false;
 
         foreach ($channel->guild?->voice_states ?? [] as $state) {
             if ((string) $state->channel_id === (string) $channel->id) {
                 if ((string) $state->user_id === (string) $this->discord->id) {
                     $known = true;
-                } else {
+                } elseif (! $state->user?->bot) {
                     $people[] = (string) $state->user_id;
                 }
             }
         }
 
+        if (! $known || $people === []) {
+            return null;
+        }
+
         $people = Memory::people($people);
 
-        return $known && count($people) <= MemoryGroup::MAX_PEOPLE ? $this->unlessOptedOut($people) : null;
+        return count($people) <= MemoryGroup::MAX_PEOPLE ? $this->unlessOptedOut($people) : null;
     }
 
     /**
@@ -1200,14 +1403,14 @@ final class VoiceSession
 
         $forgotten = $this->forgotten[$key] ?? 0;
 
-        // Reading the memory can throw, and that must not skip the memories after this one.
-        return resolve(null)
-            ->then(fn () => $this->writer->update(
+        // It may wait for another call, or their chat, to be done updating the same memory.
+        return $this->writer
+            ->update(
                 $people,
                 $said,
-                // Not saved when it was forgotten, or someone opted out, while Claude was writing it.
+                // Not saved when it was forgotten, or someone opted out, while it waited or Claude was writing it.
                 fn () => ($this->forgotten[$key] ?? 0) === $forgotten && $this->unlessOptedOut($people) !== null,
-            ))
+            )
             ->then(function (?string $memory) use ($people) {
                 if ($memory !== null) {
                     $this->log('info', 'Updated memory', ['people' => count($people), 'characters' => mb_strlen($memory)]);

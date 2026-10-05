@@ -9,6 +9,7 @@ use App\Support\Program;
 use App\Support\Shell;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
+use Tests\WaitsWithin;
 use Throwable;
 
 use function React\Async\await;
@@ -20,6 +21,8 @@ use function React\Promise\set_rejection_handler;
  */
 final class ProgramTest extends TestCase
 {
+    use WaitsWithin;
+
     /** @var list<Program> Every program a test started: one left running would keep the tests from ending. */
     private array $programs = [];
 
@@ -141,19 +144,46 @@ final class ProgramTest extends TestCase
         }
     }
 
-    public function testOnlyQuotesTheStderrItsListenerDidNotExpect(): void
+    public function testOnlyQuotesWhatItSaidOnStderrSinceTheLastLineItsListenerExpected(): void
     {
-        // Like Piper, which says on stderr what it did, and why it fails.
-        $program = $this->open(['sh', '-c', 'echo "INFO: wrote a file" >&2; echo boom >&2; echo "INFO: wrote another" >&2; printf "bang" >&2; exit 3'], errors: true);
+        // Like Piper, which says on stderr what it did, what it makes of each sentence, and why it fails. What it
+        // said about a sentence it then spoke is not why it fails on another one, and may hold what was said.
+        $program = $this->open(['sh', '-c', 'echo "INFO: wrote a file" >&2; echo "WARNING: cannot say @" >&2; echo "INFO: wrote another" >&2; echo "WARNING: cannot say #" >&2; printf "bang" >&2; exit 3'], errors: true);
 
         try {
             await($program->done());
             $this->fail('The program should have failed.');
         } catch (CommandFailedException $e) {
-            $this->assertSame("sh exited with code 3: boom\nbang", $e->getMessage());
+            $this->assertSame("sh exited with code 3: WARNING: cannot say #\nbang", $e->getMessage());
         }
 
-        $this->assertSame(['INFO: wrote a file', 'boom', 'INFO: wrote another', 'bang'], $this->errorLines, 'It was handed all of it.');
+        $this->assertSame(['INFO: wrote a file', 'WARNING: cannot say @', 'INFO: wrote another', 'WARNING: cannot say #', 'bang'], $this->errorLines, 'It was handed all of it.');
+    }
+
+    public function testAProgramThatCannotBeStartedHasEndedAtOnce(): void
+    {
+        // Like when the bot has no file descriptors or processes left for another program: here, nowhere to run it.
+        $program = Shell::open(['cat'], function (string $line) {
+            $this->lines[] = $line;
+        }, cwd: '/nowhere/at/all');
+        $this->programs[] = $program;
+
+        // Starting it throws nothing: a call starts the program for its next question when it has just answered one.
+        $this->assertFalse($program->isRunning());
+
+        try {
+            $this->within(5.0, $program->done(), 'the program that never started to have ended');
+            $this->fail('The program could not be started.');
+        } catch (RuntimeException $e) {
+            $this->assertStringStartsWith('Unable to launch a new process: ', $e->getMessage());
+        }
+
+        // There is nothing to write to, to end or to stop.
+        $program->write("first\n");
+        $program->end("last\n", timeout: 30.0);
+        $program->stop();
+        delay(0.1);
+        $this->assertSame([], $this->lines);
     }
 
     public function testStopsAProgramThatIsWaiting(): void
@@ -219,7 +249,10 @@ final class ProgramTest extends TestCase
         // PHP only exits once nothing is left on the event loop: a timer of 30 seconds would be. Not the one of a
         // program that ended in time, nor one for a program that was already told to end, or has ended.
         $script = 'require "vendor/autoload.php"; $program = App\Support\Shell::open(["cat"]); $program->end("", 30.0); $program->end("", 30.0);'
-            . ' React\Async\await($program->done()); $program->end("", 30.0);';
+            . ' React\Async\await($program->done()); $program->end("", 30.0);'
+            // Nor for one that ended by itself before it was told to, or that could not be started.
+            . ' $over = App\Support\Shell::open(["true"]); React\Async\await($over->done()); $over->end("", 30.0);'
+            . ' App\Support\Shell::open(["cat"], cwd: "/nowhere/at/all")->end("", 30.0);';
         $started = microtime(true);
 
         await(Shell::run([PHP_BINARY, '-r', $script], cwd: dirname(__DIR__, 3)));

@@ -344,7 +344,9 @@ final class VoicePrivacyTest extends CommandTestCase
 
     public function testAnAnswerThatLeftTheMemoryOutIsNeverDropped(): void
     {
-        // Bob is there the whole time: Alice's memory never gets into the question.
+        // Bob is there the whole time: Alice's memory never gets into the question. Neither does a memory of the
+        // two of them, which an answer made from is cut off for when Carol joins: see VoiceMemoryTest.
+        $this->memory()->forget(['555', '666']);
         $this->inCall('555', '666');
         $session = $this->startWithTwoSentences($vc, $channel);
         $this->privacy('555', UserSettings::AFTER_SHARE);

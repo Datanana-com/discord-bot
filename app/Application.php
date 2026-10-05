@@ -17,7 +17,7 @@ use App\Exceptions\EventNotFoundException;
 use Discord\Parts\Application\Command\Command;
 use Discord\Parts\Interactions\Interaction;
 
-class Application
+final class Application
 {
     /**
      * @var \Discord\Discord

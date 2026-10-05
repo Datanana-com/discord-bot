@@ -66,6 +66,14 @@ final class UtteranceSplitter
     }
 
     /**
+     * Whether someone is saying something that hasn't ended yet: they spoke less than a gap ago.
+     */
+    public function isSpeaking(string $userId): bool
+    {
+        return isset($this->utterances[$userId]);
+    }
+
+    /**
      * Finishes the utterances of everyone who has been silent long enough.
      */
     public function flushSilent(float $now): void

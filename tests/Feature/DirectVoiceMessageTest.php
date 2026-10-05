@@ -77,7 +77,7 @@ final class DirectVoiceMessageTest extends VoiceTestCase
         $this->assertMatchesRegularExpression('#^arg=-loglevel\narg=error\narg=-y\narg=-i\narg=\S+/discord-bot-voice-messages/[0-9a-f]{16}\.ogg\n#', $ffmpeg);
         $this->assertStringContainsString("arg=-ar\narg=16000\narg=-ac\narg=1\narg=-c:a\narg=pcm_s16le\n", $ffmpeg);
         $this->assertMatchesRegularExpression(
-            '#arg=--model\narg=\S+/ggml-base\.bin\narg=--language\narg=[a-z]+\narg=--threads\narg=4\narg=--no-timestamps\narg=--no-prints\narg=--file\narg=\S+/discord-bot-voice-messages/[0-9a-f]{16}\.wav\n$#',
+            '#arg=--model\narg=\S+/ggml-base\.bin\narg=--language\narg=[a-z]+\narg=--no-timestamps\narg=--no-prints\narg=--file\narg=\S+/discord-bot-voice-messages/[0-9a-f]{16}\.wav\n$#',
             file_get_contents($this->whisperLog),
         );
         $this->assertNoVoiceFilesLeft();

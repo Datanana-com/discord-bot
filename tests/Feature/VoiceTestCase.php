@@ -50,6 +50,9 @@ abstract class VoiceTestCase extends TestCase
 
     protected const array MEMBERS = ['555' => 'Alice', '666' => 'Bob', '777' => 'Carol'];
 
+    /** Another bot of the server, which plays music in voice channels. Discord says of it that it is a bot. */
+    protected const array BOTS = ['1234' => 'Jukebox'];
+
     /** The bot's own user ID: it is in the voice channel too, but it doesn't count as someone there. */
     protected const string BOT_ID = '999';
 
@@ -68,6 +71,12 @@ abstract class VoiceTestCase extends TestCase
 
     /** The PID of every stand-in of Piper that was started: see {@see pipers()}. */
     protected string $piperRunning;
+
+    /** While this file exists, Claude's stand-in doesn't answer when it is asked for a new memory. */
+    protected string $claudeHold;
+
+    /** While this file exists, whisper.cpp's stand-in doesn't print what was said. */
+    protected string $whisperHold;
 
     /** Where the bot keeps its memories. */
     protected string $memories;
@@ -121,6 +130,8 @@ abstract class VoiceTestCase extends TestCase
         $this->claudeCalls = "{$this->recordings}/claude.calls";
         $this->claudeWaiting = "{$this->recordings}/claude.waiting";
         $this->piperRunning = "{$this->recordings}/piper.running";
+        $this->claudeHold = "{$this->recordings}/claude.hold";
+        $this->whisperHold = "{$this->recordings}/whisper.hold";
         $this->memories = "{$this->recordings}/memories";
         $this->voiceStates = new \ArrayObject();
 
@@ -146,7 +157,9 @@ abstract class VoiceTestCase extends TestCase
             'FAKE_CLAUDE_PAUSE' => '0',
             'FAKE_CLAUDE_RESUME' => $this->claudeResume,
             'FAKE_PIPER_RUNNING' => $this->piperRunning,
+            'FAKE_CLAUDE_HOLD' => $this->claudeHold,
             'FAKE_WHISPER_OUTPUT' => 'Hey Claude, what time is it?',
+            'FAKE_WHISPER_HOLD' => $this->whisperHold,
         ]);
 
         $this->useStatsDatabase();
@@ -264,21 +277,25 @@ abstract class VoiceTestCase extends TestCase
     }
 
     /**
-     * What looks up a user by ID in the bot's caches, for the members of {@see MEMBERS} unless told otherwise.
+     * What looks up a user by ID in the bot's caches, for the members of {@see MEMBERS} and the
+     * bots of {@see BOTS} unless told otherwise. Like Discord, it only says of a bot that it is one.
      *
      * @param array<string, string> $names The display name of each user, by ID.
      */
-    protected function userNames(array $names = self::MEMBERS): object
+    protected function userNames(array $names = self::MEMBERS + self::BOTS): object
     {
-        return new class ($names) {
-            /** @param array<string, string> $names */
-            public function __construct(private array $names)
+        return new class ($names, self::BOTS) {
+            /**
+             * @param array<string, string> $names
+             * @param array<string, string> $bots
+             */
+            public function __construct(private array $names, private array $bots)
             {
             }
 
             public function get(string $key, string $id): ?object
             {
-                return isset($this->names[$id]) ? (object) ['displayname' => $this->names[$id]] : null;
+                return isset($this->names[$id]) ? (object) ['displayname' => $this->names[$id], 'bot' => isset($this->bots[$id]) ? true : null] : null;
             }
         };
     }
@@ -292,8 +309,16 @@ abstract class VoiceTestCase extends TestCase
         $this->voiceStates->exchangeArray([]);
 
         foreach ([self::BOT_ID, ...$userIds] as $userId) {
-            $this->voiceStates[] = (object) ['user_id' => $userId, 'channel_id' => '200'];
+            $this->voiceStates[] = $this->inVoice($userId);
         }
+    }
+
+    /**
+     * Someone's voice state: the voice channel they are in, and who they are when the bot's cache knows them.
+     */
+    protected function inVoice(string $userId, string $channelId = '200'): object
+    {
+        return (object) ['user_id' => $userId, 'channel_id' => $channelId, 'user' => $this->userNames()->get('id', $userId)];
     }
 
     /**
@@ -314,7 +339,7 @@ abstract class VoiceTestCase extends TestCase
     protected function joins(string $userId): void
     {
         $this->leaves($userId);
-        $this->voiceStates[] = (object) ['user_id' => $userId, 'channel_id' => '200'];
+        $this->voiceStates[] = $this->inVoice($userId);
     }
 
     /**
@@ -390,6 +415,48 @@ abstract class VoiceTestCase extends TestCase
     }
 
     /**
+     * @return list<array{prompt: string, system: string}> The times Claude Code was asked for a new memory, in order.
+     */
+    protected function memoryUpdates(): array
+    {
+        return array_values(array_filter($this->claudeCalls(), fn (array $call) => str_starts_with($call['system'], "You keep a Discord bot's memory")));
+    }
+
+    /**
+     * From now on, Claude is still writing a new memory it is asked for, until {@see releaseMemoryUpdates()}.
+     */
+    protected function holdMemoryUpdates(): void
+    {
+        touch($this->claudeHold);
+    }
+
+    protected function releaseMemoryUpdates(): void
+    {
+        unlink($this->claudeHold);
+    }
+
+    /**
+     * Someone says something, and it is still waiting to be transcribed, with whatever was said after it,
+     * until {@see transcribe()}: time for people to come and go before Claude is asked.
+     */
+    protected function speakAndWait(VoiceClient $vc, string ...$userIds): void
+    {
+        touch($this->whisperHold);
+        $ended = count($this->logged('Utterance ended'));
+
+        foreach ($userIds as $userId) {
+            $this->speak($vc, ssrc: (int) $userId, userId: $userId, seconds: 1.0);
+        }
+
+        $this->waitUntil(fn () => count($this->logged('Utterance ended')) === $ended + count($userIds), 'what was said to be over');
+    }
+
+    protected function transcribe(): void
+    {
+        unlink($this->whisperHold);
+    }
+
+    /**
      * A voice client connected to the channel. Only its network side and Opus decoding are faked;
      * files it is asked to play are collected in {@see $played}.
      *
@@ -422,9 +489,9 @@ abstract class VoiceTestCase extends TestCase
             $vc->method('getReceiveStream')->willReturn(null);
         }
 
-        // The file being played, when one is.
-        $busy = null;
-        $vc->method('playFile')->willReturnCallback(function (string $file) use (&$busy): PromiseInterface {
+        // The file being played, when one is, and what is resolved when it has been.
+        $busy = $finished = null;
+        $vc->method('playFile')->willReturnCallback(function (string $file) use (&$busy, &$finished): PromiseInterface {
             // Like the voice library, which plays one file at a time.
             if ($busy !== null) {
                 return reject(new AudioAlreadyPlayingException());
@@ -432,19 +499,19 @@ abstract class VoiceTestCase extends TestCase
 
             $busy = $file;
             $this->played[] = $file;
-            $finished = new Deferred();
+            $played = $finished = new Deferred();
 
-            ($this->playing ?? $this->after($this->playSeconds))->then(function () use (&$busy, $file, $finished) {
+            ($this->playing ?? $this->after($this->playSeconds))->then(function () use (&$busy, $file, $played) {
                 // Like the voice library, which never says a file finished once it was told to stop playing it.
                 if ($busy === $file) {
                     $busy = null;
-                    $finished->resolve(null);
+                    $played->resolve(null);
                 }
             });
 
-            return $finished->promise();
+            return $played->promise();
         });
-        $vc->method('stop')->willReturnCallback(function () use (&$busy): void {
+        $vc->method('stop')->willReturnCallback(function () use (&$busy, &$finished): void {
             // Like the voice library.
             if ($busy === null) {
                 throw new \RuntimeException('Audio must be playing to stop it.');
@@ -452,6 +519,9 @@ abstract class VoiceTestCase extends TestCase
 
             $this->cutOff[] = $busy;
             $busy = null;
+            // Like the voice library when it is stopped before it has read the start of the file: mostly it
+            // never says anything more about the file, but then it says that playing it failed.
+            $finished->reject(new \RuntimeException('Buffer closed'));
         });
         // The ffmpeg decoder process is not needed: PCM comes from the Opus decoder below.
         $vc->method('createDecoder')->willReturnCallback(function (object $ss) use ($vc): void {

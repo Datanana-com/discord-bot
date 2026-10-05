@@ -24,25 +24,29 @@ final class VoiceInterruptionTest extends VoiceTestCase
 
     public function testStopsSpeakingWhenThePersonItAnswersTalksOverIt(): void
     {
-        // The sentence being spoken is a long one, and Claude is still writing the rest of its answer.
+        // The sentence being spoken is a long one, and Claude is still writing the rest of its answer. It took
+        // a second before its first word.
         $this->playing = (new Deferred())->promise();
-        $this->setProcessEnv(['FAKE_CLAUDE_PAUSE' => '10']);
+        $this->setProcessEnv(['FAKE_CLAUDE_PAUSE' => '10', 'FAKE_CLAUDE_DELAY' => '1']);
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
 
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
         $this->waitUntil(fn () => $this->played !== [], 'the first sentence to be spoken');
+        $speakingSince = microtime(true);
+        $this->runFor(0.3);
 
-        // Alice says something over it. Less than half a second of it could be a cough.
-        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => 'Sorry, never mind.']);
+        // Alice laughs over it, which whisper makes no words of. Less than half a second of it could be a cough.
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => '(laughs)']);
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 0.4);
         $this->assertSame([], $this->cutOff);
         $this->assertSame([], $this->logged('Interrupted'));
 
-        // With half a second, she is talking: the sentence is cut off, at once.
+        // With half a second, she is heard: the sentence is cut off, at once.
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 0.1);
+        $spokenFor = (microtime(true) - $speakingSince) * 1000;
         $this->assertSame(["{$session->directory}/claude-2.ogg"], $this->cutOff);
 
-        // She goes on talking, which interrupts nothing more: the bot is silent, and Claude is still writing.
+        // She goes on, which interrupts nothing more: the bot is silent, and Claude is still writing.
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 0.6);
         $this->assertSame(["{$session->directory}/claude-2.ogg"], $this->cutOff);
 
@@ -52,26 +56,24 @@ final class VoiceInterruptionTest extends VoiceTestCase
         $this->assertSame(['guild', 'session', 'user', 'ms'], array_keys($interrupted[0]));
         $this->assertSame([self::GUILD_ID, $session->id, '555'], array_slice(array_values($interrupted[0]), 0, 3));
         $this->assertIsInt($interrupted[0]['ms']);
-        $this->assertLessThan(5000, $interrupted[0]['ms']);
+        // Since its first sentence started, a moment before the test noticed: not since the question, a second
+        // and more ago, nor since what Alice just said.
+        $this->assertGreaterThanOrEqual(300, $interrupted[0]['ms']);
+        $this->assertLessThan($spokenFor + 500, $interrupted[0]['ms']);
 
         // Claude writes the rest. The answer is posted whole, and is in the transcript, like one cut off by /stop.
         touch($this->claudeResume);
-        $this->waitUntil(fn () => count($this->logged('Transcribed')) === 2, 'what Alice said over the answer to be transcribed');
+        $this->waitUntil(fn () => count($this->logged('Transcribed')) === 2, 'what Alice did over the answer to be transcribed');
 
         $this->assertSame([self::QUESTION . "\n" . self::ANSWER], $this->sent);
         $this->assertSame(1, $this->usage()['answers']);
+        $this->assertStringEndsWith('] Claude: ' . self::ANSWER . "\n", $this->transcript($session));
 
         // The rest of it is neither spoken nor synthesized.
         $this->assertCount(1, $this->played);
         $this->assertSame(["{$session->directory}/claude-2.ogg"], glob("{$session->directory}/claude-*"));
-
-        // What she said while interrupting is handled like anything else she says: here, she wasn't talking to Claude.
-        $this->assertMatchesRegularExpression(
-            '/\] Alice: Hey Claude, what time is it\?\n\[[\d:]+\] Claude: ' . preg_quote(self::ANSWER, '/') . '\n\[[\d:]+\] Alice: Sorry, never mind\.\n$/',
-            $this->transcript($session),
-        );
         $this->assertSame([], $this->loggedProblems());
-        $this->assertLogsNeverMention('never mind', 'quarter past four');
+        $this->assertLogsNeverMention('laughs', 'quarter past four');
     }
 
     public function testAnswersWhatWasSaidOverAnAnswerWhenItWasSaidToClaude(): void
@@ -102,6 +104,13 @@ final class VoiceInterruptionTest extends VoiceTestCase
         $this->assertCount(2, $this->logged('Started speaking'));
         $this->assertCount(1, $this->logged('Interrupted'));
         $this->assertSame([], $this->loggedProblems());
+
+        // What she said over the answer is handled like anything else she says, after the answer it interrupted.
+        $this->assertMatchesRegularExpression(
+            '/\] Alice: Hey Claude, what time is it\?\n\[[\d:]+\] Claude: ' . preg_quote(self::ANSWER, '/')
+                . '\n\[[\d:]+\] Alice: Claude, and in Lisbon\?\n\[[\d:]+\] Claude: It is a quarter past five there\.\n$/',
+            $this->transcript($session),
+        );
     }
 
     public function testOnlyThePersonBeingAnsweredCanInterrupt(): void
@@ -150,6 +159,27 @@ final class VoiceInterruptionTest extends VoiceTestCase
         $this->assertCount(1, $this->logged('Utterance ended'), 'Only her question: neither noise was long enough to be transcribed.');
     }
 
+    public function testWhatCountsAsOneThingSaidAlsoInterruptsAsOne(): void
+    {
+        // In a server where people pause for long in the middle of a sentence.
+        $this->setEnv(['VOICE_PAUSE_SECONDS' => '3']);
+        $this->playing = (new Deferred())->promise();
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->played !== [], 'the first sentence to be spoken', timeout: 15.0);
+
+        // Alice starts on something, stops for a second, and goes on: to the bot that is one thing she says, which it
+        // will transcribe as one, so it also counts as one for talking over the answer.
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 0.3);
+        $this->runFor(1.0);
+        $this->assertSame([], $this->cutOff);
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 0.3);
+
+        $this->assertSame(["{$session->directory}/claude-2.ogg"], $this->cutOff);
+        $this->assertCount(1, $this->logged('Interrupted'));
+    }
+
     public function testWhatWasSaidBeforeTheBotSpokeDoesNotCountAsTalkingOverIt(): void
     {
         $this->playing = (new Deferred())->promise();
@@ -182,8 +212,8 @@ final class VoiceInterruptionTest extends VoiceTestCase
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
         $this->waitUntil(fn () => $this->played !== [], 'the first sentence to be spoken');
 
-        // The bot has said the first sentence and Piper is working on the second, when Alice starts talking.
-        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => 'Thank you.']);
+        // The bot has said the first sentence and Piper is working on the second, when Alice starts humming.
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => '(humming)']);
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 0.5);
 
         $this->assertCount(1, $this->logged('Interrupted'));

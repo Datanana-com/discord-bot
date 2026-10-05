@@ -10,6 +10,8 @@ use App\Voice\WaitingClaude;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 use Tests\FakesClaudeOutput;
+use Tests\RunsOutOfFileDescriptors;
+use Tests\WaitsWithin;
 
 use function React\Async\await;
 use function React\Async\delay;
@@ -17,6 +19,8 @@ use function React\Async\delay;
 final class ClaudeTest extends TestCase
 {
     use FakesClaudeOutput;
+    use RunsOutOfFileDescriptors;
+    use WaitsWithin;
 
     private string $log;
 
@@ -42,15 +46,23 @@ final class ClaudeTest extends TestCase
         $this->workingDirectory = sys_get_temp_dir() . '/claude-test-' . uniqid();
         $this->resume = "{$this->log}.resume";
         putenv("FAKE_CLAUDE_LOG={$this->log}");
+        putenv("FAKE_CLAUDE_WAITING={$this->log}.waiting");
         putenv('FAKE_CLAUDE_EXIT');
         putenv('ANTHROPIC_API_KEY=sk-should-not-be-used');
     }
 
     protected function tearDown(): void
     {
-        foreach ($this->waiting as $waiting) {
-            $waiting->stop();
-            await($waiting->ended());
+        try {
+            foreach ($this->waiting as $waiting) {
+                $waiting->stop();
+                $this->within(5.0, $waiting->ended(), 'a waiting process to end');
+            }
+        } finally {
+            // One that is still there would keep the tests from ever ending, without a word about which test left it.
+            foreach (is_file("{$this->log}.waiting") ? file("{$this->log}.waiting", FILE_IGNORE_NEW_LINES) : [] as $pid) {
+                posix_kill((int) $pid, SIGKILL);
+            }
         }
 
         putenv('FAKE_CLAUDE_WAITING');
@@ -348,8 +360,6 @@ final class ClaudeTest extends TestCase
     public function testAWaitingProcessIsStartedBeforeItsPromptAndRunLikeAnyOther(): void
     {
         putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeStream('It is a quarter', ' past four.'));
-        putenv("FAKE_CLAUDE_WAITING={$this->log}.waiting");
-
         $waiting = $this->waiting($this->claude()->wait());
 
         // It is running, and was given nothing yet.
@@ -412,8 +422,6 @@ final class ClaudeTest extends TestCase
         // in its output, and another version may send them before the prompt is there.
         putenv('FAKE_CLAUDE_WAITING_GREETS={"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000000"}');
         putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeStream('Paris.'));
-        putenv("FAKE_CLAUDE_WAITING={$this->log}.waiting");
-
         $waiting = $this->waiting($this->claude()->wait());
         $pid = $this->waitingPid();
         delay(0.3);
@@ -513,8 +521,6 @@ final class ClaudeTest extends TestCase
 
     public function testAWaitingProcessIsStoppedWhenNothingIsLeftToWaitFor(): void
     {
-        putenv("FAKE_CLAUDE_WAITING={$this->log}.waiting");
-
         $waiting = $this->waiting($this->claude()->wait());
         $pid = $this->waitingPid();
         $this->assertTrue(posix_kill($pid, 0));
@@ -522,10 +528,33 @@ final class ClaudeTest extends TestCase
         $waiting->stop();
 
         // Having been stopped is no failure for whoever waits for it to end.
-        $this->assertNull(await($waiting->ended()));
+        $this->assertNull($this->within(5.0, $waiting->ended(), 'the process that was stopped to end'));
         $this->assertFalse(posix_kill($pid, 0));
         $this->assertFalse($waiting->answered());
         $this->assertSame('', file_get_contents($this->log));
+    }
+
+    public function testAWaitingProcessThatCannotBeStartedHasEndedAndAnswersNothing(): void
+    {
+        // The bot has no file descriptors left to start a program with. A call starts the process for its next
+        // question right after an answer, which must not fail because of it: starting one throws nothing.
+        $claude = $this->claude();
+        $this->waiting($claude->wait());
+        $waiting = $this->waiting($this->withoutFileDescriptors(fn () => $claude->wait()));
+
+        $this->assertNull($this->within(5.0, $waiting->ended(), 'the process that never started to have ended'));
+        $this->assertFalse($waiting->answered());
+
+        try {
+            await($waiting->ask('Hello', $this->collect(...)));
+            $this->fail('Nobody was there to ask.');
+        } catch (RuntimeException $e) {
+            $this->assertStringStartsWith('Unable to launch a new process: ', $e->getMessage());
+        }
+
+        $this->assertFalse($waiting->answered(), 'The prompt can be given to another process.');
+        $this->assertSame([], $this->pieces);
+        $this->assertSame('', file_get_contents($this->log), 'Nobody got the prompt.');
     }
 
     private function claude(): Claude

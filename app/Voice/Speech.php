@@ -147,13 +147,14 @@ final class Speech
             return reject(new RuntimeException('There is nothing to say in the sentence.'));
         }
 
+        $piperPath = "{$oggPath}.piper.wav";
+        // Before Piper is started: when it can't be, it has ended at once, and this sentence with it.
+        $this->sentences[] = $spoken = new Deferred();
         $this->start($this->folder);
         $piper = $this->piper;
-        $piperPath = "{$oggPath}.piper.wav";
-        $this->sentences[] = $spoken = new Deferred();
-        $timer = Loop::addTimer($this->timeout, fn () => $piper->stop("timed out after {$this->timeout}s"));
+        $timer = Loop::addTimer($this->timeout, fn () => $piper?->stop("timed out after {$this->timeout}s"));
 
-        $piper->write("{$line}\n");
+        $piper?->write("{$line}\n");
 
         return $spoken->promise()
             ->finally(fn () => Loop::cancelTimer($timer))
