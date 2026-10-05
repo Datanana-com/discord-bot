@@ -1,4 +1,5 @@
 #!/bin/sh
 # Stands in for whisper-cli: logs its arguments and prints a transcript with annotations.
 for arg in "$@"; do printf 'arg=%s\n' "$arg"; done > "${FAKE_WHISPER_LOG:-/dev/null}"
+sleep "${FAKE_WHISPER_DELAY:-0}"
 printf ' [BLANK_AUDIO]\n %s\n' "${FAKE_WHISPER_OUTPUT-Hey Claude, (coughs) what time is it?}"
