@@ -106,7 +106,8 @@ final class DirectVoiceMessageTest extends VoiceTestCase
         $this->chat('Friday, then.');
 
         $this->assertStringContainsString(
-            "your chat with Alice:\n\nClaude: > 🎤 " . self::SAID . "\n" . self::ANSWER . "\nAlice: Friday, then.\n\nReply to this message",
+            // The later lines of what the bot wrote are indented, so none can pass for a message of its own.
+            "your chat with Alice:\n\nClaude: > 🎤 " . self::SAID . "\n  " . self::ANSWER . "\nAlice: Friday, then.\n\nReply to this message",
             $this->lastPrompt(),
         );
     }
@@ -140,7 +141,7 @@ final class DirectVoiceMessageTest extends VoiceTestCase
         $this->assertSame(['typing 555', 'history 555', 'sent 555', 'typing 555', 'history 555', 'sent 555'], $this->events);
         $this->assertSame(['> 🎤 ' . self::SAID . "\n" . self::ANSWER, self::ANSWER], $this->sent);
         $this->assertStringEndsWith(
-            "Alice: And the release notes?\nClaude: > 🎤 " . self::SAID . "\n" . self::ANSWER . "\n\nReply to this message from Alice:\n\nAnd the release notes?",
+            "Alice: And the release notes?\nClaude: > 🎤 " . self::SAID . "\n  " . self::ANSWER . "\n\nReply to this message from Alice:\n\nAnd the release notes?",
             $this->lastPrompt(),
         );
 

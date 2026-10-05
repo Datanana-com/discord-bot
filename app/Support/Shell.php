@@ -51,7 +51,8 @@ final class Shell
      * @param array<string, string>|null $env Environment variables, or null to inherit the bot's.
      * @param float $timeout Seconds before the program is killed.
      * @return PromiseInterface<null> Resolves when the program is done; rejects with a {@see CommandFailedException}
-     *                                when it fails or times out, or with what $onLine threw.
+     *                                when it fails or times out, or with what $onLine threw. Cancelling it
+     *                                stops the program.
      */
     public static function stream(
         array $command,
@@ -94,7 +95,6 @@ final class Shell
      */
     private static function start(array $command, ?callable $onLine, ?string $input, ?string $cwd, ?array $env, float $timeout): PromiseInterface
     {
-        $deferred = new Deferred();
         $stdout = '';
         $stderr = '';
         $timedOut = false;
@@ -103,6 +103,9 @@ final class Shell
         // "exec" replaces the wrapping shell, so terminate() reaches the program itself.
         $process = new Process('exec ' . implode(' ', array_map(escapeshellarg(...), $command)), $cwd, $env);
         $process->start();
+
+        // Cancelling the promise stops the program, which then rejects it like any program that was killed.
+        $deferred = new Deferred(fn () => $process->terminate());
 
         // An exception thrown from a stream's listener would end up in the event loop, and stop the bot.
         $handOver = function (string $line) use ($onLine, $process, &$failure) {
