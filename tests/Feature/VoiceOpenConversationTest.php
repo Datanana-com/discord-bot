@@ -38,7 +38,7 @@ final class VoiceOpenConversationTest extends VoiceTestCase
     protected function waitUntil(callable $condition, string $what, float $timeout = 10.0): void
     {
         parent::waitUntil(function () use ($condition) {
-            $this->timers->elapse(0.25);
+            $this->timers->elapse(0.05);
 
             return $condition();
         }, $what, $timeout);
@@ -319,25 +319,51 @@ final class VoiceOpenConversationTest extends VoiceTestCase
         $this->assertSame([], $this->logged('Conversation closed'));
     }
 
-    public function testAStopPhraseSaidWhileTheBotSpeaksWaitsForItsTurn(): void
+    public function testAStopPhraseSaidOverAnAnswerToSomeoneElseWaitsForItsTurn(): void
     {
         VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '666', 'Hey Claude, are you there?');
+        $this->waitUntil(fn () => count($this->played) === 1, 'the answer to Bob to be spoken');
         $speaking = new Deferred();
         $this->playing = $speaking->promise();
         $this->ask($vc, '555', 'Hey Claude, what time is it?');
-        $this->waitUntil(fn () => count($this->played) === 1, 'the answer to be spoken');
+        $this->waitUntil(fn () => count($this->played) === 2, 'the answer to Alice to be spoken');
 
-        $this->say($vc, '555', 'Stop, Claude.');
-        $this->waitUntil(fn () => count($this->logged('Utterance ended')) === 2, 'Alice to finish speaking');
+        // Bob, whose conversation is open too, closes it while the bot is answering Alice.
+        $this->say($vc, '666', 'Stop, Claude.');
+        $this->waitUntil(fn () => count($this->logged('Utterance ended')) === 3, 'Bob to finish speaking');
         $this->runFor(0.5);
 
-        // The answer is spoken to the end first.
+        // Only Alice can interrupt the answer to her: it is spoken to the end first.
+        $this->assertSame([], $this->cutOff);
         $this->assertSame([], $this->logged('Conversation closed'));
-        $this->assertCount(1, $this->played);
+        $this->assertCount(2, $this->played);
 
         $speaking->resolve(null);
+        $this->waitUntil(fn () => count($this->played) === 3, 'okay to be spoken');
+        $this->assertSame([['user' => '666', 'reason' => 'stop phrase']], $this->contexts('Conversation closed'));
+    }
+
+    public function testAStopPhraseSaidOverTheirOwnAnswerStopsTheBotAndClosesTheConversation(): void
+    {
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        // The sentence the bot is speaking is a long one.
+        $this->playing = (new Deferred())->promise();
+        $this->ask($vc, '555', 'Hey Claude, what time is it?');
+        $this->waitUntil(fn () => count($this->played) === 1, 'the answer to be spoken');
+
+        // Alice doesn't wait for it to end. As she is the one being answered, talking over it stops the bot.
+        $this->playing = null;
+        $this->say($vc, '555', 'Stop, Claude.');
+
+        $this->assertSame([$this->played[0]], $this->cutOff);
+        $this->assertCount(1, $this->logged('Interrupted'));
+
+        // Her stop phrase has its turn as soon as she has said it, and not once the answer would have been spoken.
         $this->waitUntil(fn () => count($this->played) === 2, 'okay to be spoken');
         $this->assertSame([['user' => '555', 'reason' => 'stop phrase']], $this->contexts('Conversation closed'));
+        $this->assertSame('Okay.', file_get_contents($this->played[1]));
+        $this->assertCount(1, $this->sent, 'Nothing else was answered.');
     }
 
     public function testClosesWhenTheyOptOutAndDoesNotOpenAgainWhenTheyOptBackIn(): void

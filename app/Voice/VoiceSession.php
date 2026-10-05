@@ -39,6 +39,10 @@ use function React\Promise\resolve;
  * for a minute, opt out or the call ends, everything they say is answered, without the wake word. What
  * other people say is only answered when it mentions the wake word, which opens their own conversation.
  *
+ * For an answer to start soon after its question, the call keeps two programs running: a Claude
+ * Code process that waits for the next question, and Piper, with its voice loaded. Both are ended
+ * with the call. Whoever is being answered can stop the answer by talking over it.
+ *
  * Nothing is kept of people who opted out with /optout: they aren't recorded, transcribed or
  * answered. The voice client still receives and decodes their audio, like everyone's.
  *
@@ -89,6 +93,12 @@ final class VoiceSession
 
     /** What the bot says when the stop phrase closed a conversation. */
     private const string OKAY = 'Okay.';
+
+    /**
+     * A Claude Code process that ended sooner than this many seconds after it started to wait isn't
+     * replaced: one that can't start would otherwise be started over and over.
+     */
+    private const float WAITING_SECONDS = 2.0;
 
     /**
      * The voice client's decoders leave a copy of each speaker's audio in the temp folder, named
@@ -168,6 +178,21 @@ final class VoiceSession
     /** @var array<string, int> How many utterances of each person wait for their turn or are being answered, by user ID. */
     private array $waiting = [];
 
+    /** The Claude Code process that is already running for the next question, when there is one: see {@see wait()}. */
+    private ?WaitingClaude $waitingClaude = null;
+
+    /** How long someone has to be silent for what they said to be over. */
+    private readonly float $pauseSeconds;
+
+    /**
+     * The answer the bot is speaking, from its first sentence until it is over: who it is for, since when,
+     * how much of their own audio arrived in one go meanwhile and when the last of it did, whether they
+     * talked over it, and what is resolved when they do. Null while the bot isn't speaking.
+     *
+     * @var array{user: string, since: float, heard: int, heardAt: float, interrupted: bool, cut: Deferred<null>}|null
+     */
+    private ?array $speaking = null;
+
     /** @var array{utterances: int, answers: int, failures: int} */
     private array $counts = ['utterances' => 0, 'answers' => 0, 'failures' => 0];
 
@@ -192,7 +217,8 @@ final class VoiceSession
         $this->startedAt = microtime(true);
         $this->queue = resolve(null);
         $this->left = new Deferred();
-        $this->splitter = new UtteranceSplitter("{$directory}/utterances", $this->queueUtterance(...));
+        $this->pauseSeconds = self::pauseSeconds() ?? UtteranceSplitter::SILENCE_SECONDS;
+        $this->splitter = new UtteranceSplitter("{$directory}/utterances", $this->queueUtterance(...), $this->pauseSeconds);
     }
 
     /**
@@ -230,6 +256,25 @@ final class VoiceSession
     public static function defaultWakeWord(): string
     {
         return trim(env('VOICE_WAKE_WORD', 'claude'));
+    }
+
+    /**
+     * How long someone has to be silent for what they said to be over: VOICE_PAUSE_SECONDS, for people
+     * who pause longer in the middle of a sentence.
+     *
+     * @return float|null Null when it is set to anything but a number of seconds, 0.1 or more.
+     */
+    private static function pauseSeconds(): ?float
+    {
+        $value = env('VOICE_PAUSE_SECONDS', '');
+
+        if ($value === '') {
+            return UtteranceSplitter::SILENCE_SECONDS;
+        }
+
+        $seconds = filter_var($value, FILTER_VALIDATE_FLOAT, ['options' => ['min_range' => 0.1]]);
+
+        return $seconds === false ? null : $seconds;
     }
 
     /**
@@ -345,8 +390,15 @@ final class VoiceSession
             new UserSettings($discord->getLogger()),
         );
         $session->listen();
+        $session->wait();
+        // Piper loads its voice now, and keeps running: the first sentence of an answer doesn't wait for that.
+        $session->speech->start("{$directory}/piper");
         $session->log('info', 'Voice session started', ['channel' => $vc->channel->id, 'directory' => $directory]);
         $session->track(Usage::CALL_STARTED, ['channel' => $vc->channel->id]);
+
+        if (self::pauseSeconds() === null) {
+            $session->log('warning', 'VOICE_PAUSE_SECONDS is not a number of seconds, 0.1 or more: what someone says ends after ' . UtteranceSplitter::SILENCE_SECONDS . ' s of silence.');
+        }
 
         self::$unfinished[$session->id] = $session;
 
@@ -552,6 +604,12 @@ final class VoiceSession
 
         $this->conversations = [];
 
+        // No question is coming for the Claude Code process that waited for one. One that is answering ends once it has.
+        $this->waitingClaude?->stop();
+        $this->waitingClaude = null;
+        // Piper ends too, once it has spoken the sentence it may be working on.
+        $piperEnded = $this->speech->stop();
+
         // Speech still in progress is transcribed for the transcript, but no longer answered.
         $this->splitter->flushAll();
 
@@ -586,6 +644,8 @@ final class VoiceSession
             })
             // Whatever happened to the summary: the memories only need the transcript.
             ->then($this->updateMemories(...))
+            // Piper's folder, in the call's own, is gone once Piper has ended: only then is the call over.
+            ->then(fn () => $piperEnded)
             ->finally(function () {
                 unset(self::$unfinished[$this->id]);
             });
@@ -667,7 +727,9 @@ final class VoiceSession
             // Checked for each bit of audio: someone can opt out, or back in, during the call.
             $stream?->on('pcm', function (string $pcm) use ($userId) {
                 if (! isset($this->optedOut[$userId])) {
-                    $this->splitter->push($userId, $pcm, microtime(true));
+                    $now = microtime(true);
+                    $this->splitter->push($userId, $pcm, $now);
+                    $this->hear($userId, $pcm, $now);
                 }
             });
 
@@ -692,8 +754,9 @@ final class VoiceSession
             return $wav;
         });
 
+        // Often enough for the wait after someone's last word to be the pause itself, and little more.
         $this->ticker = $this->discord->getLoop()->addPeriodicTimer(
-            0.25,
+            0.05,
             fn () => $this->splitter->flushSilent(microtime(true)),
         );
 
@@ -871,7 +934,7 @@ final class VoiceSession
     {
         $path = sprintf('%s/claude-%d.ogg', $this->directory, ++$this->files);
 
-        return $this->speech->synthesize(self::OKAY, $path)
+        return $this->synthesize(self::OKAY, $path)
             // It holds nothing of anyone's memory, so only the call ending, or them opting out, stops it.
             ->then(fn () => ! $this->stopped && ! isset($this->optedOut[$userId]) ? race([$this->vc->playFile($path), $this->left->promise()]) : null)
             ->catch(fn (Throwable $e) => $this->log('warning', 'Could not say okay: ' . $e->getMessage(), ['user' => $userId]));
@@ -898,9 +961,8 @@ final class VoiceSession
         $among = count($group ?? []) > 1 && $this->memory->read($group) !== '' ? $group : null;
         // What the last sentence so far waits for: Piper to be done with it, and the bot to have said it.
         $synthesized = $spoken = resolve(null);
-        $speaking = false;
 
-        $sentences = new SentenceSplitter(function (string $sentence) use (&$synthesized, &$spoken, &$speaking, $userId, $depends, $basis, $among, $endedAt) {
+        $sentences = new SentenceSplitter(function (string $sentence) use (&$synthesized, &$spoken, $userId, $depends, $basis, $among, $endedAt) {
             if (! $this->stillAnswering($userId, $depends, $basis, $among)) {
                 return;
             }
@@ -911,24 +973,25 @@ final class VoiceSession
 
             // A sentence is synthesized as soon as Piper is free, while the ones before it are spoken. It is
             // spoken once they are over: the voice client refuses to play a file while it is playing another.
-            // Once the call stops, or they opt out, the sentences still waiting for Piper are no longer synthesized either.
-            $synthesized = $synthesized->then(fn () => $this->stillAnswering($userId, $depends, $basis, $among) ? $this->speech->synthesize($sentence, $oggPath) : null);
-            $spoken = $synthesized->finally(fn () => $before)->then(function () use (&$speaking, $userId, $depends, $basis, $among, $oggPath, $endedAt) {
+            // Once the call stops, they opt out or talk over the answer, the sentences still waiting for Piper are no longer synthesized either.
+            $synthesized = $synthesized->then(fn () => $this->stillAnswering($userId, $depends, $basis, $among) ? $this->synthesize($sentence, $oggPath) : null);
+            $spoken = $synthesized->finally(fn () => $before)->then(function () use ($userId, $depends, $basis, $among, $oggPath, $endedAt) {
                 if (! $this->stillAnswering($userId, $depends, $basis, $among)) {
                     return null;
                 }
 
-                if (! $speaking) {
-                    $speaking = true;
+                if ($this->speaking === null) {
+                    $this->speaking = ['user' => $userId, 'since' => microtime(true), 'heard' => 0, 'heardAt' => 0.0, 'interrupted' => false, 'cut' => new Deferred()];
                     $this->log('info', 'Started speaking', ['user' => $userId, 'ms' => $this->msSince($endedAt)]);
                 }
 
-                // The voice client never says the sentence finished when it is closed while speaking it.
-                return race([$this->vc->playFile($oggPath), $this->left->promise()]);
+                // The voice client never says the sentence finished when it is closed while speaking it, and
+                // rarely does when it is stopped, as it is when they talk over the answer: see hear().
+                return race([$this->vc->playFile($oggPath), $this->left->promise(), $this->speaking['cut']->promise()]);
             });
         });
 
-        return $this->claude->ask($this->prompt($userId, $name, $group, $sharers, $basis !== null), onText: $sentences->push(...))->then(
+        return $this->ask($userId, $this->prompt($userId, $name, $group, $sharers, $basis !== null), $sentences->push(...))->then(
             function (string $answer) use ($sentences, &$spoken, $userId, $sharers, $depends, $basis, $among, $name, $question, $endedAt, $asking, $people) {
                 $this->log('info', 'Claude answered', ['user' => $userId, 'ms' => $this->msSince($asking), 'characters' => mb_strlen($answer)]);
                 $sentences->flush();
@@ -977,13 +1040,136 @@ final class VoiceSession
                 // The sentences Claude finished are still spoken, and the next answer waits for them.
                 return $spoken->finally(fn () => throw $e);
             },
-        );
+        )->finally(function () {
+            // The bot is no longer speaking: nobody can talk over it.
+            $this->speaking = null;
+        });
     }
 
     /**
-     * Whether an answer to someone is still spoken: not once the call stopped, they opted out,
-     * someone took back the memory it was made from, someone joined a call it was made for them alone in,
-     * or someone joined who the group memory it was made from isn't of.
+     * Stops the answer the bot is speaking once the person it is for has talked over it for as long as it
+     * takes for what they say to be transcribed, in one go. Nobody else can stop it.
+     *
+     * The sentence being spoken is cut off, and the rest of the answer is neither synthesized nor spoken.
+     * It is still posted and added to the transcript once Claude has written it, like an answer cut off
+     * by the end of the call. What they said over it is transcribed like anything else they say.
+     */
+    private function hear(string $userId, string $pcm, float $now): void
+    {
+        if ($this->speaking === null || $this->speaking['interrupted'] || $this->speaking['user'] !== $userId) {
+            return;
+        }
+
+        // A cough earlier in the answer doesn't count: after a pause, they start over.
+        if ($now - $this->speaking['heardAt'] >= $this->pauseSeconds) {
+            $this->speaking['heard'] = 0;
+        }
+
+        $this->speaking['heard'] += strlen($pcm);
+        $this->speaking['heardAt'] = $now;
+
+        if ($this->speaking['heard'] < UtteranceSplitter::MIN_SECONDS * UtteranceSplitter::BYTES_PER_SECOND) {
+            return;
+        }
+
+        $this->speaking['interrupted'] = true;
+        $this->log('info', 'Interrupted', ['user' => $userId, 'ms' => $this->msSince($this->speaking['since'])]);
+        // First, as the voice client's own promise for the sentence may be rejected when it is stopped,
+        // which is no failure.
+        $this->speaking['cut']->resolve(null);
+
+        try {
+            $this->vc->stop();
+        } catch (Throwable) {
+            // Nothing was playing: the bot was between two sentences.
+        }
+    }
+
+    /**
+     * Starts the Claude Code process that waits for the next question, so that the question doesn't wait
+     * for Claude Code to start. It answers that one question: every question gets a process of its own,
+     * which knows nothing of the questions before it but what its prompt says.
+     *
+     * A process doesn't wait for a whole call: Claude Code ends by itself after some minutes without a
+     * prompt. It is then replaced, unless it had only just started: see {@see WAITING_SECONDS}.
+     */
+    private function wait(): void
+    {
+        if ($this->stopped) {
+            return;
+        }
+
+        $waiting = $this->waitingClaude = $this->claude->wait(thinks: false);
+        $startedAt = microtime(true);
+
+        $waiting->ended()->then(function () use ($waiting, $startedAt) {
+            // It was asked, or the call stopped.
+            if ($this->waitingClaude !== $waiting) {
+                return;
+            }
+
+            $this->waitingClaude = null;
+
+            if (microtime(true) - $startedAt >= self::WAITING_SECONDS) {
+                $this->wait();
+            }
+        });
+    }
+
+    /**
+     * Asks Claude what someone in the call said to it, without thinking first: that takes seconds before
+     * the first word of an answer.
+     *
+     * The process that was waiting is asked. When there is none, or it ends without having written anything,
+     * one is started for the question, which takes longer. Either way, another one then waits for the next question.
+     *
+     * @param callable(string $text): void $onText Called with each piece of the answer while Claude is writing it.
+     * @return PromiseInterface<string> Claude's answer.
+     */
+    private function ask(string $userId, string $prompt, callable $onText): PromiseInterface
+    {
+        $waiting = $this->waitingClaude;
+        $this->waitingClaude = null;
+
+        if ($waiting === null) {
+            $this->log('warning', 'No Claude Code process was waiting for the question', ['user' => $userId]);
+            $answer = $this->claude->ask($prompt, onText: $onText, thinks: false);
+        } else {
+            $answer = $waiting->ask($prompt, $onText)->catch(function (Throwable $e) use ($waiting, $userId, $prompt, $onText) {
+                // Part of the answer was spoken, or Claude said why there is none: asking again would not help.
+                if ($waiting->answered()) {
+                    throw $e;
+                }
+
+                $this->log('warning', 'The waiting Claude Code process did not answer: ' . $e->getMessage(), ['user' => $userId]);
+
+                return $this->claude->ask($prompt, onText: $onText, thinks: false);
+            });
+        }
+
+        return $answer->finally($this->wait(...));
+    }
+
+    /**
+     * Has Piper speak a sentence into a file. Piper keeps running for the whole call. When it stopped by
+     * itself, as when a sentence of an earlier answer made it fail, it is started again. The rest of that
+     * answer wasn't spoken: after a sentence that can't be, none of its answer is.
+     *
+     * @return PromiseInterface<string> The path of the file.
+     */
+    private function synthesize(string $sentence, string $oggPath): PromiseInterface
+    {
+        if (! $this->speech->isRunning()) {
+            $this->log('warning', 'Piper had stopped: starting it again');
+        }
+
+        return $this->speech->synthesize($sentence, $oggPath);
+    }
+
+    /**
+     * Whether an answer to someone is still spoken: not once the call stopped, they opted out or talked
+     * over it, someone took back the memory it was made from, someone joined a call it was made for them
+     * alone in, or someone joined who the group memory it was made from isn't of.
      *
      * @param list<string> $sharers Whose shared memories the answer is made from.
      * @param string|null $basis What let the asker's personal memory in: see {@see personalMemoryBasis()}.
@@ -991,8 +1177,8 @@ final class VoiceSession
      */
     private function stillAnswering(string $userId, array $sharers, ?string $basis, ?array $among): bool
     {
-        return ! $this->stopped && ! isset($this->optedOut[$userId]) && $this->stillSharing($sharers)
-            && $this->stillAlone($userId, $basis) && $this->stillAmong($userId, $among);
+        return ! $this->stopped && ! isset($this->optedOut[$userId]) && ! ($this->speaking['interrupted'] ?? false)
+            && $this->stillSharing($sharers) && $this->stillAlone($userId, $basis) && $this->stillAmong($userId, $among);
     }
 
     /**

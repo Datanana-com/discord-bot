@@ -37,16 +37,37 @@ final class UtteranceSplitterTest extends TestCase
     {
         $this->speak('alice', from: 0.0, seconds: 1.0);
 
-        $this->splitter->flushSilent(1.5);
+        // Her last audio arrived at 0.98 s.
+        $this->splitter->flushSilent(1.55);
         $this->assertSame([], $this->utterances, 'Half a second of silence is just a pause.');
 
-        $this->splitter->flushSilent(2.0);
-        $this->assertCount(1, $this->utterances);
+        $this->splitter->flushSilent(1.6);
+        $this->assertCount(1, $this->utterances, 'After 0.6 seconds, she is done.');
 
         [$userId, $wavPath, $seconds] = $this->utterances[0];
         $this->assertSame('alice', $userId);
         $this->assertSame(1.0, $seconds);
         $this->assertValidWav($wavPath, seconds: 1.0);
+    }
+
+    public function testWaitsAsLongAsItIsToldToForSomeoneWhoPauses(): void
+    {
+        $splitter = new UtteranceSplitter($this->directory, function (string $userId, string $wavPath, float $seconds) {
+            $this->utterances[] = [$userId, $wavPath, $seconds];
+        }, silenceSeconds: 1.5);
+
+        // Alice stops for a second in the middle of her sentence, then goes on.
+        $this->speak('alice', from: 0.0, seconds: 1.0, splitter: $splitter);
+        $splitter->flushSilent(2.0);
+        $this->assertSame([], $this->utterances);
+
+        $this->speak('alice', from: 2.0, seconds: 1.0, splitter: $splitter);
+        $splitter->flushSilent(4.4);
+        $this->assertSame([], $this->utterances);
+
+        $splitter->flushSilent(4.5);
+        $this->assertCount(1, $this->utterances);
+        $this->assertSame(2.0, $this->utterances[0][2], 'It is one utterance.');
     }
 
     public function testKeepsEachSpeakerSeparate(): void
@@ -97,10 +118,10 @@ final class UtteranceSplitterTest extends TestCase
     /**
      * Pushes 20 ms frames of audio, as the voice client does while someone talks.
      */
-    private function speak(string $userId, float $from, float $seconds): void
+    private function speak(string $userId, float $from, float $seconds, ?UtteranceSplitter $splitter = null): void
     {
         for ($frame = 0; $frame < $seconds * 50; $frame++) {
-            $this->splitter->push($userId, str_repeat("\x01\x00", self::FRAME_BYTES / 2), $from + $frame * 0.02);
+            ($splitter ?? $this->splitter)->push($userId, str_repeat("\x01\x00", self::FRAME_BYTES / 2), $from + $frame * 0.02);
         }
     }
 
