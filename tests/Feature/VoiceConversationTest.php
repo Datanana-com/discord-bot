@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Settings\GuildSettings;
 use App\Voice\VoiceSession;
+use Monolog\Logger;
 use RuntimeException;
 
 use function React\Async\await;
@@ -66,6 +68,34 @@ final class VoiceConversationTest extends VoiceTestCase
         $this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');
 
         $this->assertSame(["> **Alice:** What time is it?\nIt is a quarter past four."], $this->sent);
+    }
+
+    public function testStartsWithTheServersSettings(): void
+    {
+        // This server answers everything, although .env has a wake word.
+        (new GuildSettings(new Logger('test')))->save(self::GUILD_ID, [...GuildSettings::DEFAULTS, 'wake_word' => ''], '555');
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => 'What time is it?']);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');
+
+        $this->assertSame(["> **Alice:** What time is it?\nIt is a quarter past four."], $this->sent);
+    }
+
+    public function testKeepsItsSettingsWhenTheyChangeDuringTheCall(): void
+    {
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        // Someone uses /settings while the call is running.
+        (new GuildSettings(new Logger('test')))->save(self::GUILD_ID, [...GuildSettings::DEFAULTS, 'wake_word' => 'jarvis', 'model' => 'opus'], '555');
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');
+
+        // The call still answers to "Claude", with the model it started with.
+        $this->assertSame(["> **Alice:** Hey Claude, what time is it?\nIt is a quarter past four."], $this->sent);
+        $this->assertStringContainsString("arg=--model\narg=haiku\n", file_get_contents($this->claudeLog));
     }
 
     public function testIgnoresSpeechThatIsTooShort(): void

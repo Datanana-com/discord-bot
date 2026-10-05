@@ -17,6 +17,9 @@ use RuntimeException;
  */
 final readonly class Claude
 {
+    /** The models a server can choose from, by the names Claude Code gives the latest of each. */
+    public const array MODELS = ['haiku', 'sonnet', 'opus'];
+
     private const string SYSTEM_PROMPT = <<<'PROMPT'
         You are Claude, taking part in a Discord voice call. Your replies are read aloud by a
         text-to-speech engine, so answer the way you would speak: short, natural sentences, and no
@@ -32,11 +35,14 @@ final readonly class Claude
     ) {
     }
 
-    public static function fromEnv(): self
+    /**
+     * @param string|null $model The model that answers, when it is not the one in .env.
+     */
+    public static function fromEnv(?string $model = null): self
     {
         return new self(
             env('CLAUDE_BINARY', 'claude'),
-            env('CLAUDE_MODEL', 'haiku'),
+            $model ?? env('CLAUDE_MODEL', 'haiku'),
             sys_get_temp_dir() . '/discord-bot-claude',
         );
     }
