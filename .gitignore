@@ -4,5 +4,6 @@
 /logs
 /databases/*
 /recordings/*
+/memories/*
 /.cache
 /.phpunit.result.cache
