@@ -179,6 +179,37 @@ final class MemoryUpdateTest extends VoiceTestCase
         $this->assertSame([], $this->loggedProblems());
     }
 
+    public function testRemembersNothingWhenNothingIsWorthRemembering(): void
+    {
+        $this->chat('Hello!');
+
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => $this->claudeSays('NOTHING')]);
+        $this->timers->elapse(600.0);
+        $this->waitUntil(fn () => str_starts_with($this->lastPrompt(), 'The current memory'), 'Claude to be asked');
+        $this->runFor(0.3);
+
+        $this->assertStringContainsString('When there is no memory yet and nothing worth remembering was said, reply with NOTHING alone.', $this->lastSystemPrompt());
+        $this->assertFileDoesNotExist("{$this->memories}/555.md");
+        $this->assertSame([], $this->logged('Updated memory'));
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testSaysWhenTheMemoryCannotBeSaved(): void
+    {
+        // MEMORY_PATH is a file, so no memory can be saved in it.
+        file_put_contents($this->memories, '');
+        $temporaryFiles = glob(sys_get_temp_dir() . '/memory-*');
+        $this->chat('We ship the beta on Friday.');
+
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => $this->claudeSays(self::MEMORY)]);
+        $this->timers->elapse(600.0);
+        $this->waitUntil(fn () => $this->loggedProblems() !== [], 'the failure');
+
+        $this->assertSame(["Could not update the memory: The memory could not be saved in {$this->memories}."], $this->loggedProblems());
+        $this->assertSame([], $this->logged('Updated memory'));
+        $this->assertSame($temporaryFiles, glob(sys_get_temp_dir() . '/memory-*'), 'Nothing was left in the system\'s temporary folder.');
+    }
+
     public function testKeepsTheMemoryWhenClaudeCannotUpdateIt(): void
     {
         $this->memory()->save('555', self::MEMORY);

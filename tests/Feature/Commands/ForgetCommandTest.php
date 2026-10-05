@@ -95,6 +95,45 @@ final class ForgetCommandTest extends CommandTestCase
         );
     }
 
+    public function testForgetsMessagesThatWereStillWaitingForTheirAnswer(): void
+    {
+        $this->setProcessEnv(['FAKE_CLAUDE_DELAY' => '0.3', 'FAKE_CLAUDE_OUTPUT' => $this->claudeSays('Noted: you live at 12 Rue X.')]);
+        $this->write('My PIN is 1234.');
+        // Waits for the first answer, so Claude only starts on it after /forget.
+        $this->write('And I live at 12 Rue X.');
+
+        (new ForgetCommand($this->discord))->handle($this->interaction(null));
+        $this->waitUntil(fn () => count($this->sent) === 2, 'both answers');
+
+        $this->setProcessEnv(['FAKE_CLAUDE_DELAY' => '0', 'FAKE_CLAUDE_OUTPUT' => $this->claudeSays(self::ANSWER)]);
+        $this->chat('I am learning to sail.');
+        $this->assertSame(1, $this->timers->elapse(600.0));
+        $this->waitUntil(fn () => $this->logged('Updated memory') !== [], 'the memory');
+
+        $this->assertStringContainsString(
+            "What was said since it was last updated:\n\nAlice: I am learning to sail.\nClaude: " . self::ANSWER . "\n\nReply with the new memory.",
+            $this->lastPrompt(),
+        );
+    }
+
+    public function testStaysForgottenWhenTheMemoryWasWaitingForAnAnswer(): void
+    {
+        $this->memory()->save('555', self::MEMORY);
+        $this->setProcessEnv(['FAKE_CLAUDE_DELAY' => '0.3']);
+        $this->write('My cat is called Whiskers.');
+
+        // The conversation paused while Claude was still answering: the update waits for the answer.
+        $this->assertSame(1, $this->timers->elapse(600.0));
+        (new ForgetCommand($this->discord))->handle($this->interaction(null));
+        $this->runFor(0.6);
+
+        $this->assertSame([self::ANSWER], $this->sent);
+        $this->assertSame([self::FORGOT], $this->responses);
+        $this->assertFileDoesNotExist("{$this->memories}/555.md");
+        $this->assertStringStartsNotWith('The current memory', $this->lastPrompt(), 'Claude was not asked for a new memory.');
+        $this->assertSame([], $this->logged('Updated memory'));
+    }
+
     public function testStaysForgottenWhenTheMemoryWasBeingUpdated(): void
     {
         $this->memory()->save('555', self::MEMORY);

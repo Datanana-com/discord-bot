@@ -6,6 +6,7 @@ namespace App\Assistant;
 
 use App\Voice\VoiceSession;
 use InvalidArgumentException;
+use RuntimeException;
 
 /**
  * What the bot remembers about each person: a markdown file per person, written by Claude.
@@ -24,7 +25,10 @@ final readonly class Memory
 
     public static function fromEnv(): self
     {
-        return new self(rtrim(env('MEMORY_PATH', 'memories'), '/'));
+        $directory = rtrim((string) env('MEMORY_PATH', 'memories'), '/');
+
+        // An empty MEMORY_PATH is the default, rather than the root of the disk.
+        return new self($directory === '' ? 'memories' : $directory);
     }
 
     /**
@@ -41,6 +45,8 @@ final readonly class Memory
      * Replaces what is remembered about the person.
      *
      * @return string The memory as it was saved: cut to the limit when it was longer.
+     *
+     * @throws RuntimeException When it can't be saved. The memory is then as it was.
      */
     public function save(string $userId, string $memory): string
     {
@@ -49,14 +55,25 @@ final readonly class Memory
         $memory = VoiceSession::split(trim($memory), self::LIMIT)[0];
 
         if (! is_dir($this->directory)) {
-            mkdir($this->directory, 0700, true);
+            @mkdir($this->directory, 0700, true);
         }
 
         // tempnam() creates a file only the bot's user can read (mode 0600), and renaming it
-        // into place never leaves half a memory behind.
-        $temporary = tempnam($this->directory, 'memory-');
-        file_put_contents($temporary, $memory . PHP_EOL);
-        rename($temporary, $path);
+        // into place never leaves half a memory behind. When it can't create one in the folder,
+        // it uses the system's temporary folder instead, where the memory has no place.
+        $temporary = @tempnam($this->directory, 'memory-');
+        $saved = $temporary !== false
+            && dirname($temporary) === realpath($this->directory)
+            && file_put_contents($temporary, $memory . PHP_EOL) === strlen($memory . PHP_EOL)
+            && rename($temporary, $path);
+
+        if (! $saved) {
+            if ($temporary !== false && is_file($temporary)) {
+                unlink($temporary);
+            }
+
+            throw new RuntimeException("The memory could not be saved in {$this->directory}.");
+        }
 
         return $memory;
     }
