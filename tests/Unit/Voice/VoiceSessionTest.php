@@ -92,6 +92,42 @@ final class VoiceSessionTest extends TestCase
         yield 'only commas and spaces' => [' , , ', []];
     }
 
+    #[DataProvider('stopPhrases')]
+    public function testDefaultStopPhrase(string $wakeWord, string $env, string $expected): void
+    {
+        $before = $_ENV['VOICE_STOP_PHRASE'] ?? null;
+
+        try {
+            $_ENV['VOICE_STOP_PHRASE'] = $env;
+
+            $this->assertSame($expected, VoiceSession::defaultStopPhrase($wakeWord));
+        } finally {
+            if ($before === null) {
+                unset($_ENV['VOICE_STOP_PHRASE']);
+            } else {
+                $_ENV['VOICE_STOP_PHRASE'] = $before;
+            }
+        }
+    }
+
+    /**
+     * @return iterable<string, array{string, string, string}>
+     */
+    public static function stopPhrases(): iterable
+    {
+        yield 'stop and the wake word' => ['claude', '', 'stop claude'];
+        yield 'a phrase' => ['okay computer', '', 'stop okay computer'];
+        yield 'one for each spelling, so each is heard' => ['claude, cloud, claud', '', 'stop claude, stop cloud, stop claud'];
+        yield 'spelled the way the wake word is cleaned up' => [' Claude ,, cloud, CLAUDE ', '', 'stop Claude, stop cloud'];
+        yield 'no wake word, no stop phrase' => ['', '', ''];
+        yield 'no spelling left, no stop phrase' => [' , ', '', ''];
+        yield 'the env replaces it' => ['claude', 'para claude', 'para claude'];
+        yield 'the env replaces it for every spelling' => ['claude, cloud', 'para claude', 'para claude'];
+        yield 'the env can have several spellings too' => ['claude', ' para claude ,parar claude, ', 'para claude, parar claude'];
+        yield 'the env does not bring back a stop phrase without a wake word' => ['', 'para claude', ''];
+        yield 'an env without a spelling is not a phrase that matches everything' => ['claude', ' , ', 'stop claude'];
+    }
+
     /**
      * @param list<string> $expected
      */
