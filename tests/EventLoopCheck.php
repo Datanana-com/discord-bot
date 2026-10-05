@@ -21,7 +21,7 @@ use PHPUnit\TextUI\Configuration\Configuration;
  *
  * ReactPHP runs the loop when PHP shuts down, and a loop with a listening socket in it never ends: the tests
  * print "OK" and then `composer test` hangs, and CI waits for its timeout without saying why. When the tests
- * are over this raises a PHPUnit warning (which fails the run, see failOnWarning in phpunit.xml) that lists
+ * are over this raises a PHPUnit warning (a PHPUnit warning fails the run by default) that lists
  * what is still waiting, with the test that left it when there is one, and takes it out of the loop so that
  * the run ends instead of hanging.
  *

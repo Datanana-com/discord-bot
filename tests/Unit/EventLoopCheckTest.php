@@ -41,6 +41,13 @@ final class EventLoopCheckTest extends TestCase
         $this->assertStringContainsString('PHPUnit Warnings: 1', $output);
     }
 
+    public function testIsSetInPhpunitXml(): void
+    {
+        $config = simplexml_load_file(dirname(__DIR__, 2) . '/phpunit.xml');
+
+        $this->assertSame(['Tests\EventLoopCheck'], array_map(strval(...), $config->xpath('/phpunit/extensions/bootstrap/@class')));
+    }
+
     /**
      * @return iterable<string, array{string}>
      */
@@ -51,6 +58,14 @@ final class EventLoopCheckTest extends TestCase
         // when the test ends there, they are still in the loop, though finished.
         yield 'ends after awaiting a program' => ['testEndsAfterAwaitingAProgram'];
         yield 'ends after waiting' => ['testEndsAfterWaiting'];
+    }
+
+    public function testFailsTheRunForASingleLeakToo(): void
+    {
+        $output = $this->runPhpunit('Leaky', expectFailure: true, filter: 'LeakyInSetUpTest');
+
+        $this->assertMatchesRegularExpression('/^- reading stream tcp_socket\S* local 127\.0\.0\.1:\d+, left by /m', $output);
+        $this->assertSame(1, substr_count($output, "\n- "));
     }
 
     #[DataProvider('cleanTests')]
