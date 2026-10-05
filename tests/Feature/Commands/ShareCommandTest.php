@@ -222,6 +222,7 @@ final class ShareCommandTest extends CommandTestCase
 
         // What is left isn't spoken, and the answer, which may quote her memory, is neither posted nor kept.
         $this->assertCount(1, $this->played);
+        $this->assertCount(1, glob("{$session->directory}/claude-*"), 'The rest isn\'t even synthesized.');
         $this->assertSame([], array_values(array_filter($this->sent, fn (string $message) => str_starts_with($message, '> '))));
         $this->assertStringNotContainsString('Claude:', $this->transcript($session));
         $this->assertSame([['user' => '666', 'reason' => 'a shared memory was taken back']], array_map(fn (array $context) => array_slice($context, 2), $this->logged('Not answering')));
@@ -294,6 +295,84 @@ final class ShareCommandTest extends CommandTestCase
         $this->assertSame('Stopped sharing your memory with the call. A notice goes to the call\'s text channel.', end($this->responses)['content']);
         $this->assertSame('Alice stopped sharing their memory with this call.', $this->sent[1]);
         $this->assertStringNotContainsString('Bananas', $this->claudeCalls()[0]['prompt']);
+        await($session->stop());
+    }
+
+    public function testUnshareTakesTheMemoryBackFromEveryCallOfTheUser(): void
+    {
+        $this->memory()->save('555', self::ALICE);
+        $first = VoiceSession::start($this->voiceClient($firstChannel = $this->voiceChannel()), $firstChannel, $this->discord);
+        $second = VoiceSession::start($this->voiceClient($secondChannel = $this->voiceChannel('201', '101')), $secondChannel, $this->discord);
+
+        // Alice shares with a call in each of two servers.
+        $this->share('555', $firstChannel);
+        (new ShareCommand($this->discord))->handle($this->interaction($secondChannel, guildId: '101', userId: '555'));
+        (new UnshareCommand($this->discord))->handle($this->interaction(null, guildId: null, userId: '555'));
+
+        $this->assertSame('Stopped sharing your memory with the call. A notice goes to the call\'s text channel.', end($this->responses)['content']);
+        $this->assertSame([$first->id, $second->id], array_column($this->logged('Stopped sharing memory'), 'session'));
+        $this->assertCount(2, array_filter($this->sent, fn (string $message) => str_contains($message, 'stopped sharing')));
+        await($first->stop());
+        await($second->stop());
+    }
+
+    public function testUnshareTakesTheMemoryBackFromTheCallItWasSharedWithOnly(): void
+    {
+        $this->memory()->save('555', self::ALICE);
+        $first = VoiceSession::start($this->voiceClient($firstChannel = $this->voiceChannel()), $firstChannel, $this->discord);
+        $second = VoiceSession::start($this->voiceClient($secondChannel = $this->voiceChannel('201', '101')), $secondChannel, $this->discord);
+        $this->share('555', $firstChannel);
+
+        // The other call, which comes last, has nothing to take back, and that doesn't change what the first one had.
+        (new UnshareCommand($this->discord))->handle($this->interaction(null, guildId: null, userId: '555'));
+
+        $this->assertSame('Stopped sharing your memory with the call. A notice goes to the call\'s text channel.', end($this->responses)['content']);
+        $this->assertSame([$first->id], array_column($this->logged('Stopped sharing memory'), 'session'));
+        await($first->stop());
+        await($second->stop());
+    }
+
+    public function testNothingIsLeftToTakeBackFromACallThatStopped(): void
+    {
+        $this->memory()->save('555', self::ALICE);
+        $this->inCall('555', '666');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->share('555', $channel);
+        $this->ask($vc, '666', self::QUESTION);
+
+        // The call is over, but its summary is still being written.
+        $ended = $session->stop();
+        $this->unshare('555');
+        await($ended);
+
+        $this->assertSame('You are not sharing your memory with a call I am recording.', end($this->responses)['content']);
+        $this->assertSame([], $this->logged('Stopped sharing memory'));
+        $this->assertSame(
+            ['Alice shared their memory with this call.'],
+            array_values(array_filter($this->sent, fn (string $message) => str_contains($message, 'memory with this call'))),
+        );
+    }
+
+    public function testSentencesWaitingForPiperAreNotSynthesizedOnceSomeoneTakesTheirMemoryBack(): void
+    {
+        $this->memory()->save('555', self::ALICE);
+        $this->inCall('555', '666');
+        $this->setProcessEnv([
+            'FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is a quarter past four. ', 'Time for a cup of tea. ', 'Then a nap.'),
+            'FAKE_PIPER_DELAY' => '0.5',
+            'FAKE_WHISPER_OUTPUT' => self::QUESTION,
+        ]);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->share('555', $channel);
+
+        // Claude is done, and Piper is still busy with the first sentence, when Alice takes her memory back.
+        $this->speak($vc, ssrc: 666, userId: '666', seconds: 1.0);
+        $this->waitUntil(fn () => $this->logged('Claude answered') !== [], 'Claude to finish');
+        $this->unshare('555');
+        $this->runFor(2.0);
+
+        $this->assertSame([], $this->played);
+        $this->assertCount(1, glob("{$session->directory}/claude-*"), 'Only the sentence Piper was already working on.');
         await($session->stop());
     }
 
