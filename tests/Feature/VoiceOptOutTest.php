@@ -155,7 +155,10 @@ final class VoiceOptOutTest extends VoiceTestCase
         $this->waitUntil(fn () => is_file($this->claudeLog), 'Claude to be asked');
         $this->assertCount(1, glob("{$session->directory}/utterances/*"), 'What Bob said waits to be transcribed.');
         VoiceSession::optOut('666');
-        $this->waitUntil(fn () => glob("{$session->directory}/utterances/*") === [], 'everything said to be handled');
+        // Right away, so nothing of him is left if the bot stops before it gets to it.
+        $this->assertSame([], glob("{$session->directory}/utterances/*"), 'What he said is deleted.');
+        $this->waitUntil(fn () => $this->sent !== [], 'Alice to be answered');
+        $this->runFor(0.5);
 
         $this->assertCount(1, $this->logged('Transcribed'));
         $this->assertStringNotContainsString('Bob', $this->transcript($session));
@@ -163,6 +166,27 @@ final class VoiceOptOutTest extends VoiceTestCase
         $this->assertCount(1, $this->sent);
 
         // Only the answer is slow, not the call's summary.
+        $this->setProcessEnv(['FAKE_CLAUDE_DELAY' => '0']);
+    }
+
+    public function testDoesNotTranscribeWhatWasDeletedWhenSomeoneOptsBackInBeforeItsTurn(): void
+    {
+        $this->setProcessEnv(['FAKE_CLAUDE_DELAY' => '1']);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->speak($vc, ssrc: 2, userId: '666', seconds: 1.0);
+        $this->waitUntil(fn () => is_file($this->claudeLog), 'Claude to be asked');
+        VoiceSession::optOut('666');
+        VoiceSession::optIn('666');
+        $this->waitUntil(fn () => $this->sent !== [], 'Alice to be answered');
+        $this->runFor(0.5);
+
+        // What he said while he had opted out is gone, and nothing fails for it.
+        $this->assertCount(1, $this->logged('Transcribed'));
+        $this->assertStringNotContainsString('Bob', $this->transcript($session));
+        $this->assertSame([], $this->loggedProblems());
+
         $this->setProcessEnv(['FAKE_CLAUDE_DELAY' => '0']);
     }
 

@@ -45,6 +45,11 @@ final class VoiceSessionTest extends TestCase
         yield 'only the first word' => ['Okay, play some music', 'okay computer', false];
         yield 'only part of the first word' => ['Tokay, computer', 'okay computer', false];
         yield 'only part of the last word' => ['Okay, computers are slow', 'okay computer', false];
+        yield 'a hyphen inside a word' => ['Jean-Luc, are you there?', 'jean-luc', true];
+        yield 'a hyphen inside a word is part of it' => ['Jean Luc, are you there?', 'jean-luc', false];
+        yield 'an apostrophe inside a word is part of it' => ['O Brien, are you there?', "o'brien", false];
+        yield 'a dash between the words of the wake word' => ['Hey, Jarvis, what time is it?', 'hey - jarvis', true];
+        yield 'a spelling of nothing but dashes has no word to wait for' => ['What time is it', 'claude, -', true];
         yield 'an accent that belongs to the first word' => ["Jose\u{301} Maria, what time is it?", 'jose maria', false];
         yield 'a word that ends with a vowel sign' => ['राजा, समय क्या है?', 'राजा', true];
         yield 'only part of a word that goes on with a vowel sign' => ['राजा आ गया', 'राज', false];
@@ -149,6 +154,9 @@ final class VoiceSessionTest extends TestCase
         yield 'after a sentence, when a line is too long' => ['One two three. Four five six! Seven?', 20, ['One two three.', 'Four five six!', 'Seven?']];
         yield 'after a line exactly as long as the limit' => ["aaaa bbbbb\ncc", 10, ['aaaa bbbbb', 'cc']];
         yield 'after a sentence exactly as long as the limit' => ['a a a a b. c', 10, ['a a a a b.', 'c']];
+        yield 'not after an abbreviation' => ['We met Dr. Smith and his whole team today.', 21, ['We met Dr. Smith and', 'his whole team today.']];
+        yield 'after a sentence and the quote it closes' => ['He said "go." Then he left.', 15, ['He said "go."', 'Then he left.']];
+        yield 'keeping the indentation of the next line' => ["```python\ndef f(x):\n    return x + 37\n```", 20, ['```python' . "\n" . 'def f(x):', '    return x + 37', '```']];
         yield 'after a sentence without spaces' => ['それは良い考えです。明日また話しましょう。', 20, ['それは良い考えです。', '明日また話しましょう。']];
         yield 'after a word, when a sentence is too long' => ['one two three four five six seven', 20, ['one two three four', 'five six seven']];
         yield 'anywhere, when a word is too long' => [str_repeat('a', 45), 20, [str_repeat('a', 20), str_repeat('a', 20), 'aaaaa']];

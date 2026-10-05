@@ -11,8 +11,10 @@ use Discord\Builders\MessageBuilder;
 use Discord\Discord;
 use Discord\Parts\Application\Command\Command;
 use Discord\Parts\Application\Command\Option;
+use Discord\Parts\Guild\Guild;
 use Discord\Parts\Interactions\ApplicationCommand;
 use Discord\Parts\Interactions\Interaction;
+use Discord\Parts\User\Member;
 use Monolog\Handler\NullHandler;
 use Monolog\Logger;
 use React\EventLoop\StreamSelectLoop;
@@ -81,6 +83,18 @@ final class RecallCommandTest extends CommandTestCase
         $this->assertStringNotContainsString('hunter2', $claudeCall, "Another server's calls are never sent.");
         $this->assertStringNotContainsString('This is not a call', $claudeCall);
         $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testNamesWhoeverTheQuestionMentionsAsTheCallsDo(): void
+    {
+        $this->call('2026-10-03_14-05-09', "[14:05:12] Bob: I will write the release notes.\n");
+
+        // Picking someone from Discord's list of members puts their ID in the question.
+        $this->recall('What did <@666> promise <@!555>? And <@999>?');
+        $this->waitUntil(fn () => $this->updates !== [], 'the answer');
+
+        // Someone who isn't a member Discord told the bot about stays as they were.
+        $this->assertStringEndsWith("\n\nQuestion: What did Bob promise Alice? And <@999>?\n", file_get_contents($this->claudeLog));
     }
 
     public function testClaudeIsAskedToAnswerOnlyFromTheCallsWithTheSameRestrictionsAsInCalls(): void
@@ -489,10 +503,21 @@ Question: " . self::QUESTION . "
     }
 
     /**
-     * A Discord client that never connects, for DiscordPHP to build the interaction with.
+     * A Discord client that never connects, for DiscordPHP to build the interaction with. It knows
+     * the server and its members, as Discord tells the bot about them.
      */
     private function client(): Discord
     {
-        return new Discord(['token' => 'test-token', 'loop' => new StreamSelectLoop(), 'logger' => new Logger('discord', [new NullHandler()])]);
+        $discord = new Discord(['token' => 'test-token', 'loop' => new StreamSelectLoop(), 'logger' => new Logger('discord', [new NullHandler()])]);
+        $guild = $discord->getFactory()->part(Guild::class, ['id' => self::GUILD_ID, 'name' => 'Test server'], true);
+
+        foreach (self::MEMBERS as $id => $name) {
+            $user = (object) ['id' => (string) $id, 'username' => strtolower($name), 'global_name' => $name, 'discriminator' => '0'];
+            $guild->members->pushItem($discord->getFactory()->part(Member::class, ['user' => $user, 'guild_id' => self::GUILD_ID], true));
+        }
+
+        $discord->guilds->pushItem($guild);
+
+        return $discord;
     }
 }

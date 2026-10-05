@@ -27,7 +27,8 @@ final class Shell
      * @param array<string, string>|null $env Environment variables, or null to inherit the bot's.
      * @param float $timeout Seconds before the program is killed.
      * @return PromiseInterface<string> Resolves with stdout; rejects with a {@see CommandFailedException}
-     *                                  when the program fails or times out.
+     *                                  when the program fails or times out. Its message quotes stderr, never
+     *                                  stdout, which can hold something that must not be logged.
      */
     public static function run(
         array $command,
@@ -50,8 +51,7 @@ final class Shell
      * @param array<string, string>|null $env Environment variables, or null to inherit the bot's.
      * @param float $timeout Seconds before the program is killed.
      * @return PromiseInterface<null> Resolves when the program is done; rejects with a {@see CommandFailedException}
-     *                                when it fails or times out, or with what $onLine threw. The exception never
-     *                                quotes stdout: unlike with run(), it may be something that must not be logged.
+     *                                when it fails or times out, or with what $onLine threw.
      */
     public static function stream(
         array $command,
@@ -169,7 +169,8 @@ final class Shell
                 $signal !== null => "was killed by signal {$signal}",
                 default => 'exited with code ' . ($code ?? 'unknown'),
             };
-            $output = trim($stderr) !== '' ? trim($stderr) : trim($stdout);
+            // Never stdout: it can hold what someone said, like whisper's transcript, and the message is logged.
+            $output = trim($stderr);
             $message = "{$command[0]} {$reason}" . ($output !== '' ? ': ' . mb_substr($output, 0, 500) : '');
             $deferred->reject(new CommandFailedException($message, $stdout));
         });

@@ -158,6 +158,9 @@ final class VoiceSession
     /** @var list<int> The SSRC of every speaker, which names the copies the voice client's decoders make: see DECODER_FILE. */
     private array $ssrcs = [];
 
+    /** @var array<string, string> Whose each clip of what was said is, by path, while it waits to be transcribed. */
+    private array $clips = [];
+
     /** @var array<string, list<string>> What was said while the same people were in the call, as in transcript.txt, by the key of their memory. */
     private array $said = [];
 
@@ -423,6 +426,13 @@ final class VoiceSession
                 array_map(unlink(...), $session->audio[$userId]);
                 unset($session->audio[$userId]);
             }
+
+            // So are the clips of what they said that wait to be transcribed. One being transcribed
+            // is deleted once whisper is done with it, and what whisper heard is dropped.
+            foreach (array_keys($session->clips, $userId, true) as $clip) {
+                unlink($clip);
+                unset($session->clips[$clip]);
+            }
         }
     }
 
@@ -515,8 +525,14 @@ final class VoiceSession
         foreach ($spellings as $spelling) {
             $words = array_map(
                 fn (string $word) => preg_quote($word, '/'),
-                preg_split('/\s+/u', $spelling, flags: PREG_SPLIT_NO_EMPTY),
+                // What has no letters or numbers, like the dash in "Hey - Jarvis", is between words, where nothing counts.
+                preg_grep('/[\p{L}\p{N}]/u', preg_split('/\s+/u', $spelling, flags: PREG_SPLIT_NO_EMPTY)),
             );
+
+            // Nothing but such characters: no word to wait for, like an empty wake word.
+            if ($words === []) {
+                return true;
+            }
 
             // Between two of its words: anything but letters, their accents, and numbers. Around it too:
             // \b would also end a word before a vowel sign, which is how Hindi or Bengali write vowels.
@@ -530,7 +546,8 @@ final class VoiceSession
 
     /**
      * Splits a text into parts that each fit in a Discord message. A part ends after a line;
-     * when a line is too long, after a sentence; and when a sentence is too long, after a word.
+     * when a line is too long, after a sentence, as {@see SentenceSplitter::END} finds it; and
+     * when a sentence is too long, after a word.
      *
      * @return list<string>
      */
@@ -543,7 +560,7 @@ final class VoiceSession
             // One character more shows whether a line, sentence or word ends exactly at the limit.
             $window = mb_substr($text, 0, $limit + 1);
 
-            foreach (['/^.+(?=\n)/su', '/^.+(?:[.!?…](?=\s)|[。！？](?=.))/su', '/^.+(?=\s)/su'] as $ending) {
+            foreach (['/^.+(?=\n)/su', '/^.+' . SentenceSplitter::END . '/su', '/^.+(?=\s)/su'] as $ending) {
                 if (preg_match($ending, $window, $match) === 1) {
                     $part = $match[0];
 
@@ -552,7 +569,9 @@ final class VoiceSession
             }
 
             $parts[] = rtrim($part);
-            $text = ltrim(mb_substr($text, mb_strlen($part)));
+            // The next part starts with its first word, or after a line, with the indentation of
+            // the next one that isn't blank, which matters in code.
+            $text = preg_replace('/^(?:\s*\n|\s+)/u', '', mb_substr($text, mb_strlen($part)));
         }
 
         $parts[] = $text;
@@ -754,6 +773,7 @@ final class VoiceSession
             return;
         }
 
+        $this->clips[$wavPath] = $userId;
         $endedAt = microtime(true);
         // Who was there when it was said, not when it is transcribed: they may have come or gone by then.
         $people = $this->group($userId);
@@ -785,13 +805,12 @@ final class VoiceSession
      */
     private function handleUtterance(string $userId, string $wavPath, float $endedAt, ?array $people): PromiseInterface
     {
-        // They opted out while this waited for its turn.
-        if (isset($this->optedOut[$userId])) {
-            unlink($wavPath);
-
+        // They opted out while this waited for its turn, and it was deleted then.
+        if (! isset($this->clips[$wavPath])) {
             return resolve(null);
         }
 
+        unset($this->clips[$wavPath]);
         $transcribing = microtime(true);
 
         return $this->transcriber->transcribe($wavPath)
@@ -1259,12 +1278,7 @@ final class VoiceSession
             $this->log('info', 'Summarized the call', ['ms' => $this->msSince($asking), 'characters' => mb_strlen($summary)]);
             file_put_contents("{$this->directory}/summary.md", $summary . PHP_EOL);
 
-            // One message after the other, so they arrive in order.
-            return array_reduce(
-                self::split($summary),
-                fn (PromiseInterface $posted, string $part) => $posted->then(fn () => $this->post($part)),
-                resolve(null),
-            );
+            return $this->post($summary);
         });
     }
 
@@ -1419,16 +1433,26 @@ final class VoiceSession
             ->catch(fn (Throwable $e) => $this->log('warning', 'Could not update the memory: ' . $e->getMessage(), ['people' => count($people)]));
     }
 
+    /**
+     * Posts in the text channel, split into several messages when it doesn't fit in one.
+     *
+     * @return PromiseInterface<mixed> Resolves once every message is posted, or couldn't be. It never rejects.
+     */
     private function post(string $content): PromiseInterface
     {
-        $message = MessageBuilder::new()
-            ->setContent(mb_substr($content, 0, self::MESSAGE_LIMIT))
-            // Transcribed speech and Claude's answers must never ping anyone.
-            ->setAllowedMentions(['parse' => []]);
-
-        return $this->textChannel->sendMessage($message)->catch(function (Throwable $e) {
-            $this->log('warning', 'Could not post in the text channel: ' . $e->getMessage());
-        });
+        // One message after the other, so they arrive in order.
+        return array_reduce(
+            self::split($content),
+            fn (PromiseInterface $posted, string $part) => $posted->then(fn () => $this->textChannel->sendMessage(
+                MessageBuilder::new()
+                    ->setContent($part)
+                    // Transcribed speech and Claude's answers must never ping anyone.
+                    ->setAllowedMentions(['parse' => []]),
+            )->catch(function (Throwable $e) {
+                $this->log('warning', 'Could not post in the text channel: ' . $e->getMessage());
+            })),
+            resolve(null),
+        );
     }
 
     /**

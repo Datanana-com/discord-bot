@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace App\Assistant;
 
-use App\Voice\VoiceSession;
+use App\Voice\SentenceSplitter;
 use InvalidArgumentException;
 use RuntimeException;
 
@@ -76,6 +76,28 @@ final readonly class Memory
     }
 
     /**
+     * Cuts a memory that is too long after its last line or sentence that fits, or when there is
+     * none, after its last word, so as much as possible is kept and it still reads well.
+     */
+    private static function cut(string $memory): string
+    {
+        if (mb_strlen($memory) <= self::LIMIT) {
+            return $memory;
+        }
+
+        // One character more shows whether a line, sentence or word ends exactly at the limit.
+        $window = mb_substr($memory, 0, self::LIMIT + 1);
+
+        foreach (['/^.+(?:(?=\n)|' . SentenceSplitter::END . ')/su', '/^.+(?=\s)/su'] as $ending) {
+            if (preg_match($ending, $window, $match) === 1) {
+                return rtrim($match[0]);
+            }
+        }
+
+        return mb_substr($memory, 0, self::LIMIT);
+    }
+
+    /**
      * Replaces what is remembered about the person, or the group.
      *
      * @param string|list<string> $people A user ID, or the user IDs of a group.
@@ -87,8 +109,7 @@ final readonly class Memory
     {
         $path = $this->path($people);
         $folder = dirname($path);
-        // Cut after a line, a sentence or a word, so what is kept still reads well.
-        $memory = VoiceSession::split(trim($memory), self::LIMIT)[0];
+        $memory = self::cut(trim($memory));
 
         if (! is_dir($folder)) {
             @mkdir($folder, 0700, true);

@@ -314,23 +314,25 @@ final class DirectChat
      */
     public static function parts(string $content): array
     {
-        // Room for the code block's opening and closing lines.
-        $parts = VoiceSession::split($content, 2000 - 2 * self::FENCE_LENGTH);
+        // Room for the code block's opening and closing lines, which only a text that is cut needs.
+        $parts = mb_strlen($content) <= 2000 ? [$content] : VoiceSession::split($content, 2000 - 2 * self::FENCE_LENGTH);
         $open = null;
 
-        foreach ($parts as &$part) {
+        foreach ($parts as $index => &$part) {
             if ($open !== null) {
                 $part = "{$open}\n{$part}";
                 $open = null;
             }
 
             foreach (preg_split('/\R/u', $part) as $line) {
-                if (str_starts_with(ltrim($line), '```')) {
+                // A fence is a line of its own: "```npm test``` runs the tests" only holds code.
+                if (preg_match('/^\s*```[^`]*$/u', $line) === 1) {
                     $open = $open === null ? mb_substr(trim($line), 0, self::FENCE_LENGTH) : null;
                 }
             }
 
-            if ($open !== null) {
+            // Only where the text is cut: the end of the last part is as Claude wrote it.
+            if ($open !== null && $index < count($parts) - 1) {
                 $part .= "\n```";
             }
         }
@@ -372,7 +374,7 @@ final class DirectChat
 
     /**
      * Has Claude rewrite the person's memory with what was said since its last update.
-     * When that fails, what was said is not remembered.
+     * When that fails, the next update is given what was said, too.
      */
     private function updateMemory(): PromiseInterface
     {
@@ -392,6 +394,13 @@ final class DirectChat
             if ($memory !== null) {
                 $this->log('info', 'Updated memory', ['characters' => mb_strlen($memory)]);
             }
+        })->catch(function (Throwable $e) use ($said, $forgotten) {
+            // Unless the person asked to be forgotten meanwhile.
+            if ($forgotten === $this->forgotten) {
+                $this->unremembered = [...$said, ...$this->unremembered];
+            }
+
+            throw $e;
         });
     }
 

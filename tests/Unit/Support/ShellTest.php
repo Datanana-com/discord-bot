@@ -40,6 +40,19 @@ final class ShellTest extends TestCase
         }
     }
 
+    public function testRejectsWithoutQuotingStdoutWhenStderrIsEmpty(): void
+    {
+        try {
+            // Like whisper, which prints what it heard, and nothing on stderr with --no-prints.
+            await(Shell::run(['sh', '-c', 'echo said aloud; exit 3']));
+            $this->fail('The command should have failed.');
+        } catch (CommandFailedException $e) {
+            // The message is logged, and the logs never hold what anyone said.
+            $this->assertSame('sh exited with code 3', $e->getMessage());
+            $this->assertSame("said aloud\n", $e->stdout);
+        }
+    }
+
     public function testSaysWhichSignalKilledTheCommand(): void
     {
         try {
@@ -113,7 +126,7 @@ final class ShellTest extends TestCase
             }));
             $this->fail('The command should have failed.');
         } catch (CommandFailedException $e) {
-            // run() quotes stdout when stderr is empty, but what is streamed may be private, like Claude's answers.
+            // What is streamed may be private, like Claude's answers.
             $this->assertSame('sh exited with code 3', $e->getMessage());
             $this->assertSame('', $e->stdout);
         }

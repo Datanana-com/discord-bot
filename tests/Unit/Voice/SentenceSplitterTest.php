@@ -39,6 +39,15 @@ final class SentenceSplitterTest extends TestCase
         $this->assertSame(['It is a quarter past four.', 'Time for a cup of tea.'], $this->sentences);
     }
 
+    public function testWaitsForWhatClosesWithASentenceThatTakesNoSpace(): void
+    {
+        $this->splitter->push('それは本当に「良い考えだと私は心から思います。');
+        $this->assertSame([], $this->sentences, 'A bracket may close it.');
+
+        $this->splitter->push('」明日');
+        $this->assertSame(['それは本当に「良い考えだと私は心から思います。」'], $this->sentences);
+    }
+
     /**
      * @param list<string> $expected
      */
@@ -92,6 +101,14 @@ final class SentenceSplitterTest extends TestCase
             'Das Treffen ist am 3. Oktober um zehn Uhr. Bis dann!',
             ['Das Treffen ist am 3. Oktober um zehn Uhr.', 'Bis dann!'],
         ];
+        yield 'not after an initial' => [
+            'The plan came from J. Smith and the whole team. Thanks.',
+            ['The plan came from J. Smith and the whole team.', 'Thanks.'],
+        ];
+        yield 'not after e.g. or i.e.' => [
+            'Bring something, e.g. snacks or drinks, i.e. anything. See you then.',
+            ['Bring something, e.g. snacks or drinks, i.e. anything.', 'See you then.'],
+        ];
         yield 'not after etc.' => [
             'Bring snacks, drinks, cups, etc. and some music too. See you.',
             ['Bring snacks, drinks, cups, etc. and some music too.', 'See you.'],
@@ -103,6 +120,14 @@ final class SentenceSplitterTest extends TestCase
         yield 'with the quote it closes' => [
             'He told me: "I will be there at four." Then he left the room.',
             ['He told me: "I will be there at four."', 'Then he left the room.'],
+        ];
+        yield 'with the German quote it closes' => [
+            'Er sagte: „Komm bitte sofort zu mir her.“ Dann ging er.',
+            ['Er sagte: „Komm bitte sofort zu mir her.“', 'Dann ging er.'],
+        ];
+        yield 'with the quote it closes, without spaces between sentences' => [
+            '他在会议结束以后对大家说：“我们现在就走吧。”然后他就离开了。',
+            ['他在会议结束以后对大家说：“我们现在就走吧。”', '然后他就离开了。'],
         ];
         yield 'with the bracket it closes, without spaces between sentences' => [
             'それは本当に「良い考えだと私は心から思います。」明日また詳しく話しましょう。',

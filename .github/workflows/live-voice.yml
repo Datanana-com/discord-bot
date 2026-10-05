@@ -13,16 +13,15 @@ on:
   # Not on draft pull requests: they run once marked ready for review.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+    # What the live test runs: the bot's code, and what it runs the bot with.
     paths:
       - 'app/**'
+      - 'helpers/**'
       - 'tests/Live/**'
+      - 'tests/Fixtures/**'
+      - 'tests/*.php'
       - 'composer.lock'
       - '.github/workflows/live-voice.yml'
-
-# Both bots can only be in one call at a time.
-concurrency:
-  group: live-voice
-  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -50,6 +49,11 @@ jobs:
   live:
     needs: configured
     if: needs.configured.outputs.ready == 'true'
+    # Both bots can only be in one call at a time. Set on this job, not the workflow, so a run that
+    # skips it, as on a draft, doesn't take the place of another one that waits for the call.
+    concurrency:
+      group: live-voice
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:

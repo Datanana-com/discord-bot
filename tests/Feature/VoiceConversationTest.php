@@ -41,6 +41,22 @@ final class VoiceConversationTest extends VoiceTestCase
         $this->assertSame([], $this->loggedProblems());
     }
 
+    public function testPostsAnAnswerThatDoesNotFitInOneMessageInSeveral(): void
+    {
+        $answer = trim(str_repeat('They agreed to meet again on Friday. ', 60));
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream($answer)]);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => count($this->sent) === 3, 'the answer to be posted');
+
+        // Nothing is cut off: the question, then the answer split after a sentence.
+        $this->assertGreaterThan(2000, mb_strlen($answer));
+        $this->assertSame('> **Alice:** Hey Claude, what time is it?', $this->sent[0]);
+        $this->assertSame($answer, "{$this->sent[1]} {$this->sent[2]}");
+        $this->assertLessThanOrEqual(2000, max(array_map(mb_strlen(...), $this->sent)));
+    }
+
     public function testOnlyTranscribesWhenNobodyTalksToClaude(): void
     {
         $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => "Let's get lunch after this."]);

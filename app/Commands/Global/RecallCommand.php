@@ -70,6 +70,13 @@ final class RecallCommand extends CommandAbstract
             return;
         }
 
+        // Picking someone from Discord's list of members puts <@their id> in the question, while the
+        // calls name people.
+        $question = preg_replace_callback(
+            '/<@!?(\d+)>/',
+            fn (array $mention) => $interaction->guild?->members->get('id', $mention[1])?->displayname ?? $mention[0],
+            $question,
+        );
         $prompt = "Saved calls of this server, newest first:\n\n" . implode("\n\n", $calls) . "\n\nQuestion: {$question}";
         $asking = microtime(true);
 
