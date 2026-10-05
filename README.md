@@ -178,7 +178,9 @@ The memory is updated when a conversation pauses. Ten minutes after your last me
 - `/memory` shows you what the bot remembers about you, and lists the groups you have a memory with (see [Memory in calls](#memory-in-calls)). `/share` lets the bot use it in a call for everyone there, until the call ends (see [Sharing your personal memory with a call](#sharing-your-personal-memory-with-a-call)).
 - `/forget` deletes it, together with what you said since its last update. The messages themselves stay in the DM, where the last 20 are still sent to Claude with your next message.
 
-Both commands work in DMs and in servers, and only you see their replies.
+- `/privacy` shows your privacy settings, and `/privacy personal_memory_in_calls:only after /share` keeps your personal memory out of calls with other people, unless you share it (see [Keeping your personal memory out of calls with others](#keeping-your-personal-memory-out-of-calls-with-others)).
+
+`/memory`, `/forget` and `/privacy` work in DMs and in servers, and only you see their replies.
 
 > [!IMPORTANT]
 > Memories are kept on the bot's machine, where anyone with access to the machine can read them. The files themselves can only be read by the user the bot runs as (mode 0600).
@@ -194,7 +196,7 @@ Most things are discussed and decided in calls, so the bot remembers those too. 
 - Alone with the bot, you have your personal memory: it is added to what Claude is asked, and updated from the call, like in DMs.
 - With others, the call uses the group memory of exactly the people in the channel. You and Spartan have one; you, Spartan and Carol have another. It is added to what Claude is asked, and updated from what was said while that group was there.
 - When people join or leave, the next question uses the memory of the new group. What was said is kept with the people who were there when it was said, also for someone who left right after speaking.
-- Whenever you ask Claude something in a call with others, your personal memory is added to the prompt as well, labeled with your name, even with others listening. The other people's personal memories are only used when they shared them with `/share`. Claude's instructions say whose memory is whose, that everyone in the call hears its answer, and that it should only bring up what the question needs.
+- Whenever you ask Claude something in a call with others, your personal memory is added to the prompt as well, labeled with your name, even with others listening, unless you chose otherwise with `/privacy` (see [Keeping your personal memory out of calls with others](#keeping-your-personal-memory-out-of-calls-with-others)). The other people's personal memories are only used when they shared them with `/share`. Claude's instructions say whose memory is whose, that everyone in the call hears its answer, and that it should only bring up what the question needs.
 - Personal memories are never updated from calls with other people: what Spartan says there goes into the group's memory, never into yours.
 - While someone who opted out of being recorded (see [Opting out of being recorded](#opting-out-of-being-recorded)) is in the channel, no group memory is used or updated. What is said then is not remembered, and a memory belonging to someone who opts out is not used or updated from then on, even for a question already waiting for its turn or an update Claude is already writing.
 - When the voice states of the bot's cache don't show the bot in its voice channel, who is there is not known, and no group memory is used or updated either. Voice states come from the `GUILD_VOICE_STATES` intent, which the default intents include.
@@ -218,7 +220,7 @@ Updates are logged as `Updated memory`, with the call's `session`, how many `peo
 By default, only your own question gets your personal memory. When you and Spartan ask "what are we missing from each other's point of view?", the bot needs both of your personal memories, and that only happens when each of you says so.
 
 - `/share`, used by someone in the voice channel the bot is recording, adds their personal memory to the call: until the call ends, the bot may use it to answer anyone there, and to compare people's points of view. `/unshare` takes it back, also from someone who left the call or who writes to the bot in a direct message. An answer that Claude is still writing when someone takes their memory back, or opts out, is dropped: it is neither spoken nor posted.
-- Sharing is an explicit choice for this call. Only having opted out of being recorded blocks it, as below.
+- Sharing is an explicit choice for this call, so it works whatever your `/privacy` setting is. Only having opted out of being recorded blocks it, as below.
 - It lasts until the call ends, and not longer: the next call starts with nobody sharing. Opting out of being recorded with `/optout` also stops it, and whoever opted out can't `/share` until they `/optin`: someone the bot doesn't record or answer doesn't have their memory used in calls either.
 - The call's text channel gets a notice when someone shares or stops sharing ("Alex shared their memory with this call."), so everyone reading it knows. If the bot can't post there, that is logged as a warning and sharing goes on. Replies to the person who used the command are ephemeral: only the notice is public.
 - Every question's prompt has the group memory and the asker's personal memory, as above, plus the personal memory of everyone who shared, each labeled with the person's name. A prompt holds at most 5 shared memories: when more people share, the 5 who shared most recently are used. A memory that was forgotten with `/forget` after it was shared is not used.
@@ -227,6 +229,20 @@ By default, only your own question gets your personal memory. When you and Spart
 - Shared memories are only used to answer. Personal memories are still never updated from calls with others.
 
 `/share` and `/unshare` are logged as `Shared memory` and `Stopped sharing memory`, with the `user` and the call's `session`. The memory itself is never logged.
+
+#### Keeping your personal memory out of calls with others
+
+Your personal memory is added to your questions in calls, also with other people listening. Some people want to be private with the bot and not with everyone else in the call, so `/privacy` lets each person keep their personal memory out of calls with others. It works in DMs and in servers, and only you see the reply.
+
+- `/privacy` without options shows your privacy settings.
+- `/privacy personal_memory_in_calls:<choice>` changes the setting. The choices are `when I ask` (the default: your personal memory is used whenever you ask Claude something in a call, as described above) and `only after /share`.
+- With `only after /share`, your personal memory is never used in a call with other people, even when you ask, until you share it in that call with `/share`. It is still used when you are alone with the bot in the voice channel. Group memories, direct messages and other people's questions work as before: your memory only reaches them when you share it.
+- Whether you are alone is read when you ask, and again while Claude answers: when someone joins a call that your memory was added to only because you were alone, the answer is dropped, neither spoken nor posted, like when someone takes a shared memory back. Ask again to get an answer without it.
+- This fails closed: when your setting can't be read, it is treated as `only after /share`, and that is logged as a warning. Choosing again with `/privacy` repairs it. When the bot doesn't know who is in the call (see [Memory in calls](#memory-in-calls)), it is treated as someone else being there.
+- A change counts from your next question, also in a call that is going on.
+- What was already said stays said: an answer given while you were alone is in the call's transcript and its text channel, like everything the bot says, and the last lines of the transcript are part of every later question in the call. Claude can repeat such an answer when someone who joined afterwards asks about it.
+
+The setting is kept in the `user_settings` table of `STATS_DATABASE`, created the first time it is needed: your user ID, your choice (`when_asked` or `after_share`) and when you changed it. A change is logged as `/privacy changed`, with the `user` and the new `personal_memory_in_calls` value.
 
 ### Setup on Windows (WSL2)
 
@@ -287,7 +303,7 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 
 | Variable | Default | |
 |---|---|---|
-| `BOT_SLASH_COMMANDS` | | Must be set for `/record`, `/stop`, `/stats`, `/settings`, `/recall`, `/optout`, `/optin`, `/meet`, `/memory`, `/forget`, `/share` and `/unshare` to be registered. |
+| `BOT_SLASH_COMMANDS` | | Must be set for `/record`, `/stop`, `/stats`, `/settings`, `/recall`, `/optout`, `/optin`, `/meet`, `/memory`, `/forget`, `/share`, `/unshare` and `/privacy` to be registered. |
 | `RECORDINGS_PATH` | `recordings` | Where recordings, transcripts and summaries are saved. `/recall` answers from them. |
 | `RECORDINGS_RETENTION_DAYS` | | Calls older than this many days are deleted, with their recordings, transcript and summary. A whole number, 1 or more. Leave it empty to keep everything. |
 | `VOICE_WAKE_WORD` | `claude` | Claude only answers what mentions this word or phrase. A phrase also counts when punctuation is heard between its words: "Okay, computer" mentions `okay computer`. Whisper often writes the wake word differently from how it was said ("Claude" becomes "Cloud" or "Claud"), so it can have several spellings, separated by commas: `claude, cloud, claud`. A sentence that mentions any of them is for the bot, each heard as a whole word, in any case. The first is the wake word's name: it is the one the bot tells people to say when a call starts. Only list what whisper writes for your voice: with `cloud` in the list, the bot also answers when people talk about the cloud. Leave it empty to answer everything. |
@@ -300,7 +316,7 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 | `PIPER_BINARY` | `piper` | Path to Piper. |
 | `PIPER_MODEL` | | Path to the Piper voice, e.g. `~/piper/voices/en_US-lessac-medium.onnx`. The other voices in its folder can be chosen with `/settings`. |
 | `FFMPEG_BINARY` | `ffmpeg` | Path to ffmpeg, which converts Piper's speech for Discord, and the voice messages sent in DMs for whisper.cpp. The voice library always uses the `ffmpeg` on your `PATH`. |
-| `STATS_DATABASE` | `databases/stats.sqlite` | SQLite database for the usage statistics, each server's settings, and who opted out of being recorded. It is created on the first start. |
+| `STATS_DATABASE` | `databases/stats.sqlite` | SQLite database for the usage statistics, each server's settings, each person's privacy settings, and who opted out of being recorded. It is created on the first start. |
 | `MEMORY_PATH` | `memories` | Where the bot keeps what it remembers about each person, one file per person, and in its `groups` folder what it remembers about each group of people it has calls with. |
 
 `VOICE_WAKE_WORD`, `WHISPER_LANGUAGE`, `PIPER_MODEL` and `CLAUDE_MODEL` are the defaults for every server the bot is in. Each server can change its own with `/settings`.
