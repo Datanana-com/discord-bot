@@ -240,7 +240,7 @@ final class MemoryUpdateTest extends VoiceTestCase
     public function testAnUpdateFromACallWaitsForTheOneFromTheChatAndReadsWhatItSaved(): void
     {
         $this->memory()->save('555', self::MEMORY);
-        $session = $this->callAlone('I am learning to sail.');
+        $session = $this->call('I am learning to sail.');
         $this->chat('We ship the beta on Friday.');
 
         // The conversation pauses, and Claude is still writing the new memory when the call ends.
@@ -272,7 +272,7 @@ final class MemoryUpdateTest extends VoiceTestCase
     public function testAnUpdateThatFailsDoesNotHoldUpTheNextOneOfTheSameMemory(): void
     {
         $this->memory()->save('555', self::MEMORY);
-        $session = $this->callAlone('I am learning to sail.');
+        $session = $this->call('I am learning to sail.');
         $this->chat('We ship the beta on Friday.');
 
         // Claude can't write the new memory the chat asks for, and the call ends before it says so.
@@ -295,12 +295,38 @@ final class MemoryUpdateTest extends VoiceTestCase
         $this->assertSame([1], array_column($this->logged('Updated memory'), 'people'));
     }
 
-    /**
-     * Alice is alone with the bot in a call, and says something in it, which is transcribed when the call ends.
-     */
-    private function callAlone(string $said): VoiceSession
+    public function testAnUpdateOfAnotherMemoryDoesNotWait(): void
     {
-        $this->inCall('555');
+        $session = $this->call('We fly to Lisbon on Monday.', '666');
+        $this->chat('We ship the beta on Friday.');
+
+        // Alice's conversation pauses, and Claude is still writing her memory when the call of her and Bob ends.
+        $this->holdMemoryUpdates();
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT_MEMORY' => $this->claudeSays(self::NEW_MEMORY)]);
+        $this->timers->elapse(600.0);
+        $this->waitUntil(fn () => $this->memoryUpdates() !== [], 'Claude to be asked for her new memory');
+        $ended = $session->stop();
+
+        // The memory of the two of them is another one: Claude is asked for it while hers is still being written.
+        $this->waitUntil(fn () => count($this->memoryUpdates()) === 2, 'Claude to be asked for the new memory of the two');
+        $this->assertStringStartsWith("You keep a Discord bot's memory of a group of people", $this->memoryUpdates()[1]['system']);
+        $this->assertSame([], $this->logged('Updated memory'));
+
+        $this->releaseMemoryUpdates();
+        await($ended);
+        $this->waitUntil(fn () => count($this->logged('Updated memory')) === 2, 'both memories');
+
+        $this->assertSame(self::NEW_MEMORY, $this->memory()->read('555'));
+        $this->assertSame(self::NEW_MEMORY, $this->memory()->read(['555', '666']));
+    }
+
+    /**
+     * Alice is in a call, alone with the bot unless others are named, and says something in it, which
+     * is transcribed when the call ends.
+     */
+    private function call(string $said, string ...$others): VoiceSession
+    {
+        $this->inCall('555', ...$others);
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
         $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => $said]);
         $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);

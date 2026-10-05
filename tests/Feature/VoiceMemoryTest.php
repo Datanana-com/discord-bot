@@ -388,12 +388,10 @@ final class VoiceMemoryTest extends VoiceTestCase
         $this->inCall('555', '666');
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
 
-        // Alice and Bob both ask something, and transcribing takes a while: Bob's wait for Alice's. Carol joins meanwhile.
-        $this->setProcessEnv(['FAKE_WHISPER_DELAY' => '0.7']);
-        $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
-        $this->speak($vc, ssrc: 666, userId: '666', seconds: 1.0);
-        $this->waitUntil(fn () => count($this->logged('Utterance ended')) === 2, 'both utterances to end');
+        // Alice and Bob both ask something, and Carol joins before either question is transcribed: Bob's waits for Alice's.
+        $this->speakAndWait($vc, '555', '666');
         $this->joins('777');
+        $this->transcribe();
         $this->waitUntil(fn () => count($this->sent) === 2, 'both answers');
 
         // Carol hears both answers, and the memory of Alice and Bob isn't hers. The memory of the three
@@ -421,10 +419,10 @@ final class VoiceMemoryTest extends VoiceTestCase
         $this->inCall('555', '666', '777');
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
 
-        $this->setProcessEnv(['FAKE_WHISPER_DELAY' => '0.7']);
-        $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
-        $this->waitUntil(fn () => $this->logged('Utterance ended') !== [], 'the utterance to end');
+        // Carol leaves after Alice asked, before the question is transcribed.
+        $this->speakAndWait($vc, '555');
         $this->leaves('777');
+        $this->transcribe();
         $this->waitUntil(fn () => $this->sent !== [], 'the answer');
 
         // A group's memory is for a call of exactly its people: not the three's, as Carol left, and not
@@ -449,10 +447,9 @@ final class VoiceMemoryTest extends VoiceTestCase
         // Bob shared his memory with the call, so with whoever is in it: Carol too, once she joins.
         $session->share('666');
 
-        $this->setProcessEnv(['FAKE_WHISPER_DELAY' => '0.7']);
-        $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
-        $this->waitUntil(fn () => $this->logged('Utterance ended') !== [], 'the utterance to end');
+        $this->speakAndWait($vc, '555');
         $this->joins('777');
+        $this->transcribe();
         $this->waitUntil(fn () => count($this->sent) === 2, 'the answer');
 
         $this->assertSame(
@@ -651,9 +648,13 @@ final class VoiceMemoryTest extends VoiceTestCase
     }
 
     #[TestWith(['Carol joins'])]
+    #[TestWith(['Carol joins while Bob shares his memory'])]
+    #[TestWith(['Carol, who opted out, joins'])]
     #[TestWith(['Bob opts out'])]
+    #[TestWith(['Bob leaves and opts out'])]
     public function testAnAnswerMadeFromAGroupMemoryIsCutOffWhenItIsNoLongerForWhoIsInTheCall(string $what): void
     {
+        $this->memory()->save('666', self::BOB);
         $this->memory()->save(['555', '666'], self::TRIP);
         $this->inCall('555', '666');
         $this->setProcessEnv([
@@ -662,12 +663,21 @@ final class VoiceMemoryTest extends VoiceTestCase
         ]);
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
 
+        // A memory shared with the call is for whoever is in it, but that doesn't make the group's memory theirs.
+        if ($what === 'Carol joins while Bob shares his memory') {
+            $session->share('666');
+        }
+
         // It happens once the first sentence was spoken, while Claude is still writing the rest.
         $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
         $this->waitUntil(fn () => $this->played !== [], 'the first sentence to be spoken');
         match ($what) {
-            'Carol joins' => $this->joins('777'),
+            'Carol joins', 'Carol joins while Bob shares his memory' => $this->joins('777'),
+            // Who is in the call then isn't a group the bot keeps a memory of, which must not look like nobody having joined.
+            'Carol, who opted out, joins' => [VoiceSession::optOut('777'), $this->joins('777')],
             'Bob opts out' => VoiceSession::optOut('666'),
+            // Nobody in the channel has opted out then, but the memory is no longer used for anyone.
+            'Bob leaves and opts out' => [$this->leaves('666'), VoiceSession::optOut('666')],
         };
         touch($this->claudeResume);
         $this->waitUntil(fn () => $this->logged('Claude answered') !== [], 'Claude to finish');
@@ -676,7 +686,7 @@ final class VoiceMemoryTest extends VoiceTestCase
         // What is left isn't spoken, and the answer, which quotes the memory, is neither posted nor kept.
         $this->assertCount(1, $this->played);
         $this->assertCount(1, glob("{$session->directory}/claude-*"), 'The rest isn\'t even synthesized.');
-        $this->assertSame([], $this->sent);
+        $this->assertSame([], array_values(array_filter($this->sent, fn (string $message) => str_starts_with($message, '> '))));
         $this->assertStringNotContainsString('Claude:', $this->transcript($session));
         $this->assertSame(
             [['user' => '555', 'reason' => 'the people in the call changed']],

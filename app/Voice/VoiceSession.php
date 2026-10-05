@@ -822,6 +822,7 @@ final class VoiceSession
     /**
      * Whether everyone in the call is still one of the people whose group memory an answer is made from.
      * Someone leaving changes nothing: they hear no more of it. Not knowing who is there does: see {@see group()}.
+     * So does one of the group opting out, also once they left the call: their memory is no longer used.
      *
      * @param list<string>|null $among Whose group memory the answer is made from, when it is from one.
      */
@@ -833,7 +834,7 @@ final class VoiceSession
 
         $people = $this->group($userId);
 
-        return $people !== null && array_diff($people, $among) === [];
+        return $people !== null && $this->unlessOptedOut($among) !== null && array_diff($people, $among) === [];
     }
 
     /**

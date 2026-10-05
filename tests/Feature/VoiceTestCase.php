@@ -69,6 +69,9 @@ abstract class VoiceTestCase extends TestCase
     /** While this file exists, Claude's stand-in doesn't answer when it is asked for a new memory. */
     protected string $claudeHold;
 
+    /** While this file exists, whisper.cpp's stand-in doesn't print what was said. */
+    protected string $whisperHold;
+
     /** Where the bot keeps its memories. */
     protected string $memories;
 
@@ -114,6 +117,7 @@ abstract class VoiceTestCase extends TestCase
         $this->claudeResume = "{$this->recordings}/claude.resume";
         $this->claudeCalls = "{$this->recordings}/claude.calls";
         $this->claudeHold = "{$this->recordings}/claude.hold";
+        $this->whisperHold = "{$this->recordings}/whisper.hold";
         $this->memories = "{$this->recordings}/memories";
         $this->voiceStates = new \ArrayObject();
 
@@ -138,6 +142,7 @@ abstract class VoiceTestCase extends TestCase
             'FAKE_CLAUDE_RESUME' => $this->claudeResume,
             'FAKE_CLAUDE_HOLD' => $this->claudeHold,
             'FAKE_WHISPER_OUTPUT' => 'Hey Claude, what time is it?',
+            'FAKE_WHISPER_HOLD' => $this->whisperHold,
         ]);
 
         $this->useStatsDatabase();
@@ -363,6 +368,27 @@ abstract class VoiceTestCase extends TestCase
     protected function releaseMemoryUpdates(): void
     {
         unlink($this->claudeHold);
+    }
+
+    /**
+     * Someone says something, and it is still waiting to be transcribed, with whatever was said after it,
+     * until {@see transcribe()}: time for people to come and go before Claude is asked.
+     */
+    protected function speakAndWait(VoiceClient $vc, string ...$userIds): void
+    {
+        touch($this->whisperHold);
+        $ended = count($this->logged('Utterance ended'));
+
+        foreach ($userIds as $userId) {
+            $this->speak($vc, ssrc: (int) $userId, userId: $userId, seconds: 1.0);
+        }
+
+        $this->waitUntil(fn () => count($this->logged('Utterance ended')) === $ended + count($userIds), 'what was said to be over');
+    }
+
+    protected function transcribe(): void
+    {
+        unlink($this->whisperHold);
     }
 
     /**
