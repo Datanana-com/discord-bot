@@ -1,7 +1,13 @@
 #!/bin/sh
-# Stands in for ffmpeg: copies the -i input file to the output file, the last argument.
+# Stands in for ffmpeg: logs its arguments, then copies the -i input file to the output file, the last argument.
+# With FAKE_FFMPEG_BYTES, the output is that many bytes of silence instead: 32000 per second of 16 kHz mono 16-bit audio.
+for arg in "$@"; do printf 'arg=%s\n' "$arg"; done > "${FAKE_FFMPEG_LOG:-/dev/null}"
 while [ $# -gt 1 ]; do
     if [ "$1" = "-i" ]; then in="$2"; fi
     shift
 done
-cp "$in" "$1"
+if [ -n "$FAKE_FFMPEG_BYTES" ]; then
+    head -c "$FAKE_FFMPEG_BYTES" /dev/zero > "$1"
+else
+    cp "$in" "$1"
+fi

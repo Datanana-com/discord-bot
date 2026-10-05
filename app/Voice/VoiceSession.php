@@ -13,6 +13,7 @@ use App\Settings\GuildSettings;
 use Discord\Builders\MessageBuilder;
 use Discord\Discord;
 use Discord\Parts\Channel\Channel;
+use Discord\Parts\Channel\Thread\Thread;
 use Discord\Voice\Processes\ProcessAbstract;
 use Discord\Voice\Recording\RecordingFormat;
 use Discord\Voice\VoiceClient;
@@ -44,6 +45,9 @@ use function React\Promise\resolve;
  * in the channel, no group memory is used or updated. The memories are updated once the call is
  * over and summarized, one Claude request for each.
  *
+ * Whoever is in the call can also share their personal memory with it, with /share, until the call
+ * ends: it is then added to every question, labeled with their name, whoever asks.
+ *
  * Each step is logged with the session's ID and how long it took, and the call's usage is
  * recorded for /stats. Neither includes what anyone said: that is only in transcript.txt
  * and summary.md.
@@ -52,6 +56,9 @@ final class VoiceSession
 {
     /** Transcript lines given to Claude as context. */
     private const int CONTEXT_LINES = 20;
+
+    /** Personal memories shared with the call that a question's prompt holds. */
+    private const int SHARED_MEMORIES = 5;
 
     /** Characters that fit in a Discord message. */
     private const int MESSAGE_LIMIT = 2000;
@@ -79,6 +86,9 @@ final class VoiceSession
 
     /** @var array<string, self> Sessions that aren't over, by session ID: active, or stopped and still finishing. */
     private static array $unfinished = [];
+
+    /** @var array<string, true> The servers a call is about to start in, by guild ID. */
+    private static array $starting = [];
 
     private UtteranceSplitter $splitter;
 
@@ -117,6 +127,9 @@ final class VoiceSession
     /** @var array<string, int> How often each memory was forgotten, by its key, to tell what was said before from what was said after. */
     private array $forgotten = [];
 
+    /** @var array<string, true> Who shared their personal memory with the call, by user ID, the one who shared first first. */
+    private array $shared = [];
+
     private readonly MemoryWriter $writer;
 
     /** @var array{utterances: int, answers: int, failures: int} */
@@ -124,7 +137,7 @@ final class VoiceSession
 
     private function __construct(
         private readonly VoiceClient $vc,
-        private readonly Channel $textChannel,
+        private readonly Channel|Thread $textChannel,
         private readonly Discord $discord,
         public readonly string $directory,
         private readonly Transcriber $transcriber,
@@ -187,6 +200,26 @@ final class VoiceSession
     }
 
     /**
+     * Whether a call is about to start in the server: forGuild() only knows a call once the bot has joined its channel.
+     */
+    public static function isStarting(string $guildId): bool
+    {
+        return isset(self::$starting[$guildId]);
+    }
+
+    /**
+     * Says that a call is about to start in the server, or that it no longer is: it started, or couldn't.
+     */
+    public static function starting(string $guildId, bool $starting = true): void
+    {
+        if ($starting) {
+            self::$starting[$guildId] = true;
+        } else {
+            unset(self::$starting[$guildId]);
+        }
+    }
+
+    /**
      * The calls that aren't over: in progress, or stopped and still being transcribed and summarized.
      *
      * @return list<self>
@@ -219,13 +252,13 @@ final class VoiceSession
      *
      * A call keeps the settings it starts with: changing them applies from the next call.
      *
-     * @param Channel $textChannel Where Claude's answers and the call's summary are posted.
+     * @param Channel|Thread $textChannel Where Claude's answers and the call's summary are posted.
      * @param array{wake_word: ?string, language: ?string, voice: ?string, model: ?string}|null $settings
      *        The server's settings, when they were already read.
      *
      * @throws Throwable When the list of who opted out can't be read. Nothing is recorded then.
      */
-    public static function start(VoiceClient $vc, Channel $textChannel, Discord $discord, ?array $settings = null): self
+    public static function start(VoiceClient $vc, Channel|Thread $textChannel, Discord $discord, ?array $settings = null): self
     {
         // Read before anything else, and only now: someone may have opted out while the bot was joining.
         $optedOut = array_fill_keys((new OptOuts())->all(), true);
@@ -271,6 +304,8 @@ final class VoiceSession
     {
         foreach (self::$unfinished as $session) {
             $session->optedOut[$userId] = true;
+            // Their memory is no longer used for anyone, whatever they agreed to before.
+            unset($session->shared[$userId]);
 
             if (isset($session->audio[$userId])) {
                 $session->log('info', 'Skipping a speaker who opted out', ['user' => $userId]);
@@ -280,6 +315,23 @@ final class VoiceSession
                 unset($session->audio[$userId]);
             }
         }
+    }
+
+    /**
+     * Takes someone's personal memory back from every call that is going on, as they used /unshare.
+     * Not only the call of the server they used it in, so also from a direct message.
+     *
+     * @return bool False when they weren't sharing it with any.
+     */
+    public static function unshareEverywhere(string $userId): bool
+    {
+        $stopped = false;
+
+        foreach (self::$sessions as $session) {
+            $stopped = $session->unshare($userId) || $stopped;
+        }
+
+        return $stopped;
     }
 
     /**
@@ -416,6 +468,59 @@ final class VoiceSession
             });
     }
 
+    /**
+     * Whether the call is in this voice channel.
+     */
+    public function records(Channel $channel): bool
+    {
+        return (string) $this->vc->channel->id === (string) $channel->id;
+    }
+
+    /**
+     * Whether someone opted out of being recorded, as far as this call knows.
+     */
+    public function hasOptedOut(string $userId): bool
+    {
+        return isset($this->optedOut[$userId]);
+    }
+
+    /**
+     * Shares someone's personal memory with the call, until it ends: it is then used to answer anyone
+     * in it. The call's text channel is told.
+     *
+     * @return bool False when they were already sharing it.
+     */
+    public function share(string $userId): bool
+    {
+        if (isset($this->shared[$userId])) {
+            return false;
+        }
+
+        $this->shared[$userId] = true;
+        $this->log('info', 'Shared memory', ['user' => $userId]);
+        $this->post("{$this->nameOf($userId)} shared their memory with this call.");
+
+        return true;
+    }
+
+    /**
+     * Takes someone's personal memory back from the call. The call's text channel is told.
+     *
+     * @return bool False when they weren't sharing it.
+     */
+    public function unshare(string $userId): bool
+    {
+        if (! isset($this->shared[$userId])) {
+            return false;
+        }
+
+        unset($this->shared[$userId]);
+        $this->log('info', 'Stopped sharing memory', ['user' => $userId]);
+        $this->post("{$this->nameOf($userId)} stopped sharing their memory with this call.");
+
+        return true;
+    }
+
     private function listen(): void
     {
         // record() calls this when a speaker's first audio arrives, right after the voice client
@@ -548,12 +653,14 @@ final class VoiceSession
     private function answer(string $userId, string $name, string $question, float $endedAt, ?array $people): PromiseInterface
     {
         $asking = microtime(true);
+        // Whose shared memories this answer is made from, which it must not outlive.
+        $sharers = $this->sharers($userId);
         // What the last sentence so far waits for: Piper to be done with it, and the bot to have said it.
         $synthesized = $spoken = resolve(null);
         $speaking = false;
 
-        $sentences = new SentenceSplitter(function (string $sentence) use (&$synthesized, &$spoken, &$speaking, $userId, $endedAt) {
-            if (! $this->stillAnswering($userId)) {
+        $sentences = new SentenceSplitter(function (string $sentence) use (&$synthesized, &$spoken, &$speaking, $userId, $sharers, $endedAt) {
+            if (! $this->stillAnswering($userId, $sharers)) {
                 return;
             }
 
@@ -564,9 +671,9 @@ final class VoiceSession
             // A sentence is synthesized as soon as Piper is free, while the ones before it are spoken. It is
             // spoken once they are over: the voice client refuses to play a file while it is playing another.
             // Once the call stops, or they opt out, the sentences still waiting for Piper are no longer synthesized either.
-            $synthesized = $synthesized->then(fn () => $this->stillAnswering($userId) ? $this->speech->synthesize($sentence, $oggPath) : null);
-            $spoken = $synthesized->finally(fn () => $before)->then(function () use (&$speaking, $userId, $oggPath, $endedAt) {
-                if (! $this->stillAnswering($userId)) {
+            $synthesized = $synthesized->then(fn () => $this->stillAnswering($userId, $sharers) ? $this->speech->synthesize($sentence, $oggPath) : null);
+            $spoken = $synthesized->finally(fn () => $before)->then(function () use (&$speaking, $userId, $sharers, $oggPath, $endedAt) {
+                if (! $this->stillAnswering($userId, $sharers)) {
                     return null;
                 }
 
@@ -580,14 +687,21 @@ final class VoiceSession
             });
         });
 
-        return $this->claude->ask($this->prompt($userId, $name, $people), onText: $sentences->push(...))->then(
-            function (string $answer) use ($sentences, &$spoken, $userId, $name, $question, $endedAt, $asking, $people) {
+        return $this->claude->ask($this->prompt($userId, $name, $people, $sharers), onText: $sentences->push(...))->then(
+            function (string $answer) use ($sentences, &$spoken, $userId, $sharers, $name, $question, $endedAt, $asking, $people) {
                 $this->log('info', 'Claude answered', ['user' => $userId, 'ms' => $this->msSince($asking), 'characters' => mb_strlen($answer)]);
                 $sentences->flush();
 
                 // They opted out while Claude was answering: the answer would quote them.
                 if (isset($this->optedOut[$userId])) {
                     $this->log('debug', 'Not answering', ['user' => $userId, 'reason' => 'they opted out']);
+
+                    return $spoken;
+                }
+
+                // Someone took their memory back while Claude was answering: the answer may quote it.
+                if (! $this->stillSharing($sharers)) {
+                    $this->log('debug', 'Not answering', ['user' => $userId, 'reason' => 'a shared memory was taken back']);
 
                     return $spoken;
                 }
@@ -609,11 +723,36 @@ final class VoiceSession
     }
 
     /**
-     * Whether an answer to someone is still spoken: not once the call stopped, or they opted out.
+     * Whether an answer to someone is still spoken: not once the call stopped, they opted out, or
+     * someone took back the memory it was made from.
+     *
+     * @param list<string> $sharers Whose shared memories the answer is made from.
      */
-    private function stillAnswering(string $userId): bool
+    private function stillAnswering(string $userId, array $sharers): bool
     {
-        return ! $this->stopped && ! isset($this->optedOut[$userId]);
+        return ! $this->stopped && ! isset($this->optedOut[$userId]) && $this->stillSharing($sharers);
+    }
+
+    /**
+     * @param list<string> $sharers
+     */
+    private function stillSharing(array $sharers): bool
+    {
+        return array_filter($sharers, fn (string $sharer) => ! isset($this->shared[$sharer])) === [];
+    }
+
+    /**
+     * Whose shared memories a question of someone is answered with: the ones who shared most recently,
+     * as a prompt only holds so many. The asker's is already there, as their personal memory.
+     *
+     * @return list<string> User IDs, the one who shared first first.
+     */
+    private function sharers(string $userId): array
+    {
+        return array_map(
+            strval(...),
+            array_values(array_diff(array_slice(array_keys($this->shared), -self::SHARED_MEMORIES), [$userId])),
+        );
     }
 
     /**
@@ -653,8 +792,9 @@ final class VoiceSession
      * What Claude is asked when someone talks to it: the memories it has of them, then the call so far.
      *
      * @param list<string>|null $people Who is in the call: see {@see group()}.
+     * @param list<string> $sharers Whose shared memories are added: see {@see sharers()}.
      */
-    private function prompt(string $userId, string $name, ?array $people): string
+    private function prompt(string $userId, string $name, ?array $people, array $sharers): string
     {
         $remembered = '';
         $personal = $this->memory->read($userId);
@@ -669,6 +809,15 @@ final class VoiceSession
             $names = array_map($this->nameOf(...), $people);
             $last = array_pop($names);
             $remembered .= 'What you remember about ' . implode(', ', $names) . " and {$last} together:\n\n{$group}\n\n";
+        }
+
+        foreach ($sharers as $sharer) {
+            // Read now, so a memory forgotten since it was shared isn't used.
+            $shared = $this->memory->read($sharer);
+
+            if ($shared !== '') {
+                $remembered .= "What you remember about {$this->nameOf($sharer)}, who shared their memory with this call:\n\n{$shared}\n\n";
+            }
         }
 
         return $remembered . "Transcript of the voice call so far:\n\n"

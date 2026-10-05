@@ -153,6 +153,8 @@ abstract class VoiceTestCase extends TestCase
     {
         // A call is summarized after it stopped, which must be over before its recordings are deleted.
         await(all(array_map(fn (VoiceSession $session) => $session->stop(), VoiceSession::unfinished())));
+        // A call a test left starting, as when the bot never got to join, is not starting in the next test.
+        (new ReflectionProperty(VoiceSession::class, 'starting'))->setValue(null, []);
 
         foreach ($this->originalEnv as $name => $value) {
             if (str_starts_with($name, 'FAKE_')) {
@@ -203,8 +205,11 @@ abstract class VoiceTestCase extends TestCase
 
     /**
      * A voice channel whose members are {@see MEMBERS}. Messages sent to it are collected in {@see $sent}.
+     *
+     * @param string $id      The channel's ID: the bot's call is in 200.
+     * @param string $guildId The server it is in.
      */
-    protected function voiceChannel(): Channel
+    protected function voiceChannel(string $id = '200', string $guildId = self::GUILD_ID): Channel
     {
         $members = $this->userNames();
 
@@ -213,8 +218,8 @@ abstract class VoiceTestCase extends TestCase
             ->onlyMethods(['__get', '__isset', 'sendMessage'])
             ->getStub();
         $attributes = fn (string $name) => match ($name) {
-            'id' => '200',
-            'guild_id' => self::GUILD_ID,
+            'id' => $id,
+            'guild_id' => $guildId,
             'guild' => (object) ['members' => $members, 'voice_states' => $this->voiceStates],
             default => null,
         };

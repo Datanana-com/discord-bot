@@ -76,7 +76,7 @@ final class SettingsCommandTest extends CommandTestCase
         $reply = $this->settings(['wake_word' => 'Hey Jarvis', 'language' => 'pt', 'voice' => 'pt_BR-faber-medium', 'model' => 'sonnet']);
 
         $this->assertSame(
-            "**Saved this server's settings.** They apply from the next /record.\n"
+            "**Saved this server's settings.** They apply from the next call.\n"
             . "Wake word: `Hey Jarvis`\nLanguage: `pt`\nVoice: `pt_BR-faber-medium`\nClaude model: `sonnet`",
             $reply,
         );
@@ -232,7 +232,7 @@ final class SettingsCommandTest extends CommandTestCase
         $reply = $this->settings(['reset' => true]);
 
         $this->assertSame(
-            "**Saved this server's settings.** They apply from the next /record.\n"
+            "**Saved this server's settings.** They apply from the next call.\n"
             . "Wake word: `claude` (default)\nLanguage: `auto` (default)\nVoice: `voice` (default)\nClaude model: `haiku` (default)",
             $reply,
         );
@@ -277,7 +277,7 @@ final class SettingsCommandTest extends CommandTestCase
         $reply = $this->settings(['model' => 'opus']);
 
         $this->assertStringStartsWith(
-            "**Saved this server's settings.** The call in progress keeps its settings: these apply from the next /record.\n",
+            "**Saved this server's settings.** The call in progress keeps its settings: these apply from the next call.\n",
             $reply,
         );
     }
