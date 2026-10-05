@@ -260,7 +260,7 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 
 Without options, `/settings` shows the server's settings and which of them are the defaults. An invalid value is refused with what is allowed instead, e.g. the list of installed voices, and then nothing is changed. Only whoever used `/settings` sees its replies.
 
-Changes apply from the next `/record`: a call in progress keeps the settings it started with.
+Changes apply from the next `/record` or `/meet`: a call in progress keeps the settings it started with.
 
 Only members with the **Manage Server** permission can use `/settings`. Discord doesn't show it to anyone else, and the bot also checks the permission itself, because server admins can change who sees a command (Server Settings → Integrations).
 

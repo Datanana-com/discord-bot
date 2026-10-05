@@ -10,6 +10,7 @@ use App\Settings\GuildSettings;
 use Discord\Builders\MessageBuilder;
 use Discord\Discord;
 use Discord\Parts\Channel\Channel;
+use Discord\Parts\Channel\Thread\Thread;
 use Discord\Voice\Processes\ProcessAbstract;
 use Discord\Voice\Recording\RecordingFormat;
 use Discord\Voice\VoiceClient;
@@ -105,7 +106,7 @@ final class VoiceSession
 
     private function __construct(
         private readonly VoiceClient $vc,
-        private readonly Channel $textChannel,
+        private readonly Channel|Thread $textChannel,
         private readonly Discord $discord,
         public readonly string $directory,
         private readonly Transcriber $transcriber,
@@ -198,13 +199,13 @@ final class VoiceSession
      *
      * A call keeps the settings it starts with: changing them applies from the next call.
      *
-     * @param Channel $textChannel Where Claude's answers and the call's summary are posted.
+     * @param Channel|Thread $textChannel Where Claude's answers and the call's summary are posted.
      * @param array{wake_word: ?string, language: ?string, voice: ?string, model: ?string}|null $settings
      *        The server's settings, when they were already read.
      *
      * @throws Throwable When the list of who opted out can't be read. Nothing is recorded then.
      */
-    public static function start(VoiceClient $vc, Channel $textChannel, Discord $discord, ?array $settings = null): self
+    public static function start(VoiceClient $vc, Channel|Thread $textChannel, Discord $discord, ?array $settings = null): self
     {
         // Read before anything else, and only now: someone may have opted out while the bot was joining.
         $optedOut = array_fill_keys((new OptOuts())->all(), true);

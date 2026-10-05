@@ -9,7 +9,9 @@ use App\Commands\Global\RecordCommand;
 use App\Privacy\OptOuts;
 use App\Settings\GuildSettings;
 use App\Voice\VoiceSession;
+use Discord\Builders\MessageBuilder;
 use Discord\Parts\Channel\Channel;
+use Discord\Parts\Channel\Thread\Thread;
 use Discord\Voice\Manager;
 use Illuminate\Database\Capsule\Manager as DB;
 use Monolog\Logger;
@@ -57,6 +59,34 @@ final class RecordCommandTest extends CommandTestCase
         $this->record($this->interaction($channel));
 
         $this->assertSame(['🔴 Recording <#200>. I answer everything that is said. Use /stop to end the recording, or /optout if you don\'t want to be recorded.'], $this->updates);
+    }
+
+    public function testPostsInTheThreadTheCommandWasUsedIn(): void
+    {
+        $channel = $this->voiceChannel();
+        // Not a channel to DiscordPHP, but one to post in all the same.
+        $posted = [];
+        $thread = static::getStubBuilder(Thread::class)->disableOriginalConstructor()->onlyMethods(['sendMessage'])->getStub();
+        $thread->method('sendMessage')->willReturnCallback(function (MessageBuilder $message) use (&$posted) {
+            $posted[] = $message->getContent();
+
+            return resolve(null);
+        });
+        $this->joinsWith(resolve($vc = $this->voiceClient($channel)));
+
+        $this->record($this->interaction($channel, channel: $thread));
+
+        $this->assertSame(['🔴 Recording <#200>. Say "claude" to talk to me. Use /stop to end the recording, or /optout if you don\'t want to be recorded.'], $this->updates);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        // By reference: an arrow function would keep the list as it is now.
+        $this->waitUntil(function () use (&$posted) {
+            return $posted !== [];
+        }, 'the answer to be posted');
+
+        $this->assertSame(["> **Alice:** Hey Claude, what time is it?\nIt is a quarter past four."], $posted);
+        $this->assertSame([], $this->sent, 'Not in the voice channel\'s own chat.');
+        $this->assertSame([], $this->loggedProblems());
     }
 
     public function testUsesTheServersSettings(): void

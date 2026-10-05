@@ -34,6 +34,9 @@ final class Meeting
 
     private TimerInterface $timer;
 
+    /** Whether the time the people invited have to join is up. */
+    private bool $late = false;
+
     private function __construct(
         private readonly Channel $channel,
         private readonly Guild $guild,
@@ -51,6 +54,8 @@ final class Meeting
     {
         $meeting = new self($channel, $guild, $discord, $invited);
         $meeting->timer = $discord->getLoop()->addTimer(self::JOIN_SECONDS, function () use ($meeting) {
+            $meeting->late = true;
+
             if ($meeting->present === []) {
                 $meeting->end();
             }
@@ -73,7 +78,7 @@ final class Meeting
      * The bot joined the channel and records it with this call.
      *
      * @return bool False when the meeting is already over: the bot took longer to join than the
-     *              people invited had to. The call is stopped then.
+     *              people invited had to, and nobody was in the channel by then. The call is stopped then.
      */
     public function recordedBy(VoiceSession $session): bool
     {
@@ -132,8 +137,8 @@ final class Meeting
 
         unset($this->present[$userId]);
 
-        // While the bot is still joining, the people invited keep the time they have to join.
-        if ($this->present === [] && $this->session !== null) {
+        // While the bot is still joining, the people invited keep what is left of the time they have to join.
+        if ($this->present === [] && ($this->session !== null || $this->late)) {
             $this->end();
         }
     }

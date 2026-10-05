@@ -4,9 +4,9 @@ declare(strict_types=1);
 
 namespace Tests\Feature\Commands;
 
+use App\Application;
 use App\Commands\Global\MeetCommand;
 use App\Commands\Global\StopCommand;
-use App\Events\VoiceStateUpdate;
 use App\Voice\Meeting;
 use App\Voice\VoiceSession;
 use Discord\Builders\MessageBuilder;
@@ -24,8 +24,10 @@ use Discord\Parts\Part;
 use Discord\Parts\Permissions\RolePermission;
 use Discord\Parts\WebSockets\VoiceStateUpdate as VoiceState;
 use Discord\Voice\Manager;
+use Discord\WebSockets\Event;
 use Monolog\Handler\NullHandler;
 use Monolog\Logger;
+use PHPUnit\Framework\Attributes\DataProvider;
 use React\EventLoop\LoopInterface;
 use React\EventLoop\StreamSelectLoop;
 use React\Promise\Deferred;
@@ -74,6 +76,10 @@ final class MeetCommandTest extends CommandTestCase
 
     private ManualTimers $timers;
 
+    /** The bot as it starts, which hands Discord's events to the classes in app/Events. It never connects. */
+    private Application $app;
+
+    /** Its Discord client, for DiscordPHP to build what Discord sends with. */
     private Discord $client;
 
     /** The server's channels: what was made and deleted in it, and what Discord answers. */
@@ -99,7 +105,8 @@ final class MeetCommandTest extends CommandTestCase
         $this->discord->voice = (new ReflectionClass(Manager::class))->newInstanceWithoutConstructor();
         // The bot knows who it is once it is connected.
         (new ReflectionProperty(Discord::class, 'client'))->setValue($this->discord, (object) ['id' => self::BOT_ID]);
-        $this->client = new Discord(['token' => 'test-token', 'loop' => new StreamSelectLoop(), 'logger' => new Logger('discord', [new NullHandler()])]);
+        $this->app = new Application(['token' => 'test-token', 'loop' => new StreamSelectLoop(), 'logger' => new Logger('discord', [new NullHandler()])]);
+        $this->client = $this->app->discord;
 
         // Behaves like DiscordPHP's ChannelRepository, without the requests to Discord.
         $this->channels = new class ($this->client) {
@@ -146,7 +153,7 @@ final class MeetCommandTest extends CommandTestCase
 
             public function get(string $key, string $id): ?object
             {
-                return $this->existing[$id] ?? null;
+                return $key === 'id' ? $this->existing[$id] ?? null : null;
             }
         };
         $this->channels->channel = $this->voiceChannel();
@@ -201,11 +208,12 @@ final class MeetCommandTest extends CommandTestCase
     {
         $this->joinsWith(resolve($this->voiceClient($this->channels->channel)));
 
-        // Alice invites Bob twice, herself and the bot.
-        $this->meet(['666', '555', '666', self::BOT_ID]);
+        // Alice invites herself, Bob twice and the bot.
+        $this->meet(['555', '666', '666', self::BOT_ID]);
 
         $this->assertSame('Meeting: Alex, Spartan', $this->channels->made[0]['name']);
         $this->assertSame([self::GUILD_ID, self::BOT_ID, '555', '666'], array_column($this->channels->made[0]['permission_overwrites'], 'id'));
+        // As a list: Discord refuses anything else.
         $this->assertSame(['666'], $this->invitations[0]['mentions']['users']);
         $this->assertSame(1, $this->logged('Meeting started')[0]['invited']);
     }
@@ -228,10 +236,11 @@ final class MeetCommandTest extends CommandTestCase
     {
         $this->joinsWith(resolve($this->voiceClient($this->channels->channel)));
 
-        $this->meet(['4321']);
+        // And Carol's name is one PHP takes for nothing.
+        $this->meet(['4321', '777'], names: ['777' => '0']);
 
-        $this->assertSame('Meeting: Alex', $this->channels->made[0]['name']);
-        $this->assertSame(['4321'], $this->invitations[0]['mentions']['users'], 'They are still invited.');
+        $this->assertSame('Meeting: Alex, 0', $this->channels->made[0]['name']);
+        $this->assertSame(['4321', '777'], $this->invitations[0]['mentions']['users'], 'They are still invited.');
     }
 
     public function testCutsANameThatIsTooLongForAChannel(): void
@@ -253,30 +262,52 @@ final class MeetCommandTest extends CommandTestCase
         $this->assertNull($this->channels->made[0]['parent_id']);
     }
 
-    public function testMakesTheChannelInTheCategoryOfAThreadsChannel(): void
+    /**
+     * @param class-string<Part> $class What DiscordPHP makes of the thread: a thread, or a channel when it wasn't sent that thread.
+     */
+    #[DataProvider('threads')]
+    public function testMakesTheChannelInTheCategoryOfAThreadsChannel(string $class, int $type): void
     {
-        $this->joinsWith(resolve($this->voiceClient($this->channels->channel)));
+        // It expects to be closed exactly once.
+        $this->joinsWith(resolve($vc = $this->voiceClient($this->channels->channel, connected: true)));
         // A thread's parent is the channel it is in, which Discord refuses as a category.
-        $thread = static::getStubBuilder(Thread::class)->disableOriginalConstructor()->onlyMethods(['__get'])->getStub();
-        $thread->method('__get')->willReturnCallback(fn (string $name) => $name === 'parent_id' ? self::TEXT_CHANNEL : null);
+        $thread = $this->thread($class, $type);
         $this->channels->existing[self::TEXT_CHANNEL] = (object) ['parent_id' => self::CATEGORY];
 
         $this->meet(['666'], source: $thread);
 
         $this->assertSame(self::CATEGORY, $this->channels->made[0]['parent_id']);
-        // A thread can't be posted in like a channel, so the answers go to the meeting's own chat.
-        $this->assertSame($this->channels->channel, $this->textChannelOf(VoiceSession::forGuild(self::GUILD_ID)));
+
+        // The answers and the summary are posted in the thread: it is where the command was used.
+        $session = VoiceSession::forGuild(self::GUILD_ID);
+        $this->assertSame($thread, $this->textChannelOf($session));
+        $this->joins('666');
+        $this->speak($vc, ssrc: 2, userId: '666', seconds: 1.0);
+        $this->leaves('666');
+        await($session->stop());
+
+        $this->assertSame(['It is a quarter past four.'], $this->sent, 'The summary of the meeting.');
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    /**
+     * @return iterable<string, array{class-string<Part>, int}>
+     */
+    public static function threads(): iterable
+    {
+        yield 'a thread' => [Thread::class, Channel::TYPE_PUBLIC_THREAD];
+        yield 'a private thread' => [Thread::class, Channel::TYPE_PRIVATE_THREAD];
+        yield 'a thread of an announcement channel' => [Thread::class, Channel::TYPE_ANNOUNCEMENT_THREAD];
+        yield 'a thread the bot was not sent' => [Channel::class, Channel::TYPE_PUBLIC_THREAD];
     }
 
     public function testMakesTheChannelOutsideAnyCategoryWhenAThreadsChannelIsUnknown(): void
     {
         $this->joinsWith(resolve($this->voiceClient($this->channels->channel)));
-        $thread = static::getStubBuilder(Thread::class)->disableOriginalConstructor()->onlyMethods(['__get'])->getStub();
-        $thread->method('__get')->willReturnCallback(fn (string $name) => $name === 'parent_id' ? self::TEXT_CHANNEL : null);
 
-        $this->meet(['666'], source: $thread);
+        $this->meet(['666'], source: $this->thread(Thread::class, Channel::TYPE_PUBLIC_THREAD));
 
-        $this->assertNull($this->channels->made[0]['parent_id']);
+        $this->assertNull($this->channels->made[0]['parent_id'], 'Not in the thread\'s channel, which is no category.');
     }
 
     public function testJoinsTheChannelAndRecordsIt(): void
@@ -457,11 +488,15 @@ final class MeetCommandTest extends CommandTestCase
     {
         $this->joinsWith(resolve($this->voiceClient($this->channels->channel)));
         $this->meet(['666']);
-        $this->joins('666');
 
-        // Carol joins and leaves another voice channel, and so does Dave in another server.
+        // While nobody is in the meeting yet, Carol joins and leaves another voice channel.
         $this->joins('777', channel: '201');
         $this->leaves('777');
+
+        $this->assertSame([], $this->channels->deleted, 'Bob still has time to join.');
+
+        // And while Bob is in it, so does Dave in another server.
+        $this->joins('666');
         $this->joins('888', channel: '202', guild: '101');
         $this->leaves('888', guild: '101');
 
@@ -523,10 +558,57 @@ final class MeetCommandTest extends CommandTestCase
         $joining->resolve($this->voiceClient($this->channels->channel, connected: true));
 
         $this->assertNull(VoiceSession::forGuild(self::GUILD_ID), 'A channel that is gone is not recorded.');
-        $this->assertSame(['Nobody joined the meeting in time, so I deleted its channel.'], $this->updates);
+        $this->assertSame(['The meeting was over before I could join it, so I deleted its channel.'], $this->updates);
         $this->assertSame([], $this->invitations);
         $this->assertSame([], $this->logged('Meeting started'));
         $this->assertSame([self::MEETING], $this->channels->deleted);
+    }
+
+    public function testEndsWhenTheLastPersonLeavesAfterTheTimeToJoinWhileTheBotIsStillJoining(): void
+    {
+        $joining = new Deferred();
+        $this->joinsWith($joining->promise());
+        $this->meet(['666']);
+
+        $this->joins('666');
+        $this->timers->elapse(Meeting::JOIN_SECONDS);
+
+        $this->assertSame([], $this->channels->deleted, 'Bob is in the channel.');
+
+        $this->leaves('666');
+
+        // Nobody has time left to join, and nothing else would ever end the meeting.
+        $this->assertSame([self::MEETING], $this->channels->deleted);
+
+        // It expects to be closed exactly once.
+        $joining->resolve($this->voiceClient($this->channels->channel, connected: true));
+
+        $this->assertNull(VoiceSession::forGuild(self::GUILD_ID));
+        $this->assertSame(['The meeting was over before I could join it, so I deleted its channel.'], $this->updates);
+    }
+
+    public function testFollowsEveryMeetingOnItsOwn(): void
+    {
+        $this->joinsWith(resolve($this->voiceClient($this->channels->channel)));
+        $this->meet(['666']);
+        // Another meeting, which the bot didn't get to join.
+        $other = static::getStubBuilder(Channel::class)->disableOriginalConstructor()->onlyMethods(['__get'])->getStub();
+        $other->method('__get')->willReturnCallback(fn (string $name) => $name === 'id' ? '201' : null);
+        Meeting::open($other, $this->guild(), $this->discord, 1);
+
+        $this->joins('666');
+        $this->joins('777', channel: '201');
+        $this->leaves('666');
+
+        $this->assertSame([self::MEETING], $this->channels->deleted, 'Carol is still in the other meeting.');
+
+        $this->timers->elapse(Meeting::JOIN_SECONDS);
+
+        $this->assertSame([self::MEETING], $this->channels->deleted);
+
+        $this->leaves('777');
+
+        $this->assertSame([self::MEETING, '201'], $this->channels->deleted);
     }
 
     public function testDeletesTheChannelOnceWhenTheBotFailsToJoinAfterTheTimeToJoinIsUp(): void
@@ -785,7 +867,7 @@ final class MeetCommandTest extends CommandTestCase
         $members = new class () {
             public function get(string $key, string $id): ?object
             {
-                return $id === '666' ? (object) ['displayname' => 'Spartan'] : null;
+                return $key === 'id' && $id === '666' ? (object) ['displayname' => 'Spartan'] : null;
             }
         };
 
@@ -825,6 +907,30 @@ final class MeetCommandTest extends CommandTestCase
     }
 
     /**
+     * A thread of the text channel, as DiscordPHP knows it. Messages sent to it are collected in {@see $sent}.
+     *
+     * @param class-string<Part> $class
+     */
+    private function thread(string $class, int $type): Part
+    {
+        $thread = static::getStubBuilder($class)->disableOriginalConstructor()->onlyMethods(['__get', 'sendMessage'])->getStub();
+        $thread->method('__get')->willReturnCallback(fn (string $name) => match ($name) {
+            'id' => '60',
+            'type' => $type,
+            'guild_id' => self::GUILD_ID,
+            'parent_id' => self::TEXT_CHANNEL,
+            default => null,
+        });
+        $thread->method('sendMessage')->willReturnCallback(function (MessageBuilder $message): PromiseInterface {
+            $this->sent[] = $message->getContent();
+
+            return resolve(null);
+        });
+
+        return $thread;
+    }
+
+    /**
      * Discord says that someone is in a voice channel now: they joined it, moved to it, or changed something while in it.
      *
      * @param bool|null $bot Whether Discord says they are a bot, or null when it doesn't say.
@@ -834,8 +940,9 @@ final class MeetCommandTest extends CommandTestCase
         $user = ['id' => $userId, 'username' => strtolower(self::USERS[$userId])] + ($bot === null ? [] : ['bot' => $bot]);
         $state = new VoiceState($this->client, ['guild_id' => $guild, 'channel_id' => $channel, 'user_id' => $userId, 'member' => (object) ['user' => (object) $user]], true);
 
-        // Through the bot's handler of the event, as Application runs it.
-        $this->assertNull((new VoiceStateUpdate($state, $this->discord, ['followMeetings']))->handle());
+        // Through the bot as it starts, which has app/Events/VoiceStateUpdate.php handle the event.
+        $this->app->discord->emit(Event::VOICE_STATE_UPDATE, [$state, $this->discord]);
+        $this->assertSame([], preg_grep('/^(Event "|Error while handling event)/', $this->loggedProblems()), 'The event was handled.');
     }
 
     /**
@@ -855,7 +962,7 @@ final class MeetCommandTest extends CommandTestCase
         });
     }
 
-    private function textChannelOf(VoiceSession $session): Channel
+    private function textChannelOf(VoiceSession $session): Part
     {
         return (new ReflectionProperty(VoiceSession::class, 'textChannel'))->getValue($session);
     }

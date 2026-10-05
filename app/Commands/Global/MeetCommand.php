@@ -14,7 +14,6 @@ use Discord\Http\Exceptions\NoPermissionsException;
 use Discord\Parts\Application\Command\Option;
 use Discord\Parts\Channel\Channel;
 use Discord\Parts\Channel\Overwrite;
-use Discord\Parts\Channel\Thread\Thread;
 use Discord\Parts\Guild\Guild;
 use Discord\Parts\Interactions\Interaction;
 use Discord\Parts\Permissions\Permission;
@@ -39,6 +38,9 @@ final class MeetCommand extends CommandAbstract
 
     /** What the people in a meeting and the bot may do in its channel: View Channel, Connect and Speak. */
     private const int ACCESS = (1 << Permission::VIEW_CHANNEL) | (1 << Permission::CONNECT) | (1 << Permission::SPEAK);
+
+    /** The types of channel that are threads, whichever class DiscordPHP gives them: it only knows the threads it was sent. */
+    private const array THREADS = [Channel::TYPE_ANNOUNCEMENT_THREAD, Channel::TYPE_PUBLIC_THREAD, Channel::TYPE_PRIVATE_THREAD];
 
     /** Characters that fit in a channel's name. */
     private const int NAME_LIMIT = 100;
@@ -97,13 +99,12 @@ final class MeetCommand extends CommandAbstract
     {
         // From now on: the people invited can already see the channel, and join it before the bot has.
         $meeting = Meeting::open($channel, $guild, $this->discord, count($invited));
-        $source = $interaction->channel;
 
         // Like /record, answers and the summary go where the command was used: the meeting's own chat is deleted with it.
-        return $this->record($interaction, $channel, $source instanceof Channel ? $source : $channel, $settings)->then(
+        return $this->record($interaction, $channel, $interaction->channel ?? $channel, $settings)->then(
             function (VoiceSession $session) use ($interaction, $channel, $meeting, $invited) {
                 if (! $meeting->recordedBy($session)) {
-                    return $interaction->updateOriginalResponse(MessageBuilder::new()->setContent('Nobody joined the meeting in time, so I deleted its channel.'));
+                    return $interaction->updateOriginalResponse(MessageBuilder::new()->setContent('The meeting was over before I could join it, so I deleted its channel.'));
                 }
 
                 return $interaction
@@ -172,7 +173,7 @@ final class MeetCommand extends CommandAbstract
             'name' => mb_substr('Meeting: ' . implode(', ', $names), 0, self::NAME_LIMIT),
             'type' => Channel::TYPE_GUILD_VOICE,
             // In the category of the channel the command was used in. A thread is in a channel, which is in the category.
-            'parent_id' => $source instanceof Thread ? $guild->channels->get('id', $source->parent_id)?->parent_id : $source?->parent_id,
+            'parent_id' => in_array($source?->type, self::THREADS, true) ? $guild->channels->get('id', $source->parent_id)?->parent_id : $source?->parent_id,
             'permission_overwrites' => [
                 // The role everyone has is named after the server.
                 ['id' => (string) $guild->id, 'type' => Overwrite::TYPE_ROLE, 'allow' => 0, 'deny' => 1 << Permission::VIEW_CHANNEL],

@@ -80,14 +80,6 @@ final class ApplicationTest extends TestCase
         $app->discord->emit(Event::MESSAGE_CREATE, [$message, $app->discord]);
     }
 
-    public function testFollowsWhoJoinsAndLeavesVoiceChannels(): void
-    {
-        $app = $this->app();
-
-        // app/Events/VoiceStateUpdate.php handles VOICE_STATE_UPDATE, which is how /meet knows that everyone left a meeting.
-        $this->assertCount(1, $app->discord->listeners(Event::VOICE_STATE_UPDATE));
-    }
-
     public function testRefusesEventClassesNotNamedAfterADiscordEvent(): void
     {
         $this->addAppFile('Events/MessageCreated.php', "<?php\n\nnamespace App\\Events;\n\nfinal class MessageCreated\n{\n}\n");

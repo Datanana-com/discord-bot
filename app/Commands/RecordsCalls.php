@@ -8,6 +8,7 @@ use App\Privacy\OptOuts;
 use App\Voice\VoiceSession;
 use Discord\Builders\MessageBuilder;
 use Discord\Parts\Channel\Channel;
+use Discord\Parts\Channel\Thread\Thread;
 use Discord\Parts\Interactions\Interaction;
 use Discord\Voice\VoiceClient;
 use React\Promise\PromiseInterface;
@@ -45,12 +46,12 @@ trait RecordsCalls
     /**
      * Joins the voice channel and starts recording it.
      *
-     * @param Channel $textChannel Where Claude's answers and the call's summary are posted.
+     * @param Channel|Thread $textChannel Where Claude's answers and the call's summary are posted.
      * @param array{wake_word: ?string, language: ?string, voice: ?string, model: ?string} $settings The server's settings.
      *
      * @return PromiseInterface<VoiceSession> Rejects with what to tell whoever used the command, when the call couldn't start.
      */
-    private function record(Interaction $interaction, Channel $voiceChannel, Channel $textChannel, array $settings): PromiseInterface
+    private function record(Interaction $interaction, Channel $voiceChannel, Channel|Thread $textChannel, array $settings): PromiseInterface
     {
         return $this->discord->joinVoiceChannel($voiceChannel, mute: false, deaf: false)->then(
             function (VoiceClient $vc) use ($interaction, $textChannel, $settings) {
