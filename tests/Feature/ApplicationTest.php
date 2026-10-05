@@ -52,12 +52,12 @@ final class ApplicationTest extends TestCase
     public function testHandlesEachEventClassUnderItsEventName(): void
     {
         $app = $this->app();
-        $message = (new ReflectionClass(Message::class))->newInstanceWithoutConstructor();
+        $message = $this->getMockBuilder(Message::class)->disableOriginalConstructor()->onlyMethods(['__get'])->getMock();
 
-        // app/Events/MessageCreate.php handles MESSAGE_CREATE.
+        // app/Events/MessageCreate.php handles MESSAGE_CREATE: it sees the message was sent in a server, and leaves it alone.
+        $message->expects($this->once())->method('__get')->with('guild_id')->willReturn('100');
+
         $app->discord->emit(Event::MESSAGE_CREATE, [$message, $app->discord]);
-
-        $this->assertContains('another example', $this->logged());
     }
 
     public function testRefusesEventClassesNotNamedAfterADiscordEvent(): void
@@ -117,16 +117,18 @@ final class ApplicationTest extends TestCase
         $app->prepareCommandClasses();
 
         $this->assertSame([
+            'forget' => ['Deletes what the bot remembers about you.', Command::CHAT_INPUT],
+            'memory' => ['Shows what the bot remembers about you.', Command::CHAT_INPUT],
             'record' => ['Records your voice channel and lets everyone in it talk to Claude.', Command::CHAT_INPUT],
             'stats' => ['Shows how this server has used the bot.', Command::CHAT_INPUT],
             'stop' => ['Stops recording and leaves the voice channel.', Command::CHAT_INPUT],
             'test' => ['A test global command', Command::CHAT_INPUT],
         ], $commands->saved);
-        $this->assertContains('Global commands found: RecordCommand, StatsCommand, StopCommand, TestCommand', $this->logged());
+        $this->assertContains('Global commands found: ForgetCommand, MemoryCommand, RecordCommand, StatsCommand, StopCommand, TestCommand', $this->logged());
         $this->assertContains('Command record has been saved.', $this->logged());
 
         // Each command's interactions go to its class, and are logged: /test logs a greeting.
-        $this->assertSame(['record', 'stats', 'stop', 'test'], array_keys($commands->listeners));
+        $this->assertSame(['forget', 'memory', 'record', 'stats', 'stop', 'test'], array_keys($commands->listeners));
         ($commands->listeners['test'])(new Interaction($app->discord, ['guild_id' => '100', 'channel_id' => '200', 'user' => ['id' => '555', 'username' => 'alice']], true));
         $this->assertContains(['/test used', ['guild' => '100', 'channel' => '200', 'user' => '555']], $this->loggedWithContext());
         $this->assertContains('Hello, World!', $this->logged());
@@ -141,7 +143,7 @@ final class ApplicationTest extends TestCase
         $app->prepareCommandClasses();
 
         $this->assertContains('Guild specific commands found: PingCommand', $this->logged());
-        $this->assertSame(['record', 'stats', 'stop', 'test'], array_keys($commands->saved));
+        $this->assertSame(['forget', 'memory', 'record', 'stats', 'stop', 'test'], array_keys($commands->saved));
     }
 
     public function testDoesNotSaveCommandsDiscordAlreadyHas(): void
@@ -153,10 +155,10 @@ final class ApplicationTest extends TestCase
 
         $app->prepareCommandClasses();
 
-        $this->assertSame(['stats', 'test'], array_keys($commands->saved));
+        $this->assertSame(['forget', 'memory', 'stats', 'test'], array_keys($commands->saved));
         $this->assertContains('Command record already exists.', $this->logged());
         $this->assertContains('Command stop already exists.', $this->logged());
-        $this->assertSame(['record', 'stats', 'stop', 'test'], array_keys($commands->listeners), 'Existing commands are still handled.');
+        $this->assertSame(['forget', 'memory', 'record', 'stats', 'stop', 'test'], array_keys($commands->listeners), 'Existing commands are still handled.');
     }
 
     public function testSavesCommandsThatChanged(): void
@@ -180,7 +182,7 @@ final class ApplicationTest extends TestCase
 
         $this->assertSame([], $commands->saved);
         $this->assertContains('Could not fetch the registered commands: Discord API unavailable', $this->logged());
-        $this->assertSame(['record', 'stats', 'stop', 'test'], array_keys($commands->listeners), 'Commands Discord already has keep working.');
+        $this->assertSame(['forget', 'memory', 'record', 'stats', 'stop', 'test'], array_keys($commands->listeners), 'Commands Discord already has keep working.');
     }
 
     public function testLogsCommandsThatCannotBeSaved(): void
