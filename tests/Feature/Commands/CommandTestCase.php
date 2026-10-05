@@ -36,8 +36,9 @@ abstract class CommandTestCase extends VoiceTestCase
      * @param array<string, string> $users     The people it names, as the user options /memory and /forget take: the option's name and their ID.
      * @param array<string, string> $nicknames What the server calls its members, by ID, when it isn't their name.
      * @param Part|null   $channel The channel or thread it was used in, when DiscordPHP knows it.
+     * @param array<string, string> $choices   The text options it was given, as the options /privacy takes: the option's name and its value.
      */
-    protected function interaction(?Channel $voiceChannel, ?string $guildId = self::GUILD_ID, string $userId = '555', array $users = [], array $nicknames = [], ?Part $channel = null): Interaction
+    protected function interaction(?Channel $voiceChannel, ?string $guildId = self::GUILD_ID, string $userId = '555', array $users = [], array $nicknames = [], ?Part $channel = null, array $choices = []): Interaction
     {
         $member = static::getStubBuilder(Member::class)->disableOriginalConstructor()->onlyMethods(['getVoiceChannel'])->getStub();
         $member->method('getVoiceChannel')->willReturn($voiceChannel);
@@ -53,10 +54,16 @@ abstract class CommandTestCase extends VoiceTestCase
             'guild_id' => $guildId,
             'channel' => $channel,
             // Discord leaves out the options when none were filled in.
-            'data' => $users === [] ? null : (object) ['options' => array_map(
-                fn (string $name) => (object) ['name' => $name, 'type' => Option::USER, 'value' => $users[$name]],
-                array_keys($users),
-            )],
+            'data' => $users === [] && $choices === [] ? null : (object) ['options' => [
+                ...array_map(
+                    fn (string $name) => (object) ['name' => $name, 'type' => Option::USER, 'value' => $users[$name]],
+                    array_keys($users),
+                ),
+                ...array_map(
+                    fn (string $name) => (object) ['name' => $name, 'type' => Option::STRING, 'value' => $choices[$name]],
+                    array_keys($choices),
+                ),
+            ]],
             'guild' => $nicknames === [] ? null : (object) ['members' => $this->userNames($nicknames)],
             default => null,
         };

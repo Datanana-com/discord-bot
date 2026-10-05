@@ -178,7 +178,9 @@ The memory is updated when a conversation pauses. Ten minutes after your last me
 - `/memory` shows you what the bot remembers about you, and lists the groups you have a memory with (see [Memory in calls](#memory-in-calls)). `/share` lets the bot use it in a call for everyone there, until the call ends (see [Sharing your personal memory with a call](#sharing-your-personal-memory-with-a-call)).
 - `/forget` deletes it, together with what you said since its last update. The messages themselves stay in the DM, where the last 20 are still sent to Claude with your next message.
 
-Both commands work in DMs and in servers, and only you see their replies.
+- `/privacy` shows your privacy settings, and `/privacy personal_memory_in_calls:only after /share` keeps your personal memory out of calls with other people, unless you share it (see [Keeping your personal memory out of calls with others](#keeping-your-personal-memory-out-of-calls-with-others)).
+
+`/memory`, `/forget` and `/privacy` work in DMs and in servers, and only you see their replies.
 
 > [!IMPORTANT]
 > Memories are kept on the bot's machine, where anyone with access to the machine can read them. The files themselves can only be read by the user the bot runs as (mode 0600).
@@ -194,10 +196,10 @@ Most things are discussed and decided in calls, so the bot remembers those too. 
 - Alone with the bot, you have your personal memory: it is added to what Claude is asked, and updated from the call, like in DMs.
 - With others, the call uses the group memory of exactly the people in the channel. You and Spartan have one; you, Spartan and Carol have another. It is added to what Claude is asked, and updated from what was said while that group was there.
 - When people join or leave, the next question uses the memory of the new group. What was said is kept with the people who were there when it was said, also for someone who left right after speaking.
-- A question waits for its turn and is transcribed before Claude is asked, and people come and go meanwhile. So the bot looks at who is in the channel again when it asks Claude: when it isn't the same people any more, because someone joined or left, that answer gets no group memory. Your personal memory and the shared ones are still added.
+- A question waits for its turn and is transcribed before Claude is asked, and people come and go meanwhile. So the bot looks at who is in the channel again when it asks Claude: when it isn't the same people any more, because someone joined or left, that answer gets no group memory. Your personal memory, as far as your `/privacy` setting lets it, and the shared ones are still added.
 - An answer made from a group memory is cut off when someone joins who that memory doesn't belong to, while Claude is still writing it or the bot is still speaking it. The sentence being spoken ends, which is the one thing they can hear of it, and the rest isn't spoken. An answer Claude hadn't finished is neither posted nor kept in the transcript; one it had finished was already posted in the text channel. Ask again, and the answer uses the memory of the people who are there now. The same happens when one of the group opts out of being recorded meanwhile. Someone leaving changes nothing, as they hear no more of it, and neither does someone joining while the answer has no group memory in it.
 - Other bots in the channel, like a music bot, are nobody to a memory. With you, Spartan and a music bot there, the call uses the memory of you and Spartan; with you and a music bot, your personal memory; and five people and a music bot still have a group memory. What a bot says is transcribed like anyone's and kept with the people who are there, and a bot that talks to the bot with nobody else there is answered without any memory. A user Discord doesn't say is a bot counts as a person, so that no memory is brought up in front of someone the bot can't place.
-- Whenever you ask Claude something in a call with others, your personal memory is added to the prompt as well, labeled with your name, even with others listening. The other people's personal memories are only used when they shared them with `/share`. Claude's instructions say whose memory is whose, that everyone in the call hears its answer, and that it should only bring up what the question needs.
+- Whenever you ask Claude something in a call with others, your personal memory is added to the prompt as well, labeled with your name, even with others listening, unless you chose otherwise with `/privacy` (see [Keeping your personal memory out of calls with others](#keeping-your-personal-memory-out-of-calls-with-others)). The other people's personal memories are only used when they shared them with `/share`. Claude's instructions say whose memory is whose, that everyone in the call hears its answer, and that it should only bring up what the question needs.
 - Personal memories are never updated from calls with other people: what Spartan says there goes into the group's memory, never into yours.
 - A group's memory is made from what its people said, not from what Claude answered them. An answer may quote your personal memory, or one that was shared, and it would then stay in the group's memory, where `/memory with:` shows it and your own `/forget` doesn't reach it. So in a call with others, Claude's answers are only in the call's transcript and summary. Alone with the bot, Claude's answers do count for your personal memory, like in DMs, except the ones given while someone else is sharing their memory with the call.
 - While someone who opted out of being recorded (see [Opting out of being recorded](#opting-out-of-being-recorded)) is in the channel, no group memory is used or updated. What is said then is not remembered, and a memory belonging to someone who opts out is not used or updated from then on, even for a question already waiting for its turn, an answer made from it that is still being spoken, or an update Claude is already writing.
@@ -224,7 +226,7 @@ Updates are logged as `Updated memory`, with the call's `session`, how many `peo
 By default, only your own question gets your personal memory. When you and Spartan ask "what are we missing from each other's point of view?", the bot needs both of your personal memories, and that only happens when each of you says so.
 
 - `/share`, used by someone in the voice channel the bot is recording, adds their personal memory to the call: until the call ends, the bot may use it to answer anyone there, and to compare people's points of view. `/unshare` takes it back, also from someone who left the call or who writes to the bot in a direct message. An answer that Claude is still writing when someone takes their memory back, or opts out, is dropped: it is neither spoken nor posted.
-- Sharing is an explicit choice for this call. Only having opted out of being recorded blocks it, as below.
+- Sharing is an explicit choice for this call, so it works whatever your `/privacy` setting is. Only having opted out of being recorded blocks it, as below.
 - It lasts until the call ends, and not longer: the next call starts with nobody sharing. Opting out of being recorded with `/optout` also stops it, and whoever opted out can't `/share` until they `/optin`: someone the bot doesn't record or answer doesn't have their memory used in calls either.
 - The call's text channel gets a notice when someone shares or stops sharing ("Alex shared their memory with this call."), so everyone reading it knows. If the bot can't post there, that is logged as a warning and sharing goes on. Replies to the person who used the command are ephemeral: only the notice is public.
 - Every question's prompt has the group memory and the asker's personal memory, as above, plus the personal memory of everyone who shared, each labeled with the person's name. A prompt holds at most 5 shared memories: when more people share, the 5 who shared most recently are used. A memory that was forgotten with `/forget` after it was shared is not used.
@@ -234,6 +236,20 @@ By default, only your own question gets your personal memory. When you and Spart
 - A memory is shared with the call, so with whoever is in it: someone who joins hears answers made from it too, and an answer isn't cut off for them as it is for a group memory.
 
 `/share` and `/unshare` are logged as `Shared memory` and `Stopped sharing memory`, with the `user` and the call's `session`. The memory itself is never logged.
+
+#### Keeping your personal memory out of calls with others
+
+Your personal memory is added to your questions in calls, also with other people listening. Some people want to be private with the bot and not with everyone else in the call, so `/privacy` lets each person keep their personal memory out of calls with others. It works in DMs and in servers, and only you see the reply.
+
+- `/privacy` without options shows your privacy settings.
+- `/privacy personal_memory_in_calls:<choice>` changes the setting. The choices are `when I ask` (the default: your personal memory is used whenever you ask Claude something in a call, as described above) and `only after /share`.
+- With `only after /share`, your personal memory is never used in a call with other people, even when you ask, until you share it in that call with `/share`. It is still used when you are alone with the bot in the voice channel. Group memories, direct messages and other people's questions work as before: your memory only reaches them when you share it.
+- Whether you are alone is read when you ask, and again while Claude answers: when someone joins a call that your memory was added to only because you were alone, the answer is dropped, neither spoken nor posted, like when someone takes a shared memory back. Ask again to get an answer without it.
+- This fails closed: when your setting can't be read, it is treated as `only after /share`, and that is logged as a warning. Choosing again with `/privacy` repairs it. When the bot doesn't know who is in the call (see [Memory in calls](#memory-in-calls)), it is treated as someone else being there.
+- A change counts from your next question, also in a call that is going on.
+- What was already said stays said: an answer given while you were alone is in the call's transcript and its text channel, like everything the bot says, and the last lines of the transcript are part of every later question in the call. Claude can repeat such an answer when someone who joined afterwards asks about it.
+
+The setting is kept in the `user_settings` table of `STATS_DATABASE`, created the first time it is needed: your user ID, your choice (`when_asked` or `after_share`) and when you changed it. A change is logged as `/privacy changed`, with the `user` and the new `personal_memory_in_calls` value.
 
 ### Setup on Windows (WSL2)
 
@@ -294,19 +310,20 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 
 | Variable | Default | |
 |---|---|---|
-| `BOT_SLASH_COMMANDS` | | Must be set for `/record`, `/stop`, `/stats`, `/settings`, `/recall`, `/optout`, `/optin`, `/meet`, `/memory`, `/forget`, `/share` and `/unshare` to be registered. |
+| `BOT_SLASH_COMMANDS` | | Must be set for `/record`, `/stop`, `/stats`, `/settings`, `/recall`, `/optout`, `/optin`, `/meet`, `/memory`, `/forget`, `/share`, `/unshare` and `/privacy` to be registered. |
 | `RECORDINGS_PATH` | `recordings` | Where recordings, transcripts and summaries are saved. `/recall` answers from them. |
 | `RECORDINGS_RETENTION_DAYS` | | Calls older than this many days are deleted, with their recordings, transcript and summary. A whole number, 1 or more. Leave it empty to keep everything. |
-| `VOICE_WAKE_WORD` | `claude` | Claude only answers what mentions this word or phrase. A phrase also counts when punctuation is heard between its words: "Okay, computer" mentions `okay computer`. Leave it empty to answer everything. |
+| `VOICE_WAKE_WORD` | `claude` | Claude only answers what mentions this word or phrase. A phrase also counts when punctuation is heard between its words: "Okay, computer" mentions `okay computer`. Whisper often writes the wake word differently from how it was said ("Claude" becomes "Cloud" or "Claud"), so it can have several spellings, separated by commas: `claude, cloud, claud`. A sentence that mentions any of them is for the bot, each heard as a whole word, in any case. The first is the wake word's name: it is the one the bot tells people to say when a call starts. Only list what whisper writes for your voice: with `cloud` in the list, the bot also answers when people talk about the cloud. Leave it empty to answer everything. |
 | `WHISPER_BINARY` | `whisper-cli` | Path to whisper.cpp's `whisper-cli`. |
 | `WHISPER_MODEL` | | Path to the whisper model, e.g. `~/whisper.cpp/models/ggml-base.bin`. |
 | `WHISPER_LANGUAGE` | `auto` | Language spoken in the call, e.g. `en` or `pt`, or `auto` to detect it. |
+| `WHISPER_PROMPT` | | Text whisper takes as what was said just before, in every call and in voice messages sent in DMs. It helps whisper write the wake word as it is: on seven sentences that began with "Claude", whisper `base` with `en` wrote "Claude" or "Claud" in 1 with no prompt, in 6 with `A voice call with the assistant Claude.`, and in 3 with `Hey Claude.`. A prompt can also make whisper write words that weren't said (the second one made it drop words from other sentences), so try one before keeping it, and still list the spellings it leaves out, such as "Claud". Leave it empty to give whisper no prompt. |
 | `CLAUDE_BINARY` | `claude` | Path to the Claude Code CLI. |
 | `CLAUDE_MODEL` | `haiku` | `haiku` answers fastest; `sonnet` or `opus` answer better, but slower. |
 | `PIPER_BINARY` | `piper` | Path to Piper. |
 | `PIPER_MODEL` | | Path to the Piper voice, e.g. `~/piper/voices/en_US-lessac-medium.onnx`. The other voices in its folder can be chosen with `/settings`. |
 | `FFMPEG_BINARY` | `ffmpeg` | Path to ffmpeg, which converts Piper's speech for Discord, and the voice messages sent in DMs for whisper.cpp. The voice library always uses the `ffmpeg` on your `PATH`. |
-| `STATS_DATABASE` | `databases/stats.sqlite` | SQLite database for the usage statistics, each server's settings, and who opted out of being recorded. It is created on the first start. |
+| `STATS_DATABASE` | `databases/stats.sqlite` | SQLite database for the usage statistics, each server's settings, each person's privacy settings, and who opted out of being recorded. It is created on the first start. |
 | `MEMORY_PATH` | `memories` | Where the bot keeps what it remembers about each person, one file per person, and in its `groups` folder what it remembers about each group of people it has calls with. |
 
 `VOICE_WAKE_WORD`, `WHISPER_LANGUAGE`, `PIPER_MODEL` and `CLAUDE_MODEL` are the defaults for every server the bot is in. Each server can change its own with `/settings`.
@@ -317,7 +334,7 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 
 | Option | |
 |---|---|
-| `wake_word` | A word or short phrase: at most 32 letters, numbers, spaces, apostrophes and hyphens, starting and ending with a letter or number. `none` answers everything: Discord doesn't let an option be empty. |
+| `wake_word` | A word or short phrase: at most 32 letters, numbers, spaces, apostrophes and hyphens, starting and ending with a letter or number. List up to 5 spellings separated by commas, for what whisper writes when it mishears it: `claude, cloud, claud`. The first is the one the bot tells people to say. `none` answers everything: Discord doesn't let an option be empty. |
 | `language` | `auto`, or a whisper language code such as `en` or `pt`. |
 | `voice` | The name of a Piper voice in the same folder as `PIPER_MODEL`, e.g. `pt_BR-faber-medium` for `pt_BR-faber-medium.onnx`. |
 | `model` | `haiku`, `sonnet` or `opus`. It answers in the server's calls, writes their summaries, and answers `/recall`. |
@@ -373,7 +390,7 @@ sqlite3 databases/stats.sqlite "SELECT guild_id, COUNT(*) AS answers FROM events
 
 - The bot starts speaking a few seconds after a question: transcription, Claude Code starting up, and the synthesis of the first sentence each add some. The rest of the answer no longer adds to the wait, but there is a pause of about half a second between sentences.
 - The bot doesn't stop speaking when someone talks over it.
-- Speech recognition sometimes mishears the wake word (e.g. "cloud"). Change it, with `VOICE_WAKE_WORD` or `/settings`, if that happens often.
+- Speech recognition sometimes mishears the wake word (e.g. "cloud" for "Claude"). List the spellings whisper writes, separated by commas, in `VOICE_WAKE_WORD` or `/settings`, and give whisper a `WHISPER_PROMPT` that names the wake word.
 - The wake word is looked for as whole words. In languages written without spaces between words, such as Japanese or Thai, it is only heard when whisper writes a space or punctuation around it.
 - The voice library (`discord-php-helpers/voice` 8.3.0) keeps every decoded audio frame in memory until `/stop`, roughly 12 MB per speaker per minute of speech. That's fine for normal calls; for very long ones, `/stop` and `/record` again now and then.
 - The voice library also writes a copy of each speaker's audio to the system's temp folder, as `<date>_<time>-<SSRC>.ogg`. The bot doesn't use these files. It deletes them when the call ends, and when it starts, those that a call it didn't get to end left behind, as when it crashed. It takes every file named like that in the temp folder to be one of them.
