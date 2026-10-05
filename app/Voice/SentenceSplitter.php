@@ -16,20 +16,23 @@ final class SentenceSplitter
     private const int MIN_CHARACTERS = 20;
 
     /**
-     * A sentence ends after its punctuation, and the quotes or brackets that close with it, once a
-     * space follows, which rules out "3.50" and waits for "?!" to be complete; right after
-     * punctuation that takes no space; or with its line.
+     * Where a sentence ends, for a pattern that has just matched its punctuation: after the quotes
+     * or brackets that close with it, once a space follows, which rules out "3.50" and waits for
+     * "?!" to be complete; or, after punctuation that takes no space, once something else follows.
      *
      * A dot doesn't end it after what is usually abbreviated or numbered: a capitalized word of one
      * or two letters ("Sr.", "Dr.", an initial), a number of one or two digits ("am 3. Oktober"),
      * "etc.", "e.g." or "i.e.". Not after three letters, which German nouns ("Uhr.") often end a
      * sentence with. Each look back has its own fixed length, as older PCRE versions require.
      */
-    private const string SENTENCE = '/^.{' . self::MIN_CHARACTERS . ',}?(?:'
+    public const string END = '(?:'
         . '(?<=[.!?…।])(?<!\b\p{Lu}\.)(?<!\b\p{Lu}\p{Ll}\.)(?<!\b\d\.)(?<!\b\d\d\.)'
-        . '(?<!\betc\.)(?<!\be\.g\.)(?<!\bi\.e\.)["\'”’»)\]]*(?=\s)'
-        . '|(?<=[。！？])[」』）]*'
-        . '|(?=\n))/su';
+        . '(?<!\betc\.)(?<!\be\.g\.)(?<!\bi\.e\.)["\'“”‘’«»)\]]*(?=\s)'
+        . '|(?<=[。！？])[」』）”’]*(?=[^」』）”’])'
+        . ')';
+
+    /** A sentence ends where {@see END} says, or with its line. */
+    private const string SENTENCE = '/^.{' . self::MIN_CHARACTERS . ',}?(?:' . self::END . '|(?=\n))/su';
 
     /** What arrived of the sentence in progress. */
     private string $text = '';

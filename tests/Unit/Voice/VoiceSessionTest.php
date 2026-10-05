@@ -71,6 +71,9 @@ final class VoiceSessionTest extends TestCase
         yield 'after a sentence, when a line is too long' => ['One two three. Four five six! Seven?', 20, ['One two three.', 'Four five six!', 'Seven?']];
         yield 'after a line exactly as long as the limit' => ["aaaa bbbbb\ncc", 10, ['aaaa bbbbb', 'cc']];
         yield 'after a sentence exactly as long as the limit' => ['a a a a b. c', 10, ['a a a a b.', 'c']];
+        yield 'not after an abbreviation' => ['We met Dr. Smith and his whole team today.', 21, ['We met Dr. Smith and', 'his whole team today.']];
+        yield 'after a sentence and the quote it closes' => ['He said "go." Then he left.', 15, ['He said "go."', 'Then he left.']];
+        yield 'keeping the indentation of the next line' => ["```python\ndef f(x):\n    return x + 37\n```", 20, ['```python' . "\n" . 'def f(x):', '    return x + 37', '```']];
         yield 'after a sentence without spaces' => ['それは良い考えです。明日また話しましょう。', 20, ['それは良い考えです。', '明日また話しましょう。']];
         yield 'after a word, when a sentence is too long' => ['one two three four five six seven', 20, ['one two three four', 'five six seven']];
         yield 'anywhere, when a word is too long' => [str_repeat('a', 45), 20, [str_repeat('a', 20), str_repeat('a', 20), 'aaaaa']];

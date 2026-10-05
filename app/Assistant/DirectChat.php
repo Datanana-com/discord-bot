@@ -219,8 +219,8 @@ final class DirectChat
      */
     public static function parts(string $content): array
     {
-        // Room for the code block's opening and closing lines.
-        $parts = VoiceSession::split($content, 2000 - 2 * self::FENCE_LENGTH);
+        // Room for the code block's opening and closing lines, which only a text that is cut needs.
+        $parts = mb_strlen($content) <= 2000 ? [$content] : VoiceSession::split($content, 2000 - 2 * self::FENCE_LENGTH);
         $open = null;
 
         foreach ($parts as &$part) {
@@ -230,7 +230,8 @@ final class DirectChat
             }
 
             foreach (preg_split('/\R/u', $part) as $line) {
-                if (str_starts_with(ltrim($line), '```')) {
+                // A fence is a line of its own: "```npm test``` runs the tests" only holds code.
+                if (preg_match('/^\s*```[^`]*$/u', $line) === 1) {
                     $open = $open === null ? mb_substr(trim($line), 0, self::FENCE_LENGTH) : null;
                 }
             }
