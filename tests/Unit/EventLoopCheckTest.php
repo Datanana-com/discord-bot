@@ -37,6 +37,11 @@ final class EventLoopCheckTest extends TestCase
             '/^- reading stream tcp_socket\S* local 127\.0\.0\.1:\d+, left by Tests\\\\Fixtures\\\\EventLoopCheck\\\\LeakyInSetUpTest::testNeedsAServer$/m',
             $output,
         );
+        // The test that was skipped before it was prepared left its server there as well, and is blamed for it.
+        $this->assertMatchesRegularExpression(
+            '/^- reading stream tcp_socket\S* local 127\.0\.0\.1:\d+, left by Tests\\\\Fixtures\\\\EventLoopCheck\\\\LeakySkippedTest::testSkipsAfterOpeningAServer$/m',
+            $output,
+        );
         $this->assertStringNotContainsString('testLeavesNothing', $output, 'A test that closed what it opened is not blamed.');
         $this->assertStringContainsString('PHPUnit Warnings: 1', $output);
     }
@@ -58,6 +63,15 @@ final class EventLoopCheckTest extends TestCase
         // when the test ends there, they are still in the loop, though finished.
         yield 'ends after awaiting a program' => ['testEndsAfterAwaitingAProgram'];
         yield 'ends after waiting' => ['testEndsAfterWaiting'];
+    }
+
+    public function testLeavesTheLiveSuiteAlone(): void
+    {
+        // The real Discord test leaves its client's timers in the loop on purpose.
+        $output = $this->runPhpunit('Live', expectFailure: false);
+
+        $this->assertStringContainsString('OK (1 test, 1 assertion)', $output);
+        $this->assertStringNotContainsString('event loop', $output);
     }
 
     public function testFailsTheRunForASingleLeakToo(): void

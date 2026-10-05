@@ -7,7 +7,12 @@
     <testsuites>
         <testsuite name="Leaky">
             <file>LeakyTest.php</file>
+            <file>LeakySkippedTest.php</file>
             <file>LeakyInSetUpTest.php</file>
+        </testsuite>
+        <!-- Named like the suite of the real Discord test, which the check leaves alone. -->
+        <testsuite name="Live">
+            <file>ShortTimerTest.php</file>
         </testsuite>
         <testsuite name="Clean">
             <file>CleanTest.php</file>

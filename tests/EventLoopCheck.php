@@ -5,8 +5,6 @@ declare(strict_types=1);
 namespace Tests;
 
 use PHPUnit\Event\Facade as EventFacade;
-use PHPUnit\Event\Test\Finished;
-use PHPUnit\Event\Test\FinishedSubscriber;
 use PHPUnit\Event\Test\PreparationStarted;
 use PHPUnit\Event\Test\PreparationStartedSubscriber;
 use PHPUnit\Event\TestRunner\ExecutionFinished;
@@ -25,18 +23,27 @@ use PHPUnit\TextUI\Configuration\Configuration;
  * what is still waiting, with the test that left it when there is one, and takes it out of the loop so that
  * the run ends instead of hanging.
  *
- * Set in phpunit.xml as an extension.
+ * Set in phpunit.xml as an extension. Not for the Live suite: that one talks to real Discord, whose client leaves timers in the loop,
+ * which tests/Live/VoiceRoundTripTest.php deals with by stopping the loop. Needs ReactPHP's default loop, the one that is used when
+ * the ev, event and uv extensions are not installed (see {@see EventLoopInspector}).
  */
 final class EventLoopCheck implements Extension
 {
-    /** @var array<string, string> What was waiting in the loop before the test that is running, and before its setUp(). */
+    /** @var array<string, string> What was waiting in the loop when the running test started preparing, before its setUp(). */
     private array $before = [];
+
+    /** @var string|null The test that is running, or the last one that ran. */
+    private ?string $current = null;
 
     /** @var array<string, string> Key of a thing in the loop => the test that left it there. */
     private array $leftBy = [];
 
     public function bootstrap(Configuration $configuration, Facade $facade, ParameterCollection $parameters): void
     {
+        if (in_array('Live', $configuration->includeTestSuites(), true)) {
+            return;
+        }
+
         $facade->registerSubscribers(
             new class ($this) implements PreparationStartedSubscriber {
                 public function __construct(private readonly EventLoopCheck $check)
@@ -45,17 +52,7 @@ final class EventLoopCheck implements Extension
 
                 public function notify(PreparationStarted $event): void
                 {
-                    $this->check->testStarted();
-                }
-            },
-            new class ($this) implements FinishedSubscriber {
-                public function __construct(private readonly EventLoopCheck $check)
-                {
-                }
-
-                public function notify(Finished $event): void
-                {
-                    $this->check->testFinished($event->test()->id());
+                    $this->check->testStarted($event->test()->id());
                 }
             },
             new class ($this) implements ExecutionFinishedSubscriber {
@@ -71,24 +68,19 @@ final class EventLoopCheck implements Extension
         );
     }
 
-    public function testStarted(): void
+    /**
+     * A test is starting, so the one before it is over, whether it passed, failed, or was skipped in its setUp().
+     */
+    public function testStarted(string $test): void
     {
+        $this->blameTheCurrentTest();
+        $this->current = $test;
         $this->before = EventLoopInspector::waiting();
-    }
-
-    public function testFinished(string $test): void
-    {
-        $waiting = EventLoopInspector::waiting();
-        // The key of what is gone can come back for something else: object ids are reused.
-        $this->leftBy = array_intersect_key($this->leftBy, $waiting);
-
-        foreach (array_diff_key($waiting, $this->before) as $key => $what) {
-            $this->leftBy[$key] ??= $test;
-        }
     }
 
     public function executionFinished(): void
     {
+        $this->blameTheCurrentTest();
         EventLoopInspector::settle();
         $waiting = EventLoopInspector::waiting();
 
@@ -108,5 +100,23 @@ final class EventLoopCheck implements Extension
         EventFacade::emitter()->testRunnerTriggeredPhpunitWarning(
             "The tests left something waiting in the event loop, which would keep PHP from ending (and CI from finishing):\n" . implode("\n", $lines),
         );
+    }
+
+    /**
+     * What is in the loop now, and was not when the current test started, is what that test left.
+     */
+    private function blameTheCurrentTest(): void
+    {
+        if ($this->current === null) {
+            return;
+        }
+
+        $waiting = EventLoopInspector::waiting();
+        // The key of what is gone can come back for something else: object ids are reused.
+        $this->leftBy = array_intersect_key($this->leftBy, $waiting);
+
+        foreach (array_diff_key($waiting, $this->before) as $key => $what) {
+            $this->leftBy[$key] ??= $this->current;
+        }
     }
 }
