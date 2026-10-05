@@ -132,10 +132,10 @@ final class VoiceBenchTest extends VoiceTestCase
                 120.0,
             );
             $this->assertSame([], $this->loggedProblems(), 'The question was answered.');
-            // Handed off, its answer is one sentence that says so, and its times aren't those of an answer.
-            $this->assertSame([], $this->logged('Looking something up'), 'The question was answered at once, not looked up in the background.');
             // The rest of the answer is synthesized and spoken before the next question, which would wait for it.
             await((new ReflectionProperty(VoiceSession::class, 'queue'))->getValue($session));
+            // Handed off, its answer is one sentence that says so, and its times aren't those of an answer.
+            $this->assertSame([], $this->logged('Looking something up'), 'The question was answered at once, not looked up in the background.');
         }
 
         await($session->stop());
