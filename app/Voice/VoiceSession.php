@@ -13,6 +13,7 @@ use App\Settings\GuildSettings;
 use Discord\Builders\MessageBuilder;
 use Discord\Discord;
 use Discord\Parts\Channel\Channel;
+use Discord\Parts\Channel\Thread\Thread;
 use Discord\Voice\Processes\ProcessAbstract;
 use Discord\Voice\Recording\RecordingFormat;
 use Discord\Voice\VoiceClient;
@@ -86,6 +87,9 @@ final class VoiceSession
     /** @var array<string, self> Sessions that aren't over, by session ID: active, or stopped and still finishing. */
     private static array $unfinished = [];
 
+    /** @var array<string, true> The servers a call is about to start in, by guild ID. */
+    private static array $starting = [];
+
     private UtteranceSplitter $splitter;
 
     private TimerInterface $ticker;
@@ -133,7 +137,7 @@ final class VoiceSession
 
     private function __construct(
         private readonly VoiceClient $vc,
-        private readonly Channel $textChannel,
+        private readonly Channel|Thread $textChannel,
         private readonly Discord $discord,
         public readonly string $directory,
         private readonly Transcriber $transcriber,
@@ -196,6 +200,26 @@ final class VoiceSession
     }
 
     /**
+     * Whether a call is about to start in the server: forGuild() only knows a call once the bot has joined its channel.
+     */
+    public static function isStarting(string $guildId): bool
+    {
+        return isset(self::$starting[$guildId]);
+    }
+
+    /**
+     * Says that a call is about to start in the server, or that it no longer is: it started, or couldn't.
+     */
+    public static function starting(string $guildId, bool $starting = true): void
+    {
+        if ($starting) {
+            self::$starting[$guildId] = true;
+        } else {
+            unset(self::$starting[$guildId]);
+        }
+    }
+
+    /**
      * The calls that aren't over: in progress, or stopped and still being transcribed and summarized.
      *
      * @return list<self>
@@ -228,13 +252,13 @@ final class VoiceSession
      *
      * A call keeps the settings it starts with: changing them applies from the next call.
      *
-     * @param Channel $textChannel Where Claude's answers and the call's summary are posted.
+     * @param Channel|Thread $textChannel Where Claude's answers and the call's summary are posted.
      * @param array{wake_word: ?string, language: ?string, voice: ?string, model: ?string}|null $settings
      *        The server's settings, when they were already read.
      *
      * @throws Throwable When the list of who opted out can't be read. Nothing is recorded then.
      */
-    public static function start(VoiceClient $vc, Channel $textChannel, Discord $discord, ?array $settings = null): self
+    public static function start(VoiceClient $vc, Channel|Thread $textChannel, Discord $discord, ?array $settings = null): self
     {
         // Read before anything else, and only now: someone may have opted out while the bot was joining.
         $optedOut = array_fill_keys((new OptOuts())->all(), true);

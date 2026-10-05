@@ -9,10 +9,13 @@ use App\Commands\Global\RecordCommand;
 use App\Privacy\OptOuts;
 use App\Settings\GuildSettings;
 use App\Voice\VoiceSession;
+use Discord\Builders\MessageBuilder;
 use Discord\Parts\Channel\Channel;
+use Discord\Parts\Channel\Thread\Thread;
 use Discord\Voice\Manager;
 use Illuminate\Database\Capsule\Manager as DB;
 use Monolog\Logger;
+use React\Promise\Deferred;
 use ReflectionClass;
 use RuntimeException;
 
@@ -57,6 +60,34 @@ final class RecordCommandTest extends CommandTestCase
         $this->record($this->interaction($channel));
 
         $this->assertSame(['🔴 Recording <#200>. I answer everything that is said. Use /stop to end the recording, or /optout if you don\'t want to be recorded. I remember each group\'s calls: see what I remember with /memory, and delete it with /forget.'], $this->updates);
+    }
+
+    public function testPostsInTheThreadTheCommandWasUsedIn(): void
+    {
+        $channel = $this->voiceChannel();
+        // Not a channel to DiscordPHP, but one to post in all the same.
+        $posted = [];
+        $thread = static::getStubBuilder(Thread::class)->disableOriginalConstructor()->onlyMethods(['sendMessage'])->getStub();
+        $thread->method('sendMessage')->willReturnCallback(function (MessageBuilder $message) use (&$posted) {
+            $posted[] = $message->getContent();
+
+            return resolve(null);
+        });
+        $this->joinsWith(resolve($vc = $this->voiceClient($channel)));
+
+        $this->record($this->interaction($channel, channel: $thread));
+
+        $this->assertSame(['🔴 Recording <#200>. Say "claude" to talk to me. Use /stop to end the recording, or /optout if you don\'t want to be recorded. I remember each group\'s calls: see what I remember with /memory, and delete it with /forget.'], $this->updates);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        // By reference: an arrow function would keep the list as it is now.
+        $this->waitUntil(function () use (&$posted) {
+            return $posted !== [];
+        }, 'the answer to be posted');
+
+        $this->assertSame(["> **Alice:** Hey Claude, what time is it?\nIt is a quarter past four."], $posted);
+        $this->assertSame([], $this->sent, 'Not in the voice channel\'s own chat.');
+        $this->assertSame([], $this->loggedProblems());
     }
 
     public function testUsesTheServersSettings(): void
@@ -157,6 +188,37 @@ final class RecordCommandTest extends CommandTestCase
         $this->record($this->interaction($channel));
 
         $this->assertRefused('I am already recording in this server. Use /stop first.');
+    }
+
+    public function testRefusesWhileTheBotIsStillJoiningForAnotherCall(): void
+    {
+        $channel = $this->voiceChannel();
+        $joining = new Deferred();
+        $joins = 0;
+        $this->discord->method('joinVoiceChannel')->willReturnCallback(function () use ($joining, &$joins) {
+            // The bot joins for the first call, and is still joining for the one after it.
+            return ++$joins === 1 ? $joining->promise() : (new Deferred())->promise();
+        });
+        $this->record($this->interaction($channel));
+
+        // Until the bot has joined, there is no call to find in the server.
+        $this->record($this->interaction($channel));
+
+        $this->assertSame([['content' => 'I am already joining a voice channel in this server.', 'ephemeral' => true]], $this->responses);
+        $this->assertSame(1, $joins);
+
+        // Once it has, it is the call that is in the way.
+        $joining->resolve($this->voiceClient($channel));
+        $this->record($this->interaction($channel));
+
+        $this->assertSame('I am already recording in this server. Use /stop first.', $this->responses[1]['content']);
+
+        // And once that call is over, nothing is.
+        VoiceSession::forGuild(self::GUILD_ID)->stop();
+        $this->record($this->interaction($channel));
+
+        $this->assertCount(2, $this->responses);
+        $this->assertSame(2, $joins);
     }
 
     public function testRefusesWhenVoiceIsUnavailable(): void

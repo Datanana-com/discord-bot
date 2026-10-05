@@ -28,6 +28,12 @@ trait ChatsInDirectMessages
 
     protected ManualTimers $timers;
 
+    /** What ffmpeg was last run with. */
+    protected string $ffmpegLog;
+
+    /** What whisper.cpp was last run with. */
+    protected string $whisperLog;
+
     /** @var array<string, list<object>> The messages in each person's DM with the bot, oldest first. */
     protected array $dms = [];
 
@@ -56,7 +62,13 @@ trait ChatsInDirectMessages
      */
     protected function setUpDirectMessages(): void
     {
-        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => $this->claudeSays(self::ANSWER)]);
+        $this->ffmpegLog = "{$this->recordings}/ffmpeg.log";
+        $this->whisperLog = "{$this->recordings}/whisper.log";
+        $this->setProcessEnv([
+            'FAKE_CLAUDE_OUTPUT' => $this->claudeSays(self::ANSWER),
+            'FAKE_FFMPEG_LOG' => $this->ffmpegLog,
+            'FAKE_WHISPER_LOG' => $this->whisperLog,
+        ]);
     }
 
     /**
@@ -71,8 +83,9 @@ trait ChatsInDirectMessages
      * Someone writes to the bot, and the bot gets the message like it gets every message: as a MESSAGE_CREATE event.
      *
      * @param string|null $guildId The server the message was sent in, or null for a direct message.
+     * @param object|null $attachment The message's attachment. A message with one is a voice message, as Discord sends them.
      */
-    protected function write(string $content, string $userId = '555', string $name = 'Alice', bool $bot = false, ?string $guildId = null): void
+    protected function write(string $content, string $userId = '555', string $name = 'Alice', bool $bot = false, ?string $guildId = null, ?object $attachment = null): void
     {
         $author = (object) ['id' => $userId, 'displayname' => $name, 'bot' => $bot];
         $channel = $this->dm($userId);
@@ -87,6 +100,8 @@ trait ChatsInDirectMessages
             'author' => $author,
             'guild_id' => $guildId,
             'channel' => $channel,
+            'flags' => $attachment === null ? 0 : Message::FLAG_IS_VOICE_MESSAGE,
+            'attachments' => $attachment === null ? [] : [$attachment],
             default => null,
         };
         $message->method('__get')->willReturnCallback($attributes);
@@ -94,6 +109,16 @@ trait ChatsInDirectMessages
 
         // The method Application::handleEvent() finds on the class.
         (new MessageCreate($message, $this->discord, ['answerDirectMessage']))->handle();
+    }
+
+    /**
+     * Someone sends the bot a voice message: Ogg Opus audio, with no text.
+     *
+     * @param float $seconds How long the message is, as Discord's client says.
+     */
+    protected function writeVoice(float $seconds = 4.2, string $userId = '555', string $name = 'Alice', string $url = 'https://cdn.discordapp.com/attachments/1/2/voice-message.ogg?ex=abc&hm=def'): void
+    {
+        $this->write('', $userId, $name, attachment: (object) ['url' => $url, 'content_type' => 'audio/ogg', 'duration_secs' => $seconds]);
     }
 
     /**
