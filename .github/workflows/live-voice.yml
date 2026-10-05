@@ -10,7 +10,9 @@ on:
   workflow_dispatch:
   schedule:
     - cron: '23 4 * * *'
+  # Not on draft pull requests: they run once marked ready for review.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'app/**'
       - 'tests/Live/**'
@@ -27,6 +29,7 @@ permissions:
 
 jobs:
   configured:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-24.04
     outputs:
       ready: ${{ steps.check.outputs.ready }}
@@ -61,9 +64,14 @@ jobs:
       WHISPER_BINARY: ${{ github.workspace }}/.whisper/build/bin/whisper-cli
       WHISPER_MODEL: ${{ github.workspace }}/.whisper/models/ggml-base.en.bin
       WHISPER_LANGUAGE: en
-      # A fixed answer instead of Claude, so CI doesn't use a Claude subscription.
+      # A fixed answer instead of Claude, so CI doesn't use a Claude subscription. It is printed like Claude Code
+      # prints its answers: one JSON event per line, the second sentence a moment after the first one.
       CLAUDE_BINARY: ${{ github.workspace }}/tests/Fixtures/fake-claude
-      FAKE_CLAUDE_OUTPUT: '{"type":"result","is_error":false,"result":"It is a quarter past four."}'
+      FAKE_CLAUDE_OUTPUT: |
+        {"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"It is a quarter past four. "}}}
+        {"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"The meeting starts at five."}}}
+        {"type":"result","is_error":false,"result":"It is a quarter past four. The meeting starts at five."}
+      FAKE_CLAUDE_PAUSE: '1'
       PIPER_BINARY: ${{ github.workspace }}/.piper/bin/piper
       PIPER_MODEL: ${{ github.workspace }}/.piper/voices/en_US-lessac-medium.onnx
     steps:

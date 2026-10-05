@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Privacy\OptOuts;
 use App\Support\Shell;
 use App\Voice\VoiceSession;
 use Discord\Helpers\Collection;
@@ -43,6 +44,9 @@ final class VoiceCallTest extends VoiceTestCase
     private const int BOT_SSRC = 1;
 
     private const int ALICE_SSRC = 2;
+
+    /** Unlikely to be the SSRC of anything else that left files in the temp folder. */
+    private const int BOB_SSRC = 666002;
 
     private const EncryptionMode MODE = EncryptionMode::AEAD_XCHACHA20_POLY1305_RTPSIZE;
 
@@ -105,15 +109,15 @@ final class VoiceCallTest extends VoiceTestCase
         );
 
         // Alice's question was decrypted and decoded into her recording: a second of her 440 Hz tone.
-        $session->stop();
+        await($session->stop());
         $recording = $this->pcm(file_get_contents("{$session->directory}/555-1.wav"), wavHeader: true);
         $this->assertEqualsWithDelta(1.0, $this->seconds($recording), 0.05, 'Length of the recording.');
         $this->assertEqualsWithDelta(440, $this->frequency($recording), 20, 'Pitch of the recording.');
 
-        // She was understood and answered.
+        // She was understood and answered, and the call was summarized when it ended. Claude's stand-in gives both the same text.
         $this->assertStringContainsString('] Alice: Hey Claude, what time is it?', $this->transcript($session));
         $this->assertStringContainsString('] Claude: It is a quarter past four.', $this->transcript($session));
-        $this->assertSame(["> **Alice:** Hey Claude, what time is it?\nIt is a quarter past four."], $this->sent);
+        $this->assertSame(["> **Alice:** Hey Claude, what time is it?\nIt is a quarter past four.", 'It is a quarter past four.'], $this->sent);
         $this->assertFileExists("{$session->directory}/claude-2.ogg");
 
         // The bot said it was speaking, then sent the answer: a second of Piper's 660 Hz tone.
@@ -128,19 +132,88 @@ final class VoiceCallTest extends VoiceTestCase
         $this->assertSame([], $this->loggedProblems());
     }
 
+    public function testSpeaksEachSentenceOfAnAnswerOverTheNetwork(): void
+    {
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is a quarter past four. ', 'Time for a cup of tea.')]);
+        $session = VoiceSession::start($vc = $this->connectedVoiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->announceSpeaker($vc, self::ALICE_SSRC, '555');
+        $this->sendAudio($this->opusFrames(440), from: self::ALICE_SSRC, to: $this->udp->getLocalAddress());
+        $this->waitUntil(
+            fn () => count(array_keys(array_column(array_column($this->gatewayPayloads, 'd'), 'speaking'), VoiceClient::NOT_SPEAKING, true)) === 2,
+            'both sentences to finish playing',
+            timeout: 30.0,
+        );
+        await($session->stop());
+
+        // The real voice client was given the second sentence once it had finished the first one, and played both.
+        $this->assertSame(
+            [VoiceClient::MICROPHONE, VoiceClient::NOT_SPEAKING, VoiceClient::MICROPHONE, VoiceClient::NOT_SPEAKING],
+            array_column(array_column($this->gatewayPayloads, 'd'), 'speaking'),
+        );
+        $this->assertFileExists("{$session->directory}/claude-2.ogg");
+        $this->assertFileExists("{$session->directory}/claude-3.ogg");
+
+        // Piper's stand-in makes a second of its 660 Hz tone for each sentence.
+        $answer = $this->decodeSentAudio();
+        $this->assertEqualsWithDelta(2.0, $this->seconds($answer), 0.1, 'Length of the answer.');
+        $this->assertEqualsWithDelta(660, $this->frequency($answer), 20, 'Pitch of the answer.');
+
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testKeepsNoCopyOfAnyonesAudioInTheTempFolder(): void
+    {
+        // This is about the audio: whisper hears nothing in it.
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => '']);
+        (new OptOuts())->add('666');
+        $carol = self::BOB_SSRC + 1;
+        $session = VoiceSession::start($vc = $this->connectedVoiceClient($channel = $this->voiceChannel(), decoders: true), $channel, $this->discord);
+
+        // Bob opted out before the call. Alice does after she spoke, and Carol (777) never does.
+        $frames = $this->opusFrames(440);
+        foreach ([self::ALICE_SSRC => '555', self::BOB_SSRC => '666', $carol => '777'] as $ssrc => $userId) {
+            $this->announceSpeaker($vc, $ssrc, $userId);
+            $this->sendAudio($frames, from: $ssrc, to: $this->udp->getLocalAddress());
+        }
+        $this->waitUntil(fn () => count($this->logged('Transcribed')) === 2, 'Alice and Carol to have spoken', timeout: 20.0);
+        $this->assertSame(['555', '777'], array_column($this->logged('Utterance ended'), 'user'));
+
+        // The voice client's ffmpeg decoders write what each speaker says to the temp folder, at the latest
+        // once they are closed, as they all are when the call ends. Carol's copy is a recording of her.
+        $vc->voiceDecoders[$carol]->close();
+        $this->assertCount(1, $copies = $this->decoderFiles($carol));
+        $this->assertGreaterThan(1000, filesize($copies[0]));
+
+        VoiceSession::optOut('555');
+        await($session->stop());
+
+        // Nothing is left there of anyone once the call ends, and only Carol's recording is in the call's folder.
+        $this->assertSame([], $this->decoderFiles(self::ALICE_SSRC));
+        $this->assertSame([], $this->decoderFiles(self::BOB_SSRC));
+        $this->assertSame([], $this->decoderFiles($carol));
+        $this->assertSame(["{$session->directory}/777-2.wav"], glob("{$session->directory}/*.wav"));
+        $this->assertSame([], $this->loggedProblems());
+    }
+
     /**
      * A voice client connected to the stand-in media server. Its voice gateway connection is faked:
      * what it sends there is collected in {@see $gatewayPayloads}.
+     *
+     * @param bool $decoders Whether it starts its ffmpeg process for each speaker. That process only feeds
+     *                       'channel-opus' events and leaves a file in the temp directory; the WAV recording
+     *                       doesn't use it.
      */
-    private function connectedVoiceClient(Channel $channel): Client
+    private function connectedVoiceClient(Channel $channel, bool $decoders = false): Client
     {
-        // The ffmpeg process it starts for each speaker only feeds 'channel-opus' events and leaves a
-        // file in the temp directory; the WAV recording doesn't use it.
-        $vc = $this->getMockBuilder(Client::class)->disableOriginalConstructor()->onlyMethods(['createDecoder', 'close'])->getMock();
+        $vc = $this->getMockBuilder(Client::class)->disableOriginalConstructor()->onlyMethods(['close', ...($decoders ? [] : ['createDecoder'])])->getMock();
         $vc->expects($this->once())->method('close');
-        $vc->method('createDecoder')->willReturnCallback(function (object $ss) use ($vc): void {
-            $vc->voiceDecoders[$ss->ssrc] = $this->decoderProcess();
-        });
+
+        if (! $decoders) {
+            $vc->method('createDecoder')->willReturnCallback(function (object $ss) use ($vc): void {
+                $vc->voiceDecoders[$ss->ssrc] = $this->decoderProcess();
+            });
+        }
 
         $vc->discord = $this->discord;
         $vc->channel = $channel;
@@ -172,6 +245,14 @@ final class VoiceCallTest extends VoiceTestCase
         $vc->udp = $this->udp;
 
         return $vc;
+    }
+
+    /**
+     * @return list<string> The files the voice client's ffmpeg decoder left for a speaker, named <date>_<time>-<SSRC>.ogg.
+     */
+    private function decoderFiles(int $ssrc): array
+    {
+        return glob(sys_get_temp_dir() . "/*-{$ssrc}.ogg");
     }
 
     /**
