@@ -189,8 +189,8 @@ final class ApplicationTest extends TestCase
         $app->prepareCommandClasses();
 
         $this->assertSame([
-            'forget' => ['Deletes what the bot remembers about you.', Command::CHAT_INPUT],
-            'memory' => ['Shows what the bot remembers about you.', Command::CHAT_INPUT],
+            'forget' => ['Deletes what the bot remembers about you, or about you and the people you have calls with.', Command::CHAT_INPUT],
+            'memory' => ['Shows what the bot remembers about you, or about you and the people you have calls with.', Command::CHAT_INPUT],
             'optin' => ['Lets the bot record, transcribe and answer you again, after /optout.', Command::CHAT_INPUT],
             'optout' => ['Stops the bot from recording, transcribing or answering you, in every server.', Command::CHAT_INPUT],
             'recall' => ["Asks Claude a question about this server's saved calls.", Command::CHAT_INPUT],
@@ -268,6 +268,15 @@ final class ApplicationTest extends TestCase
         );
         $this->assertSame('32', $settings['default_member_permissions']);
         $this->assertSame(32, $settings['options'][0]['max_length'], 'Discord stops a wake word that is too long from being typed.');
+
+        // /memory and /forget take up to four other people, to pick the memory shared with them.
+        foreach (['memory', 'forget'] as $command) {
+            $this->assertSame(
+                ['with' => Option::USER, 'with2' => Option::USER, 'with3' => Option::USER, 'with4' => Option::USER],
+                array_column($commands->payloads[$command]['options'], 'type', 'name'),
+            );
+            $this->assertSame([], array_filter(array_column($commands->payloads[$command]['options'], 'required')), 'None of them is needed.');
+        }
 
         // /recall can't be used without its question.
         $this->assertSame(
