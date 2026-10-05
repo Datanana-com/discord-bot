@@ -9,6 +9,7 @@ use App\Commands\Global\UnshareCommand;
 use App\Privacy\OptOuts;
 use App\Voice\VoiceSession;
 use Discord\Parts\Channel\Channel;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 use function React\Async\await;
 
@@ -29,7 +30,7 @@ final class ShareCommandTest extends CommandTestCase
     private const string NO_CALL = 'Sharing your memory only works in a call I am recording: join its voice channel and use /share there.';
 
     private const string SHARED = 'Your memory is shared with this call: I may use it to answer anyone here, and to compare people\'s points of view.'
-        . ' It stops when the call ends, or when you use /unshare. Everyone in the call was told.';
+        . ' It stops when the call ends, or when you use /unshare. A notice goes to the call\'s text channel.';
 
     protected function setUp(): void
     {
@@ -94,6 +95,26 @@ final class ShareCommandTest extends CommandTestCase
         $this->assertSame([], $this->loggedProblems());
     }
 
+    public function testItWorksWhileSomeoneWhoOptedOutIsInTheCall(): void
+    {
+        $this->memory()->save('555', self::ALICE);
+        $this->memory()->save(['555', '666', '777'], '- The three of them run a chess club.');
+        $this->inCall('555', '666', '777');
+        (new OptOuts())->add('777');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->share('555', $channel);
+
+        $this->ask($vc, '666', self::QUESTION);
+
+        // No group memory is used while Carol, who opted out, is there, but Alice chose to share hers.
+        $this->assertSame(
+            "What you remember about Alice, who shared their memory with this call:\n\n" . self::ALICE . "\n\n"
+            . "Transcript of the voice call so far:\n\nBob: " . self::QUESTION . "\n\nBob is talking to you. Reply to their last message.",
+            $this->claudeCalls()[0]['prompt'],
+        );
+        await($session->stop());
+    }
+
     public function testItWorksWithoutAGroupMemoryToo(): void
     {
         $this->memory()->save('555', self::ALICE);
@@ -155,7 +176,7 @@ final class ShareCommandTest extends CommandTestCase
         $this->assertSame(
             [
                 ['content' => self::SHARED, 'ephemeral' => true],
-                ['content' => 'Stopped sharing your memory with the call. Everyone in the call was told.', 'ephemeral' => true],
+                ['content' => 'Stopped sharing your memory with the call. A notice goes to the call\'s text channel.', 'ephemeral' => true],
             ],
             $this->responses,
         );
@@ -175,6 +196,66 @@ final class ShareCommandTest extends CommandTestCase
         $this->assertSame('Alice shared their memory with this call.', end($this->sent));
         $this->assertCount(2, $this->logged('Shared memory'));
         $this->assertSame([], $this->loggedProblems());
+        await($session->stop());
+    }
+
+    #[DataProvider('withdrawals')]
+    public function testAnAnswerBeingWrittenIsDroppedWhenSomeoneTakesTheirMemoryBack(callable $withdraw): void
+    {
+        $this->memory()->save('555', self::ALICE);
+        $this->inCall('555', '666');
+        $this->setProcessEnv([
+            'FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is a quarter past four. ', 'Time for a cup of tea.'),
+            'FAKE_CLAUDE_PAUSE' => '10',
+        ]);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->share('555', $channel);
+
+        // Alice withdraws once the first sentence of Bob's answer was spoken, while Claude is still writing the rest.
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => self::QUESTION]);
+        $this->speak($vc, ssrc: 666, userId: '666', seconds: 1.0);
+        $this->waitUntil(fn () => $this->played !== [], 'the first sentence to be spoken');
+        $withdraw($this, $channel);
+        touch($this->claudeResume);
+        $this->waitUntil(fn () => $this->logged('Claude answered') !== [], 'Claude to finish');
+        $this->runFor(0.5);
+
+        // What is left isn't spoken, and the answer, which may quote her memory, is neither posted nor kept.
+        $this->assertCount(1, $this->played);
+        $this->assertSame([], array_values(array_filter($this->sent, fn (string $message) => str_starts_with($message, '> '))));
+        $this->assertStringNotContainsString('Claude:', $this->transcript($session));
+        $this->assertSame([['user' => '666', 'reason' => 'a shared memory was taken back']], array_map(fn (array $context) => array_slice($context, 2), $this->logged('Not answering')));
+        $this->assertSame(0, $this->usage()['answers']);
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    /**
+     * @return array<string, array{callable(self, Channel): void}>
+     */
+    public static function withdrawals(): array
+    {
+        return [
+            '/unshare' => [fn (self $test, Channel $channel) => $test->unshare('555')],
+            '/optout' => [fn (self $test, Channel $channel) => VoiceSession::optOut('555')],
+        ];
+    }
+
+    public function testAnAnswerIsKeptWhenSomeoneWhoseMemoryItIsNotMadeFromTakesTheirsBack(): void
+    {
+        $this->memory()->save('555', self::ALICE);
+        $this->inCall('555', '666');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        // Alice shares after Bob's question was asked: the answer isn't made from her memory, so her taking it back leaves it alone.
+        $this->setProcessEnv(['FAKE_CLAUDE_PAUSE' => '10', 'FAKE_WHISPER_OUTPUT' => self::QUESTION]);
+        $this->speak($vc, ssrc: 666, userId: '666', seconds: 1.0);
+        $this->waitUntil(fn () => $this->claudeCalls() !== [], 'Claude to be asked');
+        $this->share('555', $channel);
+        $this->unshare('555');
+        touch($this->claudeResume);
+        $this->waitUntil(fn () => count($this->sent) === 3, 'the answer');
+
+        $this->assertSame('> **Bob:** ' . self::QUESTION . "\nIt is a quarter past four.", $this->sent[2]);
         await($session->stop());
     }
 
@@ -200,6 +281,22 @@ final class ShareCommandTest extends CommandTestCase
         await($second->stop());
     }
 
+    public function testUnshareWorksFromADirectMessage(): void
+    {
+        $this->memory()->save('555', self::ALICE);
+        $this->inCall('555', '666');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->share('555', $channel);
+
+        (new UnshareCommand($this->discord))->handle($this->interaction(null, guildId: null, userId: '555'));
+        $this->ask($vc, '666', self::QUESTION);
+
+        $this->assertSame('Stopped sharing your memory with the call. A notice goes to the call\'s text channel.', end($this->responses)['content']);
+        $this->assertSame('Alice stopped sharing their memory with this call.', $this->sent[1]);
+        $this->assertStringNotContainsString('Bananas', $this->claudeCalls()[0]['prompt']);
+        await($session->stop());
+    }
+
     public function testSharingSurvivesTheSharerLeavingAndComingBack(): void
     {
         $this->memory()->save('555', self::ALICE);
@@ -211,10 +308,10 @@ final class ShareCommandTest extends CommandTestCase
         $this->ask($vc, '666', self::QUESTION);
         $this->assertStringContainsString('Bananas', $this->claudeCalls()[0]['prompt'], 'It lasts until the call ends.');
 
-        // Someone who left can still take it back, without being in the call.
-        $this->unshare('555');
+        // Someone who left can still take it back, without being in a voice channel, or even in the server.
+        (new UnshareCommand($this->discord))->handle($this->interaction(null, userId: '555'));
 
-        $this->assertSame('Stopped sharing your memory with the call. Everyone in the call was told.', end($this->responses)['content']);
+        $this->assertSame('Stopped sharing your memory with the call. A notice goes to the call\'s text channel.', end($this->responses)['content']);
         $this->joins('555');
         $this->ask($vc, '666', self::QUESTION);
         $this->assertStringNotContainsString('Bananas', $this->claudeCalls()[1]['prompt']);
@@ -252,6 +349,26 @@ final class ShareCommandTest extends CommandTestCase
         await($session->stop());
     }
 
+    public function testTheAskerCountsAsOneOfTheSharedMemoriesOfAPrompt(): void
+    {
+        $this->inCall('555', '666');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        foreach (['1001', '1002', '1003', '1004', '1005', '1006'] as $sharer) {
+            $this->memory()->save($sharer, "- Memory of {$sharer}.");
+            $this->share($sharer, $channel);
+        }
+
+        $this->ask($vc, '1006', self::QUESTION);
+
+        // The five who shared last are 1002 to 1006. The asker's memory is the first one in the prompt, as their own, and isn't repeated.
+        $prompt = $this->claudeCalls()[0]['prompt'];
+        preg_match_all('/^- Memory of (\d+)\.$/m', $prompt, $memories);
+        $this->assertSame(['1006', '1002', '1003', '1004', '1005'], $memories[1]);
+        $this->assertSame(4, substr_count($prompt, 'who shared their memory with this call'));
+        await($session->stop());
+    }
+
     public function testAMemoryThatWasForgottenIsNoLongerUsed(): void
     {
         $this->memory()->save('555', self::ALICE);
@@ -278,6 +395,8 @@ final class ShareCommandTest extends CommandTestCase
         $this->ask($vc, '666', self::QUESTION);
 
         $this->assertStringNotContainsString('Bananas', $this->claudeCalls()[0]['prompt']);
+        // The call is told when someone shares, not when opting out ends it: the memory is just no longer used.
+        $this->assertSame(['Alice shared their memory with this call.', '> **Bob:** ' . self::QUESTION . "\nIt is a quarter past four."], $this->sent);
         // There is nothing left to take back.
         $this->unshare('555');
         $this->assertSame('You are not sharing your memory with a call I am recording.', end($this->responses)['content']);
@@ -403,7 +522,7 @@ final class ShareCommandTest extends CommandTestCase
         (new ShareCommand($this->discord))->handle($this->interaction($channel, userId: $userId));
     }
 
-    private function unshare(string $userId): void
+    public function unshare(string $userId): void
     {
         (new UnshareCommand($this->discord))->handle($this->interaction($this->voiceChannel(), userId: $userId));
     }

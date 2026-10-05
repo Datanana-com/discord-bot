@@ -30,7 +30,7 @@ final class ShareCommand extends CommandAbstract
             ! $session->share($userId)
                 => 'You are already sharing your memory with this call. Use /unshare to take it back.',
             default => 'Your memory is shared with this call: I may use it to answer anyone here, and to compare people\'s points of view.'
-                . ' It stops when the call ends, or when you use /unshare. Everyone in the call was told.',
+                . ' It stops when the call ends, or when you use /unshare. A notice goes to the call\'s text channel.',
         };
 
         $interaction->respondWithMessage(MessageBuilder::new()->setContent($reply), ephemeral: true);

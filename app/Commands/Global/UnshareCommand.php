@@ -15,12 +15,12 @@ final class UnshareCommand extends CommandAbstract
 
     public function handle(Interaction $interaction): void
     {
-        // Not only from inside the call: someone who left it can still take their memory back.
-        $stopped = VoiceSession::forGuild((string) $interaction->guild_id)?->unshare((string) $interaction->user->id) ?? false;
+        // Not only from inside the call, nor from its server: someone who left it, or who writes in a direct message, can still take their memory back.
+        $stopped = VoiceSession::unshareEverywhere((string) $interaction->user->id);
 
         $interaction->respondWithMessage(MessageBuilder::new()->setContent(
             $stopped
-                ? 'Stopped sharing your memory with the call. Everyone in the call was told.'
+                ? 'Stopped sharing your memory with the call. A notice goes to the call\'s text channel.'
                 : 'You are not sharing your memory with a call I am recording.'
         ), ephemeral: true);
     }
