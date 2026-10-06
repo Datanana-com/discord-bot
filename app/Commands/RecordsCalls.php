@@ -21,6 +21,9 @@ use Throwable;
 trait RecordsCalls
 {
     /** What the announcement of a recording says about what the bot remembers of it. */
+    /** What whoever wants a call recorded is told while the bot is stopping. */
+    private const string STOPPING = 'I am being stopped right now, so I can\'t record. Try again once I am back.';
+
     private const string REMEMBERED = ' I remember each group\'s calls: see what I remember with /memory, and delete it with /forget.';
 
     /**
@@ -31,6 +34,7 @@ trait RecordsCalls
     private function recordingProblem(Interaction $interaction, array $settings): ?string
     {
         return match (true) {
+            VoiceSession::refusesNewCalls() => self::STOPPING,
             VoiceSession::forGuild((string) $interaction->guild_id) !== null => 'I am already recording in this server. Use /stop first.',
             // Discord lets a bot be in one voice channel per server, and joining one takes a while.
             VoiceSession::isStarting((string) $interaction->guild_id) => 'I am already joining a voice channel in this server.',
@@ -42,23 +46,25 @@ trait RecordsCalls
     /**
      * Tells whoever used the command why it does nothing. Only they see it.
      */
-    private function refuse(Interaction $interaction, string $command, string $problem): void
+    private function refuse(Interaction $interaction, string $command, string $problem): PromiseInterface
     {
         $this->log->info("{$command} refused: {$problem}", ['guild' => $interaction->guild_id]);
-        $interaction->respondWithMessage(MessageBuilder::new()->setContent($problem), ephemeral: true);
+
+        return $interaction->respondWithMessage(MessageBuilder::new()->setContent($problem), ephemeral: true);
     }
 
     /**
      * Has other calls refused in the server until this one has started, or couldn't.
      *
      * @param callable(): PromiseInterface<mixed> $start Starts the call. Its promise settles once it is known how that went.
+     * @return PromiseInterface<mixed> That promise.
      */
-    private function starting(Interaction $interaction, callable $start): void
+    private function starting(Interaction $interaction, callable $start): PromiseInterface
     {
         $guildId = (string) $interaction->guild_id;
         VoiceSession::starting($guildId);
 
-        $start()->finally(fn () => VoiceSession::starting($guildId, false));
+        return $start()->finally(fn () => VoiceSession::starting($guildId, false));
     }
 
     /**
@@ -73,6 +79,13 @@ trait RecordsCalls
     {
         return $this->discord->joinVoiceChannel($voiceChannel, mute: false, deaf: false)->then(
             function (VoiceClient $vc) use ($interaction, $textChannel, $settings) {
+                // The bot was told to stop while it was joining: nothing would stop this call before it ends.
+                if (VoiceSession::refusesNewCalls()) {
+                    $vc->close();
+
+                    throw new RuntimeException(self::STOPPING);
+                }
+
                 try {
                     return VoiceSession::start($vc, $textChannel, $this->discord, $settings);
                 } catch (Throwable $e) {
@@ -96,11 +109,14 @@ trait RecordsCalls
     private function howToTalk(VoiceSession $session): string
     {
         $name = VoiceSession::wakeWordName($session->wakeWord);
+        // The first of the leave phrase's spellings, like the wake word's. There is none in a server without a wake word, unless VOICE_LEAVE_PHRASE is set.
+        $leave = VoiceSession::wakeWordName($session->leavePhrase);
 
-        return $name === ''
+        return ($name === ''
             ? 'I answer everything that is said.'
             // The first of the stop phrase's spellings, like the wake word's.
-            : "Say \"{$name}\" to talk to me, and \"" . VoiceSession::wakeWordName($session->stopPhrase) . '" when you\'re done.';
+            : "Say \"{$name}\" to talk to me, and \"" . VoiceSession::wakeWordName($session->stopPhrase) . '" when you\'re done.')
+            . ($leave === '' ? '' : " Say \"{$leave}\" to make me leave.");
     }
 
     /**

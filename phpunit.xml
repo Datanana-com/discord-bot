@@ -18,6 +18,10 @@
         <testsuite name="Live">
             <directory>tests/Live</directory>
         </testsuite>
+        <!-- Times the real whisper.cpp, Claude Code and Piper of this machine: not run by default, see "Benchmark" in README.md. -->
+        <testsuite name="Bench">
+            <directory>tests/Bench</directory>
+        </testsuite>
     </testsuites>
     <extensions>
         <!-- Fails the run when a test leaves a socket or a timer in the event loop, which would hang PHP at shutdown. -->

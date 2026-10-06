@@ -9,12 +9,13 @@ use App\CommandAbstract;
 use App\Voice\VoiceSession;
 use Discord\Builders\MessageBuilder;
 use Discord\Parts\Interactions\Interaction;
+use React\Promise\PromiseInterface;
 
 final class ShareCommand extends CommandAbstract
 {
     public string $description = 'Lets the bot use your personal memory for everyone in the call it is recording.';
 
-    public function handle(Interaction $interaction): void
+    public function handle(Interaction $interaction): ?PromiseInterface
     {
         $userId = (string) $interaction->user->id;
         $voiceChannel = $interaction->member?->getVoiceChannel();
@@ -33,6 +34,6 @@ final class ShareCommand extends CommandAbstract
                 . ' It stops when the call ends, or when you use /unshare. A notice goes to the call\'s text channel.',
         };
 
-        $interaction->respondWithMessage(MessageBuilder::new()->setContent($reply), ephemeral: true);
+        return $interaction->respondWithMessage(MessageBuilder::new()->setContent($reply), ephemeral: true);
     }
 }

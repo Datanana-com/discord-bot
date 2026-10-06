@@ -16,6 +16,7 @@ use Discord\Parts\Channel\Channel;
 use Discord\Parts\Channel\Overwrite;
 use Discord\Parts\Guild\Guild;
 use Discord\Parts\Interactions\Interaction;
+use React\Promise\PromiseInterface;
 use Discord\Parts\Permissions\Permission;
 use Throwable;
 
@@ -47,14 +48,12 @@ final class MeetCommand extends CommandAbstract
 
     private const string MISSING_PERMISSION = 'I can\'t make the meeting\'s channel: I need the Manage Channels permission, besides View Channels, Connect and Speak. Ask a server admin to give it to me.';
 
-    public function handle(Interaction $interaction): void
+    public function handle(Interaction $interaction): ?PromiseInterface
     {
         $guild = $interaction->guild;
 
         if ($guild === null) {
-            $this->refuse($interaction, '/meet', 'Use /meet in a server.');
-
-            return;
+            return $this->refuse($interaction, '/meet', 'Use /meet in a server.');
         }
 
         // Read once, so the call starts with the settings that are checked and announced here.
@@ -63,15 +62,13 @@ final class MeetCommand extends CommandAbstract
         $problem = $this->recordingProblem($interaction, $settings);
 
         if ($problem !== null) {
-            $this->refuse($interaction, '/meet', $problem);
-
-            return;
+            return $this->refuse($interaction, '/meet', $problem);
         }
 
         $invited = $this->invited($interaction);
 
         // Making the channel and joining it can take longer than the 3 seconds Discord waits for a response.
-        $this->starting($interaction, fn () => $interaction->acknowledgeWithResponse()
+        return $this->starting($interaction, fn () => $interaction->acknowledgeWithResponse()
             ->then(fn () => $guild->channels->save($guild->channels->create($this->channel($interaction, $guild, $invited))))
             ->then(
                 fn (Channel $channel) => $this->meet($interaction, $guild, $channel, $invited, $settings),

@@ -138,6 +138,8 @@ final class VoiceRoundTripTest extends TestCase
         $this->assertNotEmpty(preg_grep('/^Command recall (has been saved|already exists)\.$/', $logged), 'The /recall command was registered, with its required question.');
         $this->assertNotEmpty(preg_grep('/^Command meet (has been saved|already exists)\.$/', $logged), 'The /meet command was registered, with the people it takes.');
         $this->assertEmpty(preg_grep('/^Could not (save command|fetch the registered commands)/', $logged), 'Discord accepted every command.');
+        // The workflow doesn't set BOT_REMOVE_OLD_COMMANDS, so nothing is removed, and certainly not what the bot just registered.
+        $this->assertEmpty(preg_grep('/^(Command .+ has been removed\.|Could not remove command)/', $logged), 'No command was removed.');
 
         // The bot heard the question through Discord, and whisper understood it.
         $this->assertMatchesRegularExpression(
@@ -151,6 +153,11 @@ final class VoiceRoundTripTest extends TestCase
         $this->assertEmpty(preg_grep('/^(Voice reply failed|Could not post)/', $logged), 'Answering did not fail.');
         $this->assertCount(2, glob("{$session->directory}/claude-*.ogg"), 'Each sentence was synthesized on its own.');
         $this->assertCount(1, array_keys($logged, 'Started speaking', true), 'The bot started speaking the answer.');
+
+        // The call's whisper server, built next to whisper-cli, loaded its model and did not fail: whisper-cli transcribes without a word
+        // when there is none, or it isn't ready, and nothing else here would tell.
+        $this->assertContains('Whisper server ready', $logged, 'The call started its whisper server.');
+        $this->assertEmpty(preg_grep('/^The whisper server/', $logged), 'The whisper server did not fail.');
 
         // The question was answered by the Claude Code process that waited for it, and spoken by the Piper the call
         // started with, the real one: neither had to be started for it.
