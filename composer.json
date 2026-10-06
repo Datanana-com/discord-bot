@@ -12,7 +12,14 @@
         "illuminate/database": "^13.34"
     },
     "scripts": {
-        "serve": "php index.php",
+        "serve": [
+            "Composer\\Config::disableProcessTimeout",
+            "MAX_THINKING_TOKENS=0 PATH=\"$HOME/.cache/php85-bot/bin:$PATH\" PHP_INI_SCAN_DIR=\":$HOME/.cache/php85-bot/conf.d\" php index.php"
+        ],
+        "serve:thinking": [
+            "Composer\\Config::disableProcessTimeout",
+            "MAX_THINKING_TOKENS=31999 PATH=\"$HOME/.cache/php85-bot/bin:$PATH\" PHP_INI_SCAN_DIR=\":$HOME/.cache/php85-bot/conf.d\" php index.php"
+        ],
         "pint": "pint --config=pint.json",
         "test": [
             "Composer\\Config::disableProcessTimeout",
