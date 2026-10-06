@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\EventAbstract;
+use App\Events\VoiceStateUpdate;
 use App\Settings\UserSettings;
 use App\Voice\VoiceSession;
 use Discord\Parts\Channel\Message;
@@ -656,9 +658,13 @@ final class VoiceLookupTest extends VoiceTestCase
 
         // Bob joins and leaves again: what is looked up is not stopped, and is only dropped if he is there when it is found.
         $this->joins('666');
+        // Not by what Discord says, nor by something that has nothing to do with her: Bob's presence is only looked at when it is found.
+        VoiceSession::forget('777');
+        VoiceSession::optOut('888');
         $this->runFor(0.4);
         $this->assertTrue(posix_kill($pid, 0), 'It is still being looked up.');
         $this->assertSame([], $this->logged('Stopped looking something up'));
+        $this->assertSame(['followMeetings'], array_values(array_diff(get_class_methods(VoiceStateUpdate::class), get_class_methods(EventAbstract::class))), 'Nothing the event does stops lookups.');
         $this->leaves('666');
 
         $this->finishLookups($session);
@@ -775,6 +781,27 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->assertStringNotContainsString('1234', $given);
         $this->assertStringContainsString('Alice: Hey Claude, which Node version is the latest?', $given);
         $this->finishLookups($session);
+    }
+
+    public function testStartsALookupWhoseTranscriptWasTakenOutByForgetOnceNothingIsLeftOfIt(): void
+    {
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        // Alice's lookup runs, and Bob's waits for it.
+        $this->ask($vc, '555', self::QUESTION);
+        $this->ask($vc, '666', self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 2, "Alice's lookup to start");
+
+        // Nothing wanted by Bob is in a transcript file that is gone by the time it is his turn.
+        unlink("{$session->directory}/transcript.txt");
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream(self::TOLD)]);
+        touch($this->go);
+        $this->waitUntil(fn () => count($this->lookups()) === 2, "Bob's lookup to start");
+        touch($this->go);
+        $this->waitUntil(fn () => count($this->logged('Claude answered')) === 4, 'both to be found and told');
+
+        // It started with what there was: an empty transcript, and no failure to tell anyone about.
+        $this->assertStringStartsWith("Transcript of the voice call so far:\n\n", $this->lookups()[1]['prompt']);
+        $this->assertSame([], $this->loggedProblems());
     }
 
     public function testKeepsLookingSomethingUpWhenAMemoryItWasNotMadeFromIsForgotten(): void
