@@ -56,8 +56,17 @@ final class ApplicationStopTest extends VoiceTestCase
         $posted = count($this->sent);
         $this->assertFalse(VoiceSession::refusesNewCalls());
 
-        $code = $this->runBot(fn () => Loop::addTimer(0.1, fn () => posix_kill(getmypid(), $signal)));
+        $during = null;
+        $code = $this->runBot(function () use ($signal, &$during) {
+            Loop::addTimer(0.1, function () use ($signal, &$during) {
+                posix_kill(getmypid(), $signal);
+                // PHP handles the signal here, in the middle of this callback, as it would in the middle of a call's.
+                usleep(20000);
+                $during = VoiceSession::refusesNewCalls();
+            });
+        });
 
+        $this->assertFalse($during, 'The bot only stops once the callback the signal arrived in is over.');
         $this->assertSame(0, $code, 'It was told to stop: nothing failed.');
         $this->assertTrue(VoiceSession::refusesNewCalls(), 'No call starts while it waits for the ones there were: nothing would stop it.');
         $this->assertSame(['received ' . $name], array_column($this->logged('Stopping the bot'), 'reason'));

@@ -145,8 +145,8 @@ final class GuardedLoopTest extends TestCase
             throw new RuntimeException('Could not stop');
         };
         $this->loop->addSignal(SIGUSR1, $listener);
-        // Not from a callback of the guarded loop: PHPUnit has signals handled at once, which would be inside
-        // that callback, and its guard. The bot's loop hands signals on between two callbacks.
+        // Not from a callback of the guarded loop: ReactPHP has PHP handle a signal the moment it arrives, which
+        // would be inside that callback, and its guard. Most signals arrive while the loop waits, inside none.
         $this->inner->futureTick(fn () => posix_kill(getmypid(), SIGUSR1));
 
         $this->loop->run();

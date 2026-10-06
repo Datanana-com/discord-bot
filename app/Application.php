@@ -135,8 +135,11 @@ final class Application
     {
         // Also for what uses the static Loop, like the programs the bot runs.
         Loop::set($this->loop);
+        // Once the loop is between two callbacks. ReactPHP has PHP handle a signal the moment it arrives, in the
+        // middle of whatever is running: a call that is handing on the audio it was just sent would be stopped
+        // underneath itself.
         $stop = function (int $signal): void {
-            $this->stop('received ' . self::SIGNALS[$signal]);
+            $this->loop->futureTick(fn () => $this->stop('received ' . self::SIGNALS[$signal]));
         };
 
         try {
