@@ -49,6 +49,8 @@ final class ApplicationTest extends TestCase
         RecordingEvent::$before = null;
         $this->originalRecordingsPath = $_ENV['RECORDINGS_PATH'] ?? null;
         // No recordings are deleted when the bot is ready, unless a test asks for it.
+        // env() also reads the process's own environment, which a shell can set.
+        putenv('BOT_REMOVE_OLD_COMMANDS');
         unset($_ENV['BOT_SLASH_COMMANDS'], $_SERVER['BOT_SLASH_COMMANDS'], $_ENV['BOT_REMOVE_OLD_COMMANDS'], $_SERVER['BOT_REMOVE_OLD_COMMANDS'], $_ENV['RECORDINGS_RETENTION_DAYS'], $_SERVER['RECORDINGS_RETENTION_DAYS']);
     }
 
@@ -449,9 +451,10 @@ final class ApplicationTest extends TestCase
 
         $this->assertSame(['join' => '1', 'leave' => '2', 'live' => '3'], $commands->removed, 'Only what the bot has no class for, each by its id.');
         $this->assertContains('Discord has global commands the bot has no class for: join, leave, live.', $this->logged());
-        $this->assertContains('Command join has been removed.', $this->logged());
-        $this->assertContains('Command leave has been removed.', $this->logged());
-        $this->assertContains('Command live has been removed.', $this->logged());
+        $this->assertTrue($this->logs->hasInfo('Command join has been removed.'));
+        $this->assertTrue($this->logs->hasInfo('Command leave has been removed.'));
+        $this->assertTrue($this->logs->hasInfo('Command live has been removed.'));
+        $this->assertTrue($this->logs->hasWarning('Discord has global commands the bot has no class for: join, leave, live.'));
         $this->assertContains('record', array_keys($commands->saved), 'The bot still saves its own.');
     }
 
@@ -504,6 +507,52 @@ final class ApplicationTest extends TestCase
         $this->assertSame([], preg_grep('/^Discord has global commands/', $this->logged()));
     }
 
+    public function testTellsCommandsApartByNameAndType(): void
+    {
+        $_ENV['BOT_REMOVE_OLD_COMMANDS'] = 'true';
+        // Discord allows /record as a slash command and as a user command: only the slash command is the bot's.
+        [$app, $commands] = $this->appWithCommands(registered: [
+            ['id' => '4', 'name' => 'record', 'description' => 'Records your voice channel and lets everyone in it talk to Claude.', 'type' => Command::CHAT_INPUT],
+            ['id' => '5', 'name' => 'record', 'description' => '', 'type' => Command::USER],
+            ['id' => '6', 'name' => 'join', 'description' => '', 'type' => Command::MESSAGE],
+            ['id' => '7', 'name' => 'join', 'description' => 'Joins your channel.', 'type' => Command::CHAT_INPUT],
+        ]);
+
+        $app->prepareCommandClasses();
+
+        $this->assertSame(['join' => '7', 'join (type 3)' => '6', 'record (type 2)' => '5'], $commands->removed);
+        $this->assertTrue($this->logs->hasWarning('Discord has global commands the bot has no class for: join, join (type 3), record (type 2).'));
+        $this->assertTrue($this->logs->hasInfo('Command record (type 2) has been removed.'));
+    }
+
+    public function testKeepsTheBotsOwnCommandsOfOtherTypesAndThoseWithoutAType(): void
+    {
+        $_ENV['BOT_REMOVE_OLD_COMMANDS'] = 'true';
+        // A class that makes a user command, as CommandAbstract::$type allows.
+        $this->addAppFile('Commands/Global/WaveCommand.php', "<?php\n\nnamespace App\Commands\Global;\n\nuse App\CommandAbstract;\nuse Discord\Parts\Interactions\Interaction;\n\nfinal class WaveCommand extends CommandAbstract\n{\n    public string \$description = 'Waves.';\n\n    public ?int \$type = 2;\n\n    public function handle(Interaction \$interaction): void\n    {\n    }\n}\n");
+        [$app, $commands] = $this->appWithCommands(registered: [
+            ['id' => '4', 'name' => 'wave', 'description' => '', 'type' => Command::USER],
+            // Discord always says the type; one that is missing is a slash command, as it is when the bot makes one.
+            ['id' => '5', 'name' => 'stop', 'description' => 'Stops recording and leaves the voice channel.'],
+            ['id' => '6', 'name' => 'wave', 'description' => 'Waves.', 'type' => Command::CHAT_INPUT],
+        ]);
+
+        $app->prepareCommandClasses();
+
+        $this->assertSame(['wave' => '6'], $commands->removed, 'The slash command named like the bot\'s user command is a leftover, the others are the bot\'s own.');
+    }
+
+    public function testSkipsACommandTheCacheLost(): void
+    {
+        $_ENV['BOT_REMOVE_OLD_COMMANDS'] = 'true';
+        // DiscordPHP's repository iterates over the commands it still holds: one whose weak reference is gone is null.
+        [$app, $commands] = $this->appWithCommands(registered: [null, ...self::leftovers()]);
+
+        $app->prepareCommandClasses();
+
+        $this->assertSame(['join' => '1', 'leave' => '2', 'live' => '3'], $commands->removed);
+    }
+
     public function testLogsACommandThatCannotBeRemovedAndGoesOn(): void
     {
         $_ENV['BOT_REMOVE_OLD_COMMANDS'] = 'true';
@@ -511,7 +560,7 @@ final class ApplicationTest extends TestCase
 
         $app->prepareCommandClasses();
 
-        $this->assertContains('Could not remove command join: Missing Access', $this->logged());
+        $this->assertTrue($this->logs->hasError('Could not remove command join: Missing Access'));
         $this->assertNotContains('Command join has been removed.', $this->logged());
         $this->assertSame(['leave' => '2', 'live' => '3'], $commands->removed, 'The others are still removed.');
         $this->assertContains('Command record has been saved.', $this->logged(), 'And the bot still saves its own.');
@@ -609,7 +658,7 @@ final class ApplicationTest extends TestCase
     /**
      * An application with slash commands enabled, whose Discord application already has the given commands.
      *
-     * @param list<array<string, mixed>> $registered Attributes of the commands Discord already has.
+     * @param list<array<string, mixed>|null> $registered Attributes of the commands Discord already has; null for one the cache lost, which DiscordPHP also yields.
      * @param array<string, \Throwable> $removeErrors Why removing the command of that name fails.
      * @return array{Application, object} The application, and the command repository that records what is saved and removed.
      */
@@ -618,7 +667,7 @@ final class ApplicationTest extends TestCase
         $_ENV['BOT_SLASH_COMMANDS'] = 'true';
         $app = $this->app();
         $client = $app->discord;
-        $registered = array_map(fn (array $attributes) => new Command($client, $attributes, true), $registered);
+        $registered = array_map(fn (?array $attributes) => $attributes === null ? null : new Command($client, $attributes, true), $registered);
 
         // Behaves like DiscordPHP's GlobalCommandRepository: freshen() fetches the registered commands.
         $commands = new class ($registered, $fetchError, $saveError, $removeErrors) implements \IteratorAggregate {
@@ -635,7 +684,7 @@ final class ApplicationTest extends TestCase
             public array $removed = [];
 
             /**
-             * @param list<Command> $registered
+             * @param list<Command|null> $registered
              * @param array<string, \Throwable> $removeErrors
              */
             public function __construct(
@@ -657,7 +706,7 @@ final class ApplicationTest extends TestCase
                     return reject($this->removeErrors[$command->name]);
                 }
 
-                $this->removed[$command->name] = $command->id;
+                $this->removed[$command->name . ($command->type === Command::CHAT_INPUT ? "" : " (type {$command->type})")] = $command->id;
 
                 return resolve($command);
             }
@@ -670,7 +719,7 @@ final class ApplicationTest extends TestCase
             public function find(callable $callback): ?Command
             {
                 foreach ($this->registered as $command) {
-                    if ($callback($command)) {
+                    if ($command !== null && $callback($command)) {
                         return $command;
                     }
                 }
