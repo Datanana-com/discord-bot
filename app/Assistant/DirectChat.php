@@ -264,8 +264,8 @@ final class DirectChat
                     $this->waitForPause();
                 }
 
-                // Marked: it comes from the web, and in the chat it would be a message of the bot's like any other.
-                return $this->send($channel, Lookups::MARK . "\n{$answer}");
+                // Every message of it is marked: it comes from the web, and in the chat it would be a message of the bot's like any other.
+                return $this->send($channel, $answer, Lookups::MARK);
             },
             fn (Throwable $e) => $this->send($channel, Lookups::FAILED . " ({$e->getMessage()})"),
         )->finally(function () use (&$typing) {
@@ -373,13 +373,14 @@ final class DirectChat
     /**
      * Sends a text in the DM, split into several messages when it doesn't fit in one.
      *
+     * @param string $mark A first line for every message, when the text comes from the web.
      * @return PromiseInterface<mixed> It never rejects.
      */
-    private function send(Channel $channel, string $content): PromiseInterface
+    private function send(Channel $channel, string $content, string $mark = ''): PromiseInterface
     {
         // One message after the other, so they arrive in order.
         return array_reduce(
-            self::parts($content),
+            self::parts($content, $mark),
             fn (PromiseInterface $sent, string $part) => $sent->then(fn () => $channel->sendMessage(
                 // What Claude writes must never ping anyone.
                 MessageBuilder::new()->setContent($part)->setAllowedMentions(['parse' => []]),
@@ -394,12 +395,15 @@ final class DirectChat
      * Splits a text into messages. A code block cut in two is closed at the end of the first
      * message and opened again at the start of the next, so both still show it as code.
      *
+     * @param string $mark A first line of its own that every message starts with, not only the first: each of
+     *                     them is read on its own, in the DM and by Claude.
      * @return list<string>
      */
-    public static function parts(string $content): array
+    public static function parts(string $content, string $mark = ''): array
     {
+        $room = 2000 - ($mark === '' ? 0 : mb_strlen($mark) + 1);
         // Room for the code block's opening and closing lines, which only a text that is cut needs.
-        $parts = mb_strlen($content) <= 2000 ? [$content] : VoiceSession::split($content, 2000 - 2 * self::FENCE_LENGTH);
+        $parts = mb_strlen($content) <= $room ? [$content] : VoiceSession::split($content, $room - 2 * self::FENCE_LENGTH);
         $open = null;
 
         foreach ($parts as $index => &$part) {
@@ -421,7 +425,7 @@ final class DirectChat
             }
         }
 
-        return $parts;
+        return $mark === '' ? $parts : array_map(fn (string $part) => "{$mark}\n{$part}", $parts);
     }
 
     private function showTyping(Channel $channel): void

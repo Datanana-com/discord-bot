@@ -437,7 +437,12 @@ final class DirectLookupTest extends VoiceTestCase
 
         $this->assertGreaterThan(2000, mb_strlen($found));
         $this->assertLessThanOrEqual(2000, max(array_map(mb_strlen(...), $this->sent)));
-        $this->assertSame("Looked up:\n" . $found, implode("\n", array_slice($this->sent, 1)));
+        // Every message of it is marked, not only the first: each is read on its own, by the person and by Claude.
+        foreach (array_slice($this->sent, 1) as $part) {
+            $this->assertStringStartsWith("Looked up:\n", $part);
+        }
+
+        $this->assertSame($found, implode("\n", array_map(fn (string $part) => substr($part, strlen("Looked up:\n")), array_slice($this->sent, 1))));
     }
 
     /**
