@@ -6,6 +6,7 @@ namespace Tests\Bench;
 
 use App\Settings\GuildSettings;
 use App\Support\Shell;
+use App\Voice\Transcriber;
 use App\Voice\VoiceSession;
 use Discord\Voice\Processes\OpusDecoderInterface;
 use Dotenv\Dotenv;
@@ -88,6 +89,9 @@ final class VoiceBenchTest extends VoiceTestCase
             $this->settings['MAX_THINKING_TOKENS'] = getenv('MAX_THINKING_TOKENS');
         }
 
+        // Which whisper the bot runs, found like the bot finds it: the engine is a different time, and the baseline says which it was.
+        $this->settings['WHISPER_SERVER'] = Transcriber::fromEnv()->server?->binary ?? 'none';
+
         if (($missing = VoiceSession::missingSetup(GuildSettings::DEFAULTS)) !== null) {
             $this->markTestSkipped("The bot isn't set up in {$file}: {$missing}");
         }
@@ -102,6 +106,14 @@ final class VoiceBenchTest extends VoiceTestCase
     public function testAnswersAQuestionAsFastAsTheBaseline(): void
     {
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        // A whisper server transcribes once it has loaded its model, which a person talking to the bot takes longer to start than this does.
+        if (Transcriber::fromEnv()->server !== null) {
+            // Or it failed, which the log says: not a reason to wait for a minute.
+            $this->waitUntil(fn () => $this->logged('Whisper server ready') !== [] || $this->loggedProblems() !== [], 'the whisper server to be ready', 70.0);
+            $this->assertSame([], $this->loggedProblems(), 'The whisper server started.');
+        }
+
         $frames = intdiv(strlen($this->question), self::FRAME);
         // Stands in for libopus: every packet decodes to the next 20 ms of the question.
         $vc->opusdecoder = $decoder = new class ($this->question, $frames, self::FRAME) implements OpusDecoderInterface {
@@ -247,7 +259,8 @@ final class VoiceBenchTest extends VoiceTestCase
 
         foreach ($this->settings + ($baseline['settings'] ?? []) as $name => $value) {
             $now = $this->settings[$name] ?? null;
-            $was = $baseline['settings'][$name] ?? null;
+            // A baseline from before there was a server has no setting for it, and used whisper-cli alone.
+            $was = $baseline['settings'][$name] ?? ($name === 'WHISPER_SERVER' ? 'none' : null);
             $lines[] = '  ' . ($now === null ? "{$name} is not set" : "{$name}={$now}")
                 . ($baseline !== null && $was !== $now ? '   (baseline: ' . ($was ?? 'not set') . ')' : '');
         }
