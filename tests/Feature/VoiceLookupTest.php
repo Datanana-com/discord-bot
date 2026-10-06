@@ -498,25 +498,41 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->inCall('555', '666');
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
         $this->ask($vc, '555', self::QUESTION);
-        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 1, 'the lookup to start');
 
         // The telling is being written, and its first sentence is spoken, when Carol joins: what is told may
         // be made from what Alice and Bob's memory says, and the sentences after it are neither spoken nor posted.
-        $this->setProcessEnv([
-            'FAKE_CLAUDE_OUTPUT' => self::claudeStream('The first sentence of it is here. ', 'And this is the second one.'),
-            'FAKE_CLAUDE_PAUSE' => '10',
-        ]);
-        touch($this->go);
-        $this->waitUntil(fn () => in_array('The first sentence of it is here.', array_map(file_get_contents(...), $this->played), true), 'its first sentence to be spoken');
-        $this->joins('777');
-        touch($this->claudeResume);
-        $this->waitUntil(fn () => count($this->logged('Claude answered')) === 2, 'Claude to be done');
-        $this->runFor(0.5);
+        $this->interruptTheTelling(fn () => $this->joins('777'));
 
-        $this->assertSame([self::LOOKING, 'The first sentence of it is here.'], array_map(file_get_contents(...), $this->played));
-        $this->assertCount(2, $this->sent, 'What was looked up is posted, and what was told of it is not.');
         $this->assertStringNotContainsString('second one', $this->transcript($session));
         $this->assertSame([['guild' => self::GUILD_ID, 'session' => $session->id, 'user' => '555', 'reason' => 'the people in the call changed']], $this->logged('Not answering'));
+    }
+
+    public function testStopsTellingOnceSomeoneJoinsACallItsAnswerWasMadeForSomeoneAloneIn(): void
+    {
+        $this->memory()->save('555', '- Is building a game called Bananas.');
+        (new UserSettings($this->discord->getLogger()))->save('555', ['personal_memory_in_calls' => UserSettings::AFTER_SHARE]);
+        $this->inCall('555');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', self::QUESTION);
+
+        $this->interruptTheTelling(fn () => $this->joins('666'));
+
+        $this->assertStringNotContainsString('second one', $this->transcript($session));
+        $this->assertSame([['guild' => self::GUILD_ID, 'session' => $session->id, 'user' => '555', 'reason' => 'someone joined the call']], $this->logged('Not answering'));
+    }
+
+    public function testStopsTellingOnceAMemoryItsAnswerWasMadeFromIsTakenBack(): void
+    {
+        $this->memory()->save('666', '- Bob is learning to sail.');
+        $this->inCall('555', '666');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $session->share('666');
+        $this->ask($vc, '555', self::QUESTION);
+
+        $this->interruptTheTelling(fn () => $session->unshare('666'));
+
+        $this->assertStringNotContainsString('second one', $this->transcript($session));
+        $this->assertSame([['guild' => self::GUILD_ID, 'session' => $session->id, 'user' => '555', 'reason' => 'a shared memory was taken back']], $this->logged('Not answering'));
     }
 
     public function testRemembersNothingOfWhatWasLookedUpOnceSomeoneJoinedWhileItWasLookedUp(): void
@@ -547,6 +563,82 @@ final class VoiceLookupTest extends VoiceTestCase
             "The current memory:\n\nNothing yet.\n\nWhat was said since it was last updated:\n\nAlice: " . self::QUESTION . "\nClaude: " . self::LOOKING . "\n\nReply with the new memory.",
             $this->untimed($updates[0]['prompt']),
         );
+    }
+
+    public function testTellsButDoesNotRememberWhatWasLookedUpOnceSomeoneJoinedWhileItWaitedForItsTurn(): void
+    {
+        $this->inCall('555');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);
+        $this->ask($vc, '555', self::QUESTION);
+        $this->arrivesWhileTheBotIsAnswering($vc);
+
+        // Alone with the bot when it arrived, and not when it is told: with her memory in calls with others
+        // (the default), it is still told, but it is not remembered as said between the two of them.
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream(self::TOLD)]);
+        $this->joins('666');
+        $this->waitUntil(fn () => count($this->answersToAlice()) === 4, 'what was looked up to be told');
+
+        $memory = $this->memoryUpdateAtTheEndOf($session);
+        $this->assertStringContainsString(self::LOOKED_UP, $memory);
+        $this->assertStringNotContainsString('Claude: ' . self::TOLD, $memory);
+    }
+
+    public function testTellsButDoesNotRememberWhatWasLookedUpOnceSomeoneSharedAMemoryWhileItWaitedForItsTurn(): void
+    {
+        $this->inCall('555');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);
+        $this->ask($vc, '555', self::QUESTION);
+        $this->arrivesWhileTheBotIsAnswering($vc);
+
+        // Bob isn't in the call, but his memory is shared with it from now on: what is told may quote it.
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream(self::TOLD)]);
+        $session->share('666');
+        $this->waitUntil(fn () => count($this->answersToAlice()) === 4, 'what was looked up to be told');
+
+        $memory = $this->memoryUpdateAtTheEndOf($session);
+        $this->assertStringContainsString(self::LOOKED_UP, $memory);
+        $this->assertStringNotContainsString('Claude: ' . self::TOLD, $memory);
+    }
+
+    public function testTellsButDoesNotRememberWhatWasLookedUpOnceTheMemoryWasForgottenWhileItWaitedForItsTurn(): void
+    {
+        $this->memory()->save('555', '- Lives in Lisbon.');
+        $this->inCall('555');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);
+        $this->ask($vc, '555', self::QUESTION);
+        $this->arrivesWhileTheBotIsAnswering($vc);
+
+        // She uses /forget after it arrived and before it is told: it was made from her memory.
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream(self::TOLD)]);
+        $this->memory()->forget('555');
+        VoiceSession::forget('555');
+        $this->waitUntil(fn () => count($this->answersToAlice()) === 4, 'what was looked up to be told');
+        $this->assertSame(self::QUOTE . "\n" . self::TOLD, $this->answersToAlice()[3]);
+
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeResult('They talked about PHP.'), 'FAKE_CLAUDE_OUTPUT_MEMORY' => self::claudeResult('- Lives in Lisbon, again.')]);
+        await($session->stop());
+
+        $this->assertSame('', $this->memory()->read('555'));
+        $this->assertSame([], $this->logged('Updated memory'), 'Nothing is left to remember her by.');
+    }
+
+    public function testRemembersNothingOfWhatWasLookedUpOnceSomeoneSharedAMemoryWhileItWasLookedUp(): void
+    {
+        $this->inCall('555');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);
+        $this->ask($vc, '555', self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 1, 'the lookup to start');
+
+        // A memory shared meanwhile is no part of the task, but it is part of what the lookup was told to read.
+        $session->share('666');
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream(self::TOLD)]);
+        touch($this->go);
+        $this->waitUntil(fn () => count($this->answersToAlice()) === 3 && count($this->played) === 2, 'what was looked up to be told');
+
+        $memory = $this->memoryUpdateAtTheEndOf($session);
+        $this->assertStringNotContainsString('Looked up for', $memory);
+        $this->assertStringNotContainsString('Claude: ' . self::TOLD, $memory);
+        $this->assertStringContainsString('Claude: ' . self::LOOKING, $memory);
     }
 
     public function testRemembersWhatWasLookedUpWhenSomeoneWhoJoinedLeftAgainBeforeItArrived(): void
@@ -1126,6 +1218,44 @@ final class VoiceLookupTest extends VoiceTestCase
     private function answersToAlice(): array
     {
         return array_values(array_filter($this->sent, fn (string $message) => str_starts_with($message, '> **Alice:**')));
+    }
+
+    /**
+     * What was looked up arrives and is being told, its first sentence is spoken and Claude is still writing the
+     * second, when something changes. The rest is neither synthesized, spoken nor posted.
+     *
+     * @param callable(): mixed $interruption
+     */
+    private function interruptTheTelling(callable $interruption): void
+    {
+        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 1, 'the lookup to start');
+        $this->setProcessEnv([
+            'FAKE_CLAUDE_OUTPUT' => self::claudeStream('The first sentence of it is here. ', 'And this is the second one.'),
+            'FAKE_CLAUDE_PAUSE' => '10',
+        ]);
+        touch($this->go);
+        $this->waitUntil(fn () => in_array('The first sentence of it is here.', array_map(file_get_contents(...), $this->played), true), 'its first sentence to be spoken');
+        $interruption();
+        touch($this->claudeResume);
+        $this->waitUntil(fn () => count($this->logged('Claude answered')) === 2, 'Claude to be done');
+        $this->runFor(0.5);
+
+        $this->assertSame([self::LOOKING, 'The first sentence of it is here.'], array_map(file_get_contents(...), $this->played));
+        $this->assertCount(2, $this->answersToAlice(), 'What was looked up is posted, and what was told of it is not.');
+    }
+
+    /**
+     * Ends the call, and gives what the memories of the people who were alone with the bot are updated from.
+     */
+    private function memoryUpdateAtTheEndOf(VoiceSession $session): string
+    {
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeResult('They talked about PHP.'), 'FAKE_CLAUDE_OUTPUT_MEMORY' => self::claudeResult('- Asked about PHP.')]);
+        await($session->stop());
+
+        $updates = array_values(array_filter($this->claudeCalls(), fn (array $call) => str_starts_with($call['system'], "You keep a Discord bot's memory")));
+        $this->assertNotEmpty($updates);
+
+        return $this->untimed(implode("\n", array_column($updates, 'prompt')));
     }
 
     /**

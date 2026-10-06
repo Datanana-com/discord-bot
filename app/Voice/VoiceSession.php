@@ -1456,7 +1456,7 @@ final class VoiceSession
      */
     private function say(string $sentence, string $userId): PromiseInterface
     {
-        $this->remember(Lookups::botLine($sentence), null);
+        $this->remember("Claude: {$sentence}", null);
         $oggPath = sprintf('%s/claude-%d.ogg', $this->directory, ++$this->files);
 
         return $this->synthesize($sentence, $oggPath)->then(

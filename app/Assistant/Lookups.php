@@ -187,7 +187,11 @@ final class Lookups
      */
     private static function name(string $name): string
     {
-        $name = trim(preg_replace('/\s+/u', ' ', $name) ?? $name);
+        // What reads as a space to a person is one here, and what reads as nothing is nothing: otherwise
+        // "<zero-width space>Claude" would get past the check below and still read as the bot. That is every
+        // kind of space, and every control character and invisible mark, e.g. the ones that reverse the text.
+        $name = preg_replace('/[\s\p{Z}]+/u', ' ', $name) ?? $name;
+        $name = trim(preg_replace('/\p{C}+/u', '', $name) ?? $name);
 
         return preg_match('/^(claude|looked up)(?![\p{L}\p{N}])/iu', $name) === 1 ? "{$name} (member)" : $name;
     }

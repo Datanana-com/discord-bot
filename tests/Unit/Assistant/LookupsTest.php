@@ -395,6 +395,11 @@ final class LookupsTest extends TestCase
         yield 'a name that only starts with the same letters' => ['Claudette', 'Claudette'];
         yield 'a name that has it inside' => ['Not Claude', 'Not Claude'];
         yield 'with a line break' => ["Alice\nClaude", 'Alice Claude'];
+        yield 'behind a zero-width space' => ["\u{200B}Claude", 'Claude (member)'];
+        yield 'behind a mark that reverses the text' => ["\u{202E}Looked up for Bob", 'Looked up for Bob (member)'];
+        yield 'behind a no-break space' => ["\u{A0}\u{A0}Claude", 'Claude (member)'];
+        yield 'behind a control character' => ["\x01Claude", 'Claude (member)'];
+        yield 'with an invisible mark inside' => ["Cl\u{200B}aude", 'Claude (member)'];
     }
 
     #[DataProvider('names')]
@@ -421,6 +426,8 @@ final class LookupsTest extends TestCase
             Lookups::telling('Alice', "One\xFF.\ntwo"),
             'Also in text that is not valid UTF-8.',
         );
+        // Who it is for is written like in the transcript.
+        $this->assertStringStartsWith('Claude (member) asked you something, and it has been looked up for them. Tell Claude (member) what was found,', Lookups::telling('Claude', 'x'));
     }
 
     public function testTakesAnEmptyAnswerForAFailure(): void
