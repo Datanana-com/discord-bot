@@ -3,10 +3,12 @@
 
 declare(strict_types=1);
 
-// Stands in for whisper.cpp's whisper-server: listens on --port, answers GET /health, and answers POST /inference with a
-// transcript with annotations, one request at a time like the real one.
+// Stands in for whisper.cpp's whisper-server: listens on --port (0 is any free port, as with the real one), answers
+// GET <--request-path>/health, and answers POST <--request-path>/inference with a transcript with annotations, one
+// request at a time like the real one. Anything under another path is not found.
 //
-//   FAKE_WHISPER_SERVER_LOG          Gets, appended, its process ID, the arguments it was started with, and a line for each /inference request.
+//   FAKE_WHISPER_SERVER_LOG          Gets, appended, its process ID, the arguments it was started with, the port it
+//                                    listens on, and a line for each /inference request and each request it refuses.
 //   FAKE_WHISPER_SERVER_LOAD         Seconds it takes to load its model, before it listens.
 //   FAKE_WHISPER_SERVER_HEALTH_DELAY Seconds it takes to say that it is healthy.
 //   FAKE_WHISPER_SERVER_STATUS       The HTTP status it answers requests with; anything but 200 is an error without a transcript.
@@ -42,14 +44,17 @@ foreach ($arguments as $argument) {
     $note("arg={$argument}");
 }
 
-$port = (int) ($arguments[(int) array_search('--port', $arguments, true) + 1] ?? 0);
+$option = static fn (string $name): string => (string) ($arguments[(int) array_search($name, $arguments, true) + 1] ?? '');
+$prefix = $option('--request-path');
 usleep((int) ((float) getenv('FAKE_WHISPER_SERVER_LOAD') * 1_000_000));
-$server = stream_socket_server("tcp://127.0.0.1:{$port}", $code, $message);
+$server = stream_socket_server('tcp://127.0.0.1:' . (int) $option('--port'), $code, $message);
 
 if ($server === false) {
-    fwrite(STDERR, "cannot listen on {$port}: {$message}\n");
+    fwrite(STDERR, "cannot listen: {$message}\n");
     exit(1);
 }
+
+$note('port=' . substr((string) strrchr((string) stream_socket_get_name($server, false), ':'), 1));
 
 $requests = 0;
 
@@ -73,7 +78,17 @@ while (($connection = stream_socket_accept($server, -1)) !== false) {
         fclose($connection);
     };
 
-    if (($line[1] ?? '') === 'GET' && ($line[2] ?? '') === '/health') {
+    $method = $line[1] ?? '';
+    $path = $line[2] ?? '';
+
+    if (! str_starts_with($path, $prefix . '/')) {
+        $note("refused {$method} {$path}");
+        $answer(404, 'text/plain', 'not found');
+
+        continue;
+    }
+
+    if ($method === 'GET' && $path === "{$prefix}/health") {
         usleep((int) ((float) $setting('FAKE_WHISPER_SERVER_HEALTH_DELAY') * 1_000_000));
         $answer(200, 'application/json', '{"status":"ok"}');
 
@@ -90,14 +105,27 @@ while (($connection = stream_socket_accept($server, -1)) !== false) {
         }
     }
 
+    // What it makes of the audio, as whisper.cpp's decoder would: a WAV file says its format and how much of it there is.
+    $audio = $fields['file']['content'] ?? '';
+    $wav = '-';
+
+    if (strlen($audio) >= 44 && str_starts_with($audio, 'RIFF') && substr($audio, 8, 4) === 'WAVE' && substr($audio, 12, 4) === 'fmt ' && substr($audio, 36, 4) === 'data') {
+        $format = unpack('vformat/vchannels/Vrate/Vbytes/vblock/vbits', substr($audio, 20, 16));
+        $data = unpack('V', substr($audio, 40, 4))[1];
+        $wav = $format['format'] === 1 && $data === strlen($audio) - 44
+            ? sprintf('%dHz,%dch,%dbit,%dbytes', $format['rate'], $format['channels'], $format['bits'], $data)
+            : 'broken';
+    }
+
     $requests++;
     $note(sprintf(
-        'request language=%s prompt=%s format=%s filename=%s bytes=%d',
+        'request language=%s prompt=%s format=%s filename=%s bytes=%d wav=%s',
         $fields['language']['content'] ?? '-',
         $fields['prompt']['content'] ?? '-',
         $fields['response_format']['content'] ?? '-',
         $fields['file']['filename'] ?? '-',
-        strlen($fields['file']['content'] ?? ''),
+        strlen($audio),
+        $wav,
     ));
 
     $held = 200;
@@ -115,8 +143,8 @@ while (($connection = stream_socket_accept($server, -1)) !== false) {
 
     $status = (int) ($setting('FAKE_WHISPER_SERVER_STATUS') ?: 200);
 
-    if (! isset($fields['file'])) {
-        $answer(400, 'text/plain', 'no file field');
+    if ($wav === '-' || $wav === 'broken') {
+        $answer(400, 'text/plain', 'failed to read audio data');
     } elseif ($status !== 200) {
         $answer($status, 'text/plain', 'error');
     } elseif ($setting('FAKE_WHISPER_SERVER_BODY') !== false) {

@@ -815,7 +815,7 @@ final class VoiceSession
         $this->log('info', 'Utterance ended', ['user' => $userId, 'ms' => $ms]);
         $this->track(Usage::UTTERANCE, ['user' => $userId, 'duration_ms' => $ms]);
 
-        $this->inTurn($userId, fn () => $this->handleUtterance($userId, $wavPath, $endedAt, $people));
+        $this->inTurn($userId, fn () => $this->handleUtterance($userId, $wavPath, $endedAt, $people, $seconds));
     }
 
     /**
@@ -846,8 +846,9 @@ final class VoiceSession
     /**
      * @param float $endedAt When the utterance ended, to time the answer from.
      * @param list<string>|null $people Who was in the call then: see {@see group()}.
+     * @param float $seconds How long it is: whisper has longer to transcribe a longer one.
      */
-    private function handleUtterance(string $userId, string $wavPath, float $endedAt, ?array $people): PromiseInterface
+    private function handleUtterance(string $userId, string $wavPath, float $endedAt, ?array $people, float $seconds): PromiseInterface
     {
         // They opted out while this waited for its turn, and it was deleted then.
         if (! isset($this->clips[$wavPath])) {
@@ -857,7 +858,7 @@ final class VoiceSession
         unset($this->clips[$wavPath]);
         $transcribing = microtime(true);
 
-        return $this->transcriber->transcribe($wavPath, log: $this->log(...))
+        return $this->transcriber->transcribe($wavPath, $seconds, $this->log(...))
             ->finally(fn () => unlink($wavPath))
             ->then(function (string $text) use ($userId, $endedAt, $transcribing, $people) {
                 $this->log('info', 'Transcribed', ['user' => $userId, 'ms' => $this->msSince($transcribing), 'characters' => mb_strlen($text)]);

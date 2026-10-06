@@ -39,8 +39,8 @@ final class VoiceWhisperServerTest extends VoiceTestCase
         // The first request is the server's warm-up; the second is what Alice said, in the language of the server's settings.
         $requests = $this->serverRequests();
         $this->assertCount(2, $requests);
-        $this->assertSame('request language=en prompt=- format=json filename=audio.wav bytes=32044', $requests[0]);
-        $this->assertMatchesRegularExpression('/^request language=auto prompt=- format=json filename=audio.wav bytes=\d{5,}$/', $requests[1]);
+        $this->assertSame('request language=en prompt=- format=json filename=audio.wav bytes=32044 wav=16000Hz,1ch,16bit,32000bytes', $requests[0]);
+        $this->assertMatchesRegularExpression('/^request language=auto prompt=- format=json filename=audio.wav bytes=\d{5,} wav=48000Hz,2ch,16bit,\d+bytes$/', $requests[1], 'The recording as the call wrote it.');
         $this->assertFileDoesNotExist($this->cliLog, 'whisper-cli did not run.');
         $this->assertSame([], $this->loggedProblems());
         $this->assertCount(1, $this->logged('Transcribed'));
@@ -54,6 +54,39 @@ final class VoiceWhisperServerTest extends VoiceTestCase
         $this->assertTrue($this->isRunning($pid));
         await($session->stop());
         $this->assertFalse($this->isRunning($pid), 'The server ends with the call.');
+    }
+
+    public function testWhatWasSaidBeforeTheCallEndedIsStillTranscribedByTheServer(): void
+    {
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->waitUntil(fn () => $this->logged('Whisper server ready') !== [], 'the whisper server to be ready');
+
+        // Alice's last words are with the server when the call ends: they are in the transcript, and in what the call remembers.
+        $this->speakAndWait($vc, '555');
+        $this->waitUntil(fn () => count($this->serverRequests()) === 2, 'the server to be asked');
+        $stopped = $session->stop();
+        $this->transcribe();
+        await($stopped);
+
+        $this->assertCount(1, $this->logged('Transcribed'));
+        $this->assertFileDoesNotExist($this->cliLog, 'The server was there until it had answered.');
+        $this->assertSame([], $this->loggedProblems());
+        $this->assertStringContainsString('Alice: Hey Claude, what time is it?', $this->transcript($session));
+    }
+
+    public function testGivesWhatIsSaidForLongTimeToBeTranscribedForTheLengthOfIt(): void
+    {
+        // Longer than the 3 seconds that any request has, and shorter than the 5 that ten seconds of speech have.
+        $this->setProcessEnv(['FAKE_WHISPER_DELAY' => '4']);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->waitUntil(fn () => $this->logged('Whisper server ready') !== [], 'the whisper server to be ready');
+
+        $this->speak($vc, ssrc: 555, userId: '555', seconds: 10.0);
+        $this->waitUntil(fn () => $this->sent !== [], 'the answer', 20.0);
+
+        $this->assertFileDoesNotExist($this->cliLog, 'The server had the time it needed.');
+        $this->assertSame([], $this->loggedProblems());
+        $this->assertGreaterThanOrEqual(4000, $this->logged('Transcribed')[0]['ms']);
     }
 
     public function testWhisperCliTranscribesWhatIsSaidWhileTheServerLoads(): void

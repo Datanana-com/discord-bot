@@ -132,6 +132,14 @@ final class Program
     }
 
     /**
+     * Its process ID, while it runs.
+     */
+    public function pid(): ?int
+    {
+        return $this->running ? $this->process->getPid() : null;
+    }
+
+    /**
      * @return PromiseInterface<null> Resolves when it has ended; rejects with a {@see CommandFailedException} when it
      *                                failed, was stopped or timed out, with what a listener threw, or with why it
      *                                could not be started. Like with {@see Shell::stream()}, the exception never

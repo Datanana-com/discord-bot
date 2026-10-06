@@ -9,9 +9,13 @@ use PHPUnit\Framework\TestCase;
 use React\EventLoop\Loop;
 use React\Http\Message\ResponseException;
 use React\Promise\Deferred;
+use React\Promise\PromiseInterface;
 use RuntimeException;
+use stdClass;
 use Tests\RunsOutOfFileDescriptors;
 use Tests\WaitsWithin;
+use Tests\Wav;
+use WeakReference;
 
 use function React\Async\await;
 use function React\Async\delay;
@@ -22,8 +26,8 @@ final class WhisperServerTest extends TestCase
     use WaitsWithin;
 
     private const array ENV = [
-        'FAKE_WHISPER_SERVER_LOG', 'FAKE_WHISPER_SERVER_LOAD', 'FAKE_WHISPER_SERVER_HEALTH_DELAY', 'FAKE_WHISPER_SERVER_STATUS', 'FAKE_WHISPER_SERVER_DIE_AT',
-        'FAKE_WHISPER_SERVER_BODY', 'FAKE_WHISPER_HOLD', 'FAKE_WHISPER_DELAY', 'FAKE_WHISPER_OUTPUT',
+        'FAKE_ENV', 'FAKE_WHISPER_SERVER_LOG', 'FAKE_WHISPER_SERVER_LOAD', 'FAKE_WHISPER_SERVER_HEALTH_DELAY', 'FAKE_WHISPER_SERVER_STATUS',
+        'FAKE_WHISPER_SERVER_DIE_AT', 'FAKE_WHISPER_SERVER_BODY', 'FAKE_WHISPER_HOLD', 'FAKE_WHISPER_DELAY', 'FAKE_WHISPER_OUTPUT',
     ];
 
     private string $folder;
@@ -33,6 +37,7 @@ final class WhisperServerTest extends TestCase
     /** While this file exists, the server doesn't answer. */
     private string $hold;
 
+    /** A tenth of a second of silence. */
     private string $speech;
 
     /** @var list<array{string, string, array<string, mixed>}> What the server said: its level, message and context. */
@@ -41,6 +46,9 @@ final class WhisperServerTest extends TestCase
     /** @var array<int, array{WhisperServer, int}> Each server the test made, and how many times a call took it. */
     private array $servers = [];
 
+    /** @var array<string, string> What the stand-in reads again with each request: see {@see fake()}. */
+    private array $fakes = [];
+
     protected function setUp(): void
     {
         $this->folder = sys_get_temp_dir() . '/whisper-server-' . uniqid();
@@ -48,9 +56,10 @@ final class WhisperServerTest extends TestCase
         $this->log = "{$this->folder}/server.log";
         $this->hold = "{$this->folder}/hold";
         $this->speech = "{$this->folder}/speech.wav";
-        file_put_contents($this->speech, 'RIFF-pretend-this-is-a-wav-file');
+        file_put_contents($this->speech, Wav::silence(0.1));
         putenv("FAKE_WHISPER_SERVER_LOG={$this->log}");
         putenv("FAKE_WHISPER_HOLD={$this->hold}");
+        putenv("FAKE_ENV={$this->folder}/fake.env");
     }
 
     protected function tearDown(): void
@@ -69,16 +78,15 @@ final class WhisperServerTest extends TestCase
         exec('rm -rf ' . escapeshellarg($this->folder));
     }
 
-    public function testStartsOnAPortOfItsOwnWithTheModelAndTheBeamOfWhisperCli(): void
+    public function testStartsOnAPortAndAPathOfItsOwnWithTheModelAndTheBeamOfWhisperCli(): void
     {
         $this->started();
 
         $arguments = $this->arguments();
-        $this->assertSame(['--model', '/models/ggml-base.bin', '--host', '127.0.0.1', '--port'], array_slice($arguments, 0, 5));
-        $this->assertGreaterThan(1023, (int) $arguments[5]);
-        $this->assertNotSame(8080, (int) $arguments[5], 'whisper-server\'s own port could have a server on it already.');
+        $this->assertSame(['--model', '/models/ggml-base.bin', '--host', '127.0.0.1', '--port', '0', '--request-path'], array_slice($arguments, 0, 7));
+        $this->assertMatchesRegularExpression('#^/[0-9a-f]{32}$#', $arguments[7], 'A path that nobody can guess.');
         // whisper-cli decodes with a beam of 5 and 5 candidates; the server's own default is greedy, which wrote other words.
-        $this->assertSame(['--no-timestamps', '--beam-size', '5', '--best-of', '5'], array_slice($arguments, 6));
+        $this->assertSame(['--no-timestamps', '--beam-size', '5', '--best-of', '5'], array_slice($arguments, 8));
     }
 
     public function testUsesAsManyThreadsAsItIsTold(): void
@@ -88,16 +96,17 @@ final class WhisperServerTest extends TestCase
         $this->assertSame(['--threads', '8'], array_slice($this->arguments(), -2));
     }
 
-    public function testEachStartTakesAPortOfItsOwn(): void
+    public function testEachStartChoosesAPortAndAPathOfItsOwn(): void
     {
         $server = $this->started();
         $this->ends($this->giveBack($server));
         $this->take($server);
         $this->becomesReady($server);
 
-        $ports = $this->ports();
-        $this->assertCount(2, $ports);
-        $this->assertNotSame($ports[0], $ports[1], 'A server that is going could still have its port.');
+        $this->assertCount(2, $this->ports());
+        $this->assertNotSame($this->ports()[0], $this->ports()[1], 'A server that is going could still have its port.');
+        $this->assertCount(2, $this->paths());
+        $this->assertNotSame($this->paths()[0], $this->paths()[1], 'Nor its path.');
         $this->assertCount(2, $this->pids());
     }
 
@@ -120,15 +129,39 @@ final class WhisperServerTest extends TestCase
         $this->assertCount(1, $this->said);
         $this->assertSame(['info', 'Whisper server ready'], array_slice($this->said[0], 0, 2));
         $this->assertGreaterThanOrEqual(600, $this->said[0][2]['ms'], 'How long it took, to load its model first.');
-        $this->assertSame((int) $this->ports()[0], $this->said[0][2]['port']);
+        $this->assertSame((int) $this->ports()[0], $this->said[0][2]['port'], 'The port of the server that was started, as the system says.');
+    }
+
+    public function testIsNotReadyWhileItWarmsUp(): void
+    {
+        putenv('FAKE_WHISPER_DELAY=1');
+        $server = $this->server();
+        $this->take($server);
+        $this->waitUntil(fn () => file_exists($this->log) && $this->requests() !== [], 'the warm-up to begin');
+
+        $this->assertFalse($server->isReady(), 'The warm-up is not answered yet.');
+        $this->assertSame([], $this->said);
+
+        $this->becomesReady($server);
     }
 
     public function testWarmsUpWithASecondOfSilenceBeforeItIsReady(): void
     {
         $this->started();
 
-        // 16 kHz, 16 bits, mono: a header of 44 bytes and 32000 of silence. That is nobody's question.
-        $this->assertSame(['request language=en prompt=- format=json filename=audio.wav bytes=32044'], $this->requests());
+        // 16 kHz, 16 bits, mono: a header of 44 bytes and 32000 of silence, in a file the server can read. That is nobody's question.
+        $this->assertSame(['request language=en prompt=- format=json filename=audio.wav bytes=32044 wav=16000Hz,1ch,16bit,32000bytes'], $this->requests());
+    }
+
+    public function testAsksOnlyUnderItsPath(): void
+    {
+        $server = $this->started();
+
+        await($server->transcribe($this->speech, 'en', '', 1.0));
+
+        // The stand-in does not know any other path, like the real server started with --request-path.
+        $this->assertSame([], $this->refused());
+        $this->assertCount(2, $this->requests());
     }
 
     public function testTranscribesWithTheLanguageAndThePromptItIsGiven(): void
@@ -139,7 +172,7 @@ final class WhisperServerTest extends TestCase
 
         $this->assertSame(" [BLANK_AUDIO]\n Hey Claude, (coughs) what time is it?\n", $text, 'As whisper wrote it: the annotations are for Transcriber to take out.');
         $this->assertSame(
-            sprintf('request language=pt prompt=A voice call with Claude. format=json filename=audio.wav bytes=%d', filesize($this->speech)),
+            sprintf('request language=pt prompt=A voice call with Claude. format=json filename=audio.wav bytes=%d wav=16000Hz,1ch,16bit,3200bytes', filesize($this->speech)),
             $this->requests()[1],
             'The recording is sent whole, under a name that says nothing about it.',
         );
@@ -156,11 +189,11 @@ final class WhisperServerTest extends TestCase
 
     public function testGivesARequestTimeForTheLengthOfTheAudio(): void
     {
-        putenv('FAKE_WHISPER_DELAY=0.5');
+        putenv('FAKE_WHISPER_DELAY=0.6');
         $server = $this->started(minimumTimeout: 0.3);
 
-        // 0.3 s would not do, and 0.3 + 0.2 for each second of audio does.
-        $text = await($server->transcribe($this->speech, 'en', '', 3.0));
+        // 0.3 s would not do for a request that takes 0.6, and 0.3 + 0.2 for each of 5 seconds of audio does.
+        $text = await($server->transcribe($this->speech, 'en', '', 5.0));
 
         $this->assertStringContainsString('what time is it?', $text);
     }
@@ -181,8 +214,8 @@ final class WhisperServerTest extends TestCase
 
     public function testAnAnswerThatSaysNoIsNotTheServersFault(): void
     {
-        putenv('FAKE_WHISPER_SERVER_STATUS=500');
         $server = $this->started();
+        $this->fake('FAKE_WHISPER_SERVER_STATUS', '500');
 
         try {
             await($server->transcribe($this->speech, 'en', '', 1.0));
@@ -197,8 +230,8 @@ final class WhisperServerTest extends TestCase
 
     public function testAnAnswerWithoutAnythingHeardIsTheServersFault(): void
     {
-        putenv('FAKE_WHISPER_SERVER_BODY={"error":"what was said is not in here"}');
         $server = $this->started(restartAfter: 60.0);
+        $this->fake('FAKE_WHISPER_SERVER_BODY', '{"error":"what was said is not in here"}');
 
         try {
             await($server->transcribe($this->speech, 'en', '', 1.0));
@@ -268,6 +301,34 @@ final class WhisperServerTest extends TestCase
         $this->assertCount(2, $this->pids());
     }
 
+    public function testStartsAgainOnceTheTimeToRestartHasPassed(): void
+    {
+        $server = $this->started(restartAfter: 1.5);
+
+        posix_kill($this->pids()[0], SIGKILL);
+        $this->waitUntil(fn () => count($this->said) >= 2, 'the server to be missed');
+        delay(0.6);
+
+        $this->assertCount(1, $this->pids(), 'Not yet.');
+        $this->waitUntil(fn () => $server->isReady(), 'the server to be back');
+        $this->assertCount(2, $this->pids());
+    }
+
+    public function testStartsAtOnceWhenACallTakesTheServerWhileItWaitsToStartAgain(): void
+    {
+        $server = $this->started(restartAfter: 1.0);
+
+        posix_kill($this->pids()[0], SIGKILL);
+        $this->waitUntil(fn () => count($this->said) >= 2, 'the server to be missed');
+
+        // A second call, which starts it without waiting.
+        $this->take($server);
+        $this->becomesReady($server);
+        delay(1.4);
+
+        $this->assertCount(2, $this->pids(), 'The wait that was left was over, and started nothing more.');
+    }
+
     public function testDoesNotStartAServerThatNeverServedAgain(): void
     {
         // It would only fail the same way.
@@ -293,6 +354,50 @@ final class WhisperServerTest extends TestCase
         $this->assertSame([['warning', 'The whisper server stopped (it did not start within 0.3s).', []]], $this->said);
         $this->assertCount(1, $this->pids(), 'And not tried again.');
         $this->assertFalse($server->isReady());
+    }
+
+    public function testGivesUpAServerThatFailsItsFirstRequest(): void
+    {
+        putenv('FAKE_WHISPER_SERVER_STATUS=500');
+        $server = $this->server(restartAfter: 0.1);
+        $this->take($server);
+
+        $this->waitUntil(fn () => count($this->said) > 0, 'the server to be given up');
+        delay(0.5);
+
+        $this->assertSame([['warning', 'The whisper server stopped (its first request failed: HTTP status code 500 (Fake)).', []]], $this->said);
+        $this->assertCount(1, $this->pids(), 'It never served: it would fail the same way.');
+        $this->assertFalse($server->isReady());
+    }
+
+    public function testGivesUpAServerThatDiesOnItsFirstRequest(): void
+    {
+        putenv('FAKE_WHISPER_SERVER_DIE_AT=1');
+        $server = $this->server(restartAfter: 0.1);
+        $this->take($server);
+
+        $this->waitUntil(fn () => count($this->said) > 0, 'the server to be given up');
+        delay(0.5);
+
+        // Which it notices first, that its request was never answered or that it ended, is up to the event loop.
+        $this->assertCount(1, $this->said);
+        $this->assertStringStartsWith('The whisper server stopped (', $this->said[0][1]);
+        $this->assertStringEndsWith(').', $this->said[0][1], 'Not "and starts again": it never served.');
+        $this->assertCount(1, $this->pids());
+        $this->assertFalse($server->isReady());
+    }
+
+    public function testGivesUpAServerThatDoesNotSayThatItIsHealthy(): void
+    {
+        putenv('FAKE_WHISPER_SERVER_HEALTH_DELAY=3');
+        $server = $this->server(restartAfter: 0.1);
+        $this->take($server);
+
+        $this->waitUntil(fn () => count($this->said) > 0, 'the server to be given up', 6.0);
+        delay(0.4);
+
+        $this->assertSame([['warning', 'The whisper server stopped (it did not say that it is healthy: Request timed out after 2 seconds).', []]], $this->said);
+        $this->assertCount(1, $this->pids());
     }
 
     public function testStopsOnceTheLastCallHasGivenItBack(): void
@@ -325,8 +430,13 @@ final class WhisperServerTest extends TestCase
         exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($script) . ' 2>/dev/null');
         $pid = $this->pids()[0];
 
-        $this->waitUntil(fn () => ! posix_kill($pid, 0), 'the server to end with the bot', 5.0);
-        $this->assertFalse(posix_kill($pid, 0));
+        try {
+            $this->waitUntil(fn () => ! posix_kill($pid, 0), 'the server to end with the bot', 5.0);
+            $this->assertFalse(posix_kill($pid, 0));
+        } finally {
+            // A server that did not end is not left running, whatever the test found.
+            posix_kill($pid, SIGKILL);
+        }
     }
 
     public function testGivingBackWhatWasNeverTakenChangesNothing(): void
@@ -365,8 +475,11 @@ final class WhisperServerTest extends TestCase
 
     public function testAServerThatCannotBeStartedIsDoneWithout(): void
     {
-        $server = $this->server();
+        $server = $this->started();
+        $this->ends($this->giveBack($server));
+        $this->said = [];
 
+        // The bot has no file descriptors left to start it with: whatever it needs is loaded already.
         $this->withoutFileDescriptors(function () use ($server) {
             $this->take($server);
         });
@@ -374,7 +487,7 @@ final class WhisperServerTest extends TestCase
         $this->assertFalse($server->isReady());
         $this->assertCount(1, $this->said);
         $this->assertSame('warning', $this->said[0][0]);
-        $this->assertStringStartsWith('Could not start the whisper server: No port to listen on', $this->said[0][1]);
+        $this->assertStringStartsWith('The whisper server stopped (Unable to launch a new process: ', $this->said[0][1]);
     }
 
     public function testAServerThatIsStillLoadingIsLeftAloneOnceTheLastCallIsGone(): void
@@ -420,6 +533,42 @@ final class WhisperServerTest extends TestCase
         $this->assertSame([], $this->said);
     }
 
+    public function testForgetsTheCallOnceTheLastCallIsGone(): void
+    {
+        $call = new stdClass();
+        $remembered = WeakReference::create($call);
+        $server = $this->server();
+        $server->acquire(function (string $level, string $message) use ($call) {
+            $call->said[] = $message;
+        });
+        $this->servers[spl_object_id($server)][1]++;
+        $this->becomesReady($server);
+
+        $this->ends($this->giveBack($server));
+        unset($call);
+        gc_collect_cycles();
+
+        $this->assertNull($remembered->get(), 'A finished call is not kept alive by the server it had.');
+    }
+
+    public function testTellsTheCallThatTookTheServerLast(): void
+    {
+        $first = $second = [];
+        $server = $this->server();
+        $server->acquire(function (string $level, string $message) use (&$first) {
+            $first[] = $message;
+        });
+        $server->acquire(function (string $level, string $message) use (&$second) {
+            $second[] = $message;
+        });
+        $this->servers[spl_object_id($server)][1] += 2;
+
+        $this->becomesReady($server);
+
+        $this->assertSame([], $first);
+        $this->assertSame(['Whisper server ready'], $second);
+    }
+
     public function testTheServerIsTheWhisperServerNextToWhisperCli(): void
     {
         $_ENV['WHISPER_BINARY'] = "{$this->folder}/whisper-cli";
@@ -445,9 +594,34 @@ final class WhisperServerTest extends TestCase
         $_ENV['WHISPER_SERVER_BINARY'] = "{$this->folder}/elsewhere/whisper-server";
 
         $this->assertSame("{$this->folder}/elsewhere/whisper-server", WhisperServer::fromEnv('/models/m.bin', null)->binary, 'Not checked: a wrong path is told when the server fails to start.');
+    }
+
+    public function testNoServerWhenEnvSaysNone(): void
+    {
+        // The server is where whisper-cli is, so that it is only env that turns it off.
+        $_ENV['WHISPER_BINARY'] = "{$this->folder}/whisper-cli";
+        touch("{$this->folder}/whisper-server");
+        chmod("{$this->folder}/whisper-server", 0755);
+        $this->assertNotNull(WhisperServer::fromEnv('/models/m.bin', null));
 
         $_ENV['WHISPER_SERVER_BINARY'] = '';
         $this->assertNull(WhisperServer::fromEnv('/models/m.bin', null), 'Empty leaves the transcribing to whisper-cli, even where the server is next to it.');
+
+        // What env() makes of "false" in a .env file.
+        $_ENV['WHISPER_SERVER_BINARY'] = 'false';
+        $this->assertNull(WhisperServer::fromEnv('/models/m.bin', null));
+    }
+
+    public function testNullAndTrueLeaveItToTheServerNextToWhisperCli(): void
+    {
+        $_ENV['WHISPER_BINARY'] = "{$this->folder}/whisper-cli";
+        touch("{$this->folder}/whisper-server");
+        chmod("{$this->folder}/whisper-server", 0755);
+
+        foreach (['null', 'true'] as $value) {
+            $_ENV['WHISPER_SERVER_BINARY'] = $value;
+            $this->assertSame("{$this->folder}/whisper-server", WhisperServer::fromEnv('/models/m.bin', null)->binary, "WHISPER_SERVER_BINARY={$value}");
+        }
     }
 
     public function testThereIsNothingNextToAWhisperCliThatIsOnThePath(): void
@@ -478,9 +652,9 @@ final class WhisperServerTest extends TestCase
     /**
      * A call gives the server back.
      *
-     * @return \React\Promise\PromiseInterface<mixed>
+     * @return PromiseInterface<mixed>
      */
-    private function giveBack(WhisperServer $server): \React\Promise\PromiseInterface
+    private function giveBack(WhisperServer $server): PromiseInterface
     {
         $this->servers[spl_object_id($server)][1] = max(0, $this->servers[spl_object_id($server)][1] - 1);
 
@@ -500,9 +674,22 @@ final class WhisperServerTest extends TestCase
     }
 
     /**
-     * @param \React\Promise\PromiseInterface<mixed> $ended
+     * Sets what the stand-in reads again with each request, which the server that is running has already started with.
      */
-    private function ends(\React\Promise\PromiseInterface $ended): void
+    private function fake(string $name, string $value): void
+    {
+        $this->fakes[$name] = $value;
+        file_put_contents("{$this->folder}/fake.env", implode('', array_map(
+            fn (string $name, string $value) => sprintf("%s='%s'\n", $name, str_replace("'", "'\\''", $value)),
+            array_keys($this->fakes),
+            $this->fakes,
+        )));
+    }
+
+    /**
+     * @param PromiseInterface<mixed> $ended
+     */
+    private function ends(PromiseInterface $ended): void
     {
         $this->within(10.0, $ended, 'the whisper server to end');
     }
@@ -551,11 +738,21 @@ final class WhisperServerTest extends TestCase
     }
 
     /**
-     * @return list<string> The port of each server that was started.
+     * @return list<string> The port each server that was started listens on.
      */
     private function ports(): array
     {
-        preg_match_all('/^arg=--port\narg=(\d+)$/m', file_get_contents($this->log), $found);
+        preg_match_all('/^port=(\d+)$/m', file_get_contents($this->log), $found);
+
+        return $found[1];
+    }
+
+    /**
+     * @return list<string> The path each server that was started was told to answer under.
+     */
+    private function paths(): array
+    {
+        preg_match_all('/^arg=--request-path\narg=(\S+)$/m', file_get_contents($this->log), $found);
 
         return $found[1];
     }
@@ -576,5 +773,13 @@ final class WhisperServerTest extends TestCase
     private function requests(): array
     {
         return array_values(array_filter(explode("\n", trim(file_get_contents($this->log))), fn (string $line) => str_starts_with($line, 'request ')));
+    }
+
+    /**
+     * @return list<string> The requests the servers turned down, for being outside the path they were started with.
+     */
+    private function refused(): array
+    {
+        return array_values(array_filter(explode("\n", trim(file_get_contents($this->log))), fn (string $line) => str_starts_with($line, 'refused ')));
     }
 }

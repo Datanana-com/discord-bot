@@ -11,6 +11,7 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use React\EventLoop\Loop;
 use React\Promise\Deferred;
+use Tests\Wav;
 
 use function React\Async\await;
 
@@ -29,7 +30,7 @@ final class TranscriberTest extends TestCase
 
         $this->servers = [];
 
-        foreach (['FAKE_WHISPER_LOG', 'FAKE_WHISPER_SERVER_LOG', 'FAKE_WHISPER_SERVER_LOAD', 'FAKE_WHISPER_SERVER_STATUS'] as $name) {
+        foreach (['FAKE_WHISPER_LOG', 'FAKE_WHISPER_SERVER_LOG', 'FAKE_WHISPER_SERVER_LOAD', 'FAKE_WHISPER_SERVER_STATUS', 'FAKE_WHISPER_SERVER_DIE_AT', 'FAKE_ENV'] as $name) {
             putenv($name);
         }
 
@@ -100,15 +101,15 @@ final class TranscriberTest extends TestCase
         $this->assertSame([], $said, 'The server was not asked.');
 
         file_put_contents("{$this->folder}/cli.log", 'untouched');
-        await($transcriber->transcribe($this->wav(), seconds: Transcriber::SERVER_MAX_SECONDS, log: $log));
+        await($transcriber->transcribe($this->wav(), seconds: 30.0, log: $log));
 
         $this->assertSame('untouched', file_get_contents("{$this->folder}/cli.log"), 'As long as an utterance can be, it is the server\'s.');
     }
 
     public function testWhisperCliTranscribesWhenTheServerFails(): void
     {
-        putenv('FAKE_WHISPER_SERVER_STATUS=500');
         $transcriber = $this->transcriberWithServer();
+        $this->serverSays("FAKE_WHISPER_SERVER_STATUS='500'");
         $said = [];
 
         $text = await($transcriber->transcribe($this->wav(), log: function (string $level, string $message) use (&$said) {
@@ -121,10 +122,27 @@ final class TranscriberTest extends TestCase
         $this->assertSame(['warning', 'The whisper server could not transcribe, whisper-cli does: HTTP status code 500 (Fake)'], $said[0], 'Without what anyone said: the logs never hold that.');
     }
 
+    public function testWhisperCliTranscribesWhenTheServerDoesNotAnswer(): void
+    {
+        // The warm-up is its first request, and it dies on the next, without a word.
+        putenv('FAKE_WHISPER_SERVER_DIE_AT=2');
+        $transcriber = $this->transcriberWithServer();
+        $said = [];
+
+        $text = await($transcriber->transcribe($this->wav(), log: function (string $level, string $message) use (&$said) {
+            $said[] = [$level, $message];
+        }));
+
+        $this->assertSame('Hey Claude, what time is it?', $text, 'Not a server that is there, and says no: one that is gone.');
+        $this->assertStringContainsString('arg=--file', file_get_contents("{$this->folder}/cli.log"));
+        $this->assertCount(1, $said);
+        $this->assertStringStartsWith('The whisper server could not transcribe, whisper-cli does: ', $said[0][1]);
+    }
+
     public function testWhisperCliTranscribesWhenTheServerFailsWithoutAnyoneToTell(): void
     {
-        putenv('FAKE_WHISPER_SERVER_STATUS=500');
         $transcriber = $this->transcriberWithServer();
+        $this->serverSays("FAKE_WHISPER_SERVER_STATUS='500'");
 
         $this->assertSame('Hey Claude, what time is it?', await($transcriber->transcribe($this->wav())));
     }
@@ -277,6 +295,14 @@ final class TranscriberTest extends TestCase
         yield 'speech with annotations' => [' [laughs] That is funny (coughs) indeed.', 'That is funny indeed.'];
     }
 
+    /**
+     * What the stand-in of the server reads again with each request: it has answered the warm-up, and says it from now on.
+     */
+    private function serverSays(string $setting): void
+    {
+        file_put_contents("{$this->folder}/fake.env", $setting . PHP_EOL);
+    }
+
     private function wav(): string
     {
         return "{$this->folder}/utterance.wav";
@@ -291,9 +317,10 @@ final class TranscriberTest extends TestCase
         $this->folder = sys_get_temp_dir() . '/transcriber-' . uniqid();
         mkdir($this->folder);
         file_put_contents("{$this->folder}/cli.log", 'untouched');
-        file_put_contents($this->wav(), 'RIFF-pretend-this-is-a-wav-file');
+        file_put_contents($this->wav(), Wav::silence(0.1));
         putenv("FAKE_WHISPER_LOG={$this->folder}/cli.log");
         putenv("FAKE_WHISPER_SERVER_LOG={$this->folder}/server.log");
+        putenv("FAKE_ENV={$this->folder}/fake.env");
 
         $server = new WhisperServer(__DIR__ . '/../../Fixtures/fake-whisper-server', '/models/ggml-base.bin');
         $this->servers[] = $server;

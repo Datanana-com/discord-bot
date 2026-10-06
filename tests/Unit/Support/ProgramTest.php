@@ -60,6 +60,21 @@ final class ProgramTest extends TestCase
         $this->assertTrue($program->isRunning(), 'It is the same program that answered each time.');
     }
 
+    public function testKnowsItsProcessWhileItRuns(): void
+    {
+        $program = $this->open(['sleep', '30']);
+
+        $pid = $program->pid();
+        $this->assertIsInt($pid);
+        $this->assertTrue(posix_kill($pid, 0), 'It is the process of the program itself, not of a shell around it.');
+        $this->assertStringContainsString('sleep', (string) file_get_contents("/proc/{$pid}/cmdline"));
+
+        $program->stop();
+        $this->ended($program);
+
+        $this->assertNull($program->pid());
+    }
+
     public function testEndsOnceItsStdinIsClosed(): void
     {
         $program = $this->open(['cat']);

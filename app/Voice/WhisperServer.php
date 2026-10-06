@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Voice;
 
+use App\Support\ListeningPort;
 use App\Support\Program;
 use App\Support\Shell;
 use Closure;
@@ -22,11 +23,16 @@ use function React\Promise\resolve;
  * whisper.cpp's whisper-server, kept running for as long as there is a call, so that what someone says is
  * transcribed by a process that has its model loaded already. whisper-cli loads the model and starts the GPU
  * for every utterance, which takes about as long as transcribing it: on a short question, 0.5 to 0.9 s against
- * 0.1 to 0.3 s with a server that is warm.
+ * 0.1 to 0.3 s with a server that is warm, on a CUDA build. A build without a GPU loads its model faster, and gains less.
  *
  * A call takes the server with acquire() and gives it back with release(). The server is the same for every
  * call, and ends with the last one. It is not an answer to everything: while it loads its model, after it failed, and for
  * recordings too long to make the calls wait for them, whisper-cli transcribes, see {@see Transcriber}.
+ *
+ * The server has no password, so it takes care not to be found: it chooses its own port, on 127.0.0.1, which the bot
+ * learns from the system, and answers only under a path that is chosen at random each time it starts, which a web page can't guess.
+ * A program of any user on the same machine can read that path from the list of processes, and use the server: on a
+ * machine shared with people who are not trusted, leave it to whisper-cli.
  *
  * @see https://github.com/ggml-org/whisper.cpp/tree/master/examples/server
  */
@@ -35,7 +41,7 @@ final class WhisperServer
     /** How long a request may take, for each second of audio, besides the minimum: the server does a second of speech in about 20 ms. */
     public const float SECONDS_PER_SECOND_OF_AUDIO = 0.2;
 
-    /** Seconds between asking a server that is loading its model whether it listens yet. */
+    /** Seconds between looking for the port of a server that is loading its model. */
     private const float POLL_SECONDS = 0.1;
 
     /** @var array<string, self> The servers there are, by what they are started with: see {@see fromEnv()}. */
@@ -46,13 +52,16 @@ final class WhisperServer
 
     private int $port = 0;
 
+    /** What every path of the server starts with: random, and different for each server that is started. */
+    private string $path = '';
+
     /** Whether the server has loaded its model and answered a first request: only then does it get utterances. */
     private bool $ready = false;
 
     /** How many calls hold it: it runs while there is one. */
     private int $users = 0;
 
-    /** Asks whether a server that is loading listens yet. */
+    /** Looks for the port of a server that is loading. */
     private ?TimerInterface $poll = null;
 
     /** Starts it again, after it ended by itself. */
@@ -92,7 +101,9 @@ final class WhisperServer
     {
         $cli = env('WHISPER_BINARY', 'whisper-cli');
         $beside = (str_contains($cli, '/') ? dirname($cli) . '/' : '') . 'whisper-server';
-        $binary = env('WHISPER_SERVER_BINARY') ?? (is_executable($beside) ? $beside : '');
+        $set = env('WHISPER_SERVER_BINARY');
+        // env() makes "false", "true" and "null" in .env what they say. False is as empty as empty is, the others are not a path.
+        $binary = is_string($set) ? $set : ($set === false || ! is_executable($beside) ? '' : $beside);
 
         if ($binary === '') {
             return null;
@@ -116,7 +127,7 @@ final class WhisperServer
         $this->users++;
 
         if ($this->program === null) {
-            $this->launch();
+            $this->start();
         }
     }
 
@@ -135,6 +146,8 @@ final class WhisperServer
         $program = $this->program;
         $this->detach();
         $program?->stop();
+        // No call is left to tell, and the log of the last one would keep it from being forgotten.
+        $this->log = null;
 
         return $program === null ? resolve(null) : $program->done()->catch(static fn () => null);
     }
@@ -187,36 +200,14 @@ final class WhisperServer
     }
 
     /**
-     * Starts the server, or says why that can't be done: calls go on without it.
-     */
-    private function launch(): void
-    {
-        try {
-            $this->start();
-        } catch (Throwable $e) {
-            $this->say('warning', 'Could not start the whisper server: ' . $e->getMessage());
-        }
-    }
-
-    /**
-     * Starts the server: it listens on a port of its own, once its model is loaded.
+     * Starts the server: it chooses a port, once its model is loaded, and answers under a path of its own.
      */
     private function start(): void
     {
         $this->cancelRestart();
-
-        // Another server on a fixed port could be listening there already: a bot that was killed leaves its server running, and the
-        // kernel would split the requests between the two.
-        $probe = @stream_socket_server('tcp://127.0.0.1:0', $code, $message);
-
-        if ($probe === false) {
-            throw new RuntimeException("No port to listen on: {$message}");
-        }
-
-        $this->port = (int) substr((string) strrchr((string) stream_socket_get_name($probe, false), ':'), 1);
-        fclose($probe);
-
         $this->ready = false;
+        $this->port = 0;
+        $this->path = '/' . bin2hex(random_bytes(16));
         $startedAt = microtime(true);
         // With the bot gone, the server goes: setpriv has Linux end it with the process that started it.
         $this->program = $program = Shell::open([
@@ -224,7 +215,9 @@ final class WhisperServer
             $this->binary,
             '--model', $this->model,
             '--host', '127.0.0.1',
-            '--port', (string) $this->port,
+            // Port 0 is whatever port is free when the server binds it, which nothing else can be quicker to take than the server itself.
+            '--port', '0',
+            '--request-path', $this->path,
             '--no-timestamps',
             // As whisper-cli decodes: its beam search, not the server's greedy default, which wrote other words in a fifth of the test utterances.
             '--beam-size', '5',
@@ -238,11 +231,19 @@ final class WhisperServer
     }
 
     /**
-     * Asks the server whether it listens, again and again, until it does: its port only opens once the model is loaded.
+     * Looks for the port the server chose, again and again, until it listens on one: that is once its model is loaded.
+     * The port is the one the system says belongs to the server's process, so that nothing else that listens somewhere
+     * can be taken for it.
      */
     private function waitUntilListening(Program $program, float $startedAt): void
     {
         $this->poll = null;
+        $pid = $program->pid();
+
+        // It ended, and its done() says why.
+        if ($pid === null) {
+            return;
+        }
 
         if (microtime(true) - $startedAt > $this->startupSeconds) {
             $this->fault($program, "it did not start within {$this->startupSeconds}s");
@@ -250,33 +251,34 @@ final class WhisperServer
             return;
         }
 
+        $port = ListeningPort::of($pid);
+
+        if ($port === null) {
+            $this->poll = Loop::addTimer(self::POLL_SECONDS, fn () => $this->waitUntilListening($program, $startedAt));
+
+            return;
+        }
+
+        $this->port = $port;
         $this->browser->withTimeout(2.0)->get($this->url('/health'))->then(
             fn () => $this->warmUp($program, $startedAt),
-            function () use ($program, $startedAt) {
-                if ($this->program === $program) {
-                    $this->poll = Loop::addTimer(self::POLL_SECONDS, fn () => $this->waitUntilListening($program, $startedAt));
-                }
-            },
+            fn (Throwable $e) => $this->fault($program, 'it did not say that it is healthy: ' . $e->getMessage()),
         );
     }
 
     /**
      * Gives the server a second of silence to transcribe: its first request takes longer than the ones after it, and
-     * it must not be someone's question.
+     * it must not be someone's question. The server is ready once it has answered.
      */
     private function warmUp(Program $program, float $startedAt): void
     {
-        $this->post(['language' => 'en', 'response_format' => 'json'], self::silence(), 30.0)
-            // It answers or it doesn't: its first real request says which.
-            ->then(null, static fn () => null)
-            ->then(function () use ($program, $startedAt) {
-                if ($this->program !== $program) {
-                    return;
-                }
-
+        $this->post(['language' => 'en', 'response_format' => 'json'], self::silence(), 30.0)->then(
+            function () use ($startedAt) {
                 $this->ready = true;
                 $this->say('info', 'Whisper server ready', ['ms' => (int) round((microtime(true) - $startedAt) * 1000), 'port' => $this->port]);
-            });
+            },
+            fn (Throwable $e) => $this->fault($program, 'its first request failed: ' . $e->getMessage()),
+        );
     }
 
     /**
@@ -299,11 +301,10 @@ final class WhisperServer
             // A call that takes the server meanwhile starts it, and one that gives it back ends the wait.
             $this->restart = Loop::addTimer($this->restartAfter, function () {
                 $this->restart = null;
-                $this->launch();
+                $this->start();
             });
         }
     }
-
 
     /**
      * Lets go of the server's process, and of what waits for it.
@@ -348,7 +349,7 @@ final class WhisperServer
 
     private function url(string $path): string
     {
-        return "http://127.0.0.1:{$this->port}{$path}";
+        return "http://127.0.0.1:{$this->port}{$this->path}{$path}";
     }
 
     /**

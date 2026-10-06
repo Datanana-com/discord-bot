@@ -109,7 +109,9 @@ final class VoiceBenchTest extends VoiceTestCase
 
         // A whisper server transcribes once it has loaded its model, which a person talking to the bot takes longer to start than this does.
         if (Transcriber::fromEnv()->server !== null) {
-            $this->waitUntil(fn () => $this->logged('Whisper server ready') !== [], 'the whisper server to be ready', 30.0);
+            // Or it failed, which the log says: not a reason to wait for a minute.
+            $this->waitUntil(fn () => $this->logged('Whisper server ready') !== [] || $this->loggedProblems() !== [], 'the whisper server to be ready', 70.0);
+            $this->assertSame([], $this->loggedProblems(), 'The whisper server started.');
         }
 
         $frames = intdiv(strlen($this->question), self::FRAME);
@@ -257,7 +259,8 @@ final class VoiceBenchTest extends VoiceTestCase
 
         foreach ($this->settings + ($baseline['settings'] ?? []) as $name => $value) {
             $now = $this->settings[$name] ?? null;
-            $was = $baseline['settings'][$name] ?? null;
+            // A baseline from before there was a server has no setting for it, and used whisper-cli alone.
+            $was = $baseline['settings'][$name] ?? ($name === 'WHISPER_SERVER' ? 'none' : null);
             $lines[] = '  ' . ($now === null ? "{$name} is not set" : "{$name}={$now}")
                 . ($baseline !== null && $was !== $now ? '   (baseline: ' . ($was ?? 'not set') . ')' : '');
         }
