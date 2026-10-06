@@ -1401,6 +1401,8 @@ final class VoiceSession
         );
         // Kept to stop it, for as long as it isn't over.
         $this->lookingUp[spl_object_id($lookup)] = [$lookup, $wanted];
+        // Something may have made it unwanted while Claude was writing what handed it off.
+        $this->dropUnwantedLookups();
 
         $lookedUp = $lookup->then(
             function (?string $answer) use ($wanted, $alone, $forgotten, $userId, $name, $question) {

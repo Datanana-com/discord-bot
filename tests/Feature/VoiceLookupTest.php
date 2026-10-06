@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\EventAbstract;
 use App\Events\VoiceStateUpdate;
 use App\Settings\UserSettings;
 use App\Voice\VoiceSession;
@@ -712,6 +713,99 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->assertSame([], $this->logged('Looked something up'));
         $this->assertCount(2, $this->logged('Dropped what was handed off to be looked up'));
         $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testStopsWhatWasHandedOffFromAForgottenMemoryAtOnceEvenWhenItWaitsForAnotherLookup(): void
+    {
+        $this->memory()->save('555', '- Lives in Lisbon.');
+        $this->inCall('555', '666');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        // Bob's lookup is running, so what Alice hands off waits for it.
+        $this->ask($vc, '666', self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 1, "Bob's lookup to start");
+        $this->setProcessEnv(['FAKE_CLAUDE_PAUSE' => '10']);
+        $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => count($this->played) === 2, "Alice's sentence to be spoken");
+
+        // She uses /forget while Claude is still writing the answer that hands it off.
+        VoiceSession::forget('555');
+        touch($this->claudeResume);
+
+        // It is stopped as soon as it is handed off, not left to wait for its turn, and Bob's goes on.
+        $this->waitUntil(fn () => $this->logged('Stopped looking something up') !== [], 'the task to be stopped');
+        $this->assertCount(1, $this->lookups());
+        $this->assertSame([], $this->logged('Looked something up'));
+        $this->finishLookups($session);
+        $this->assertCount(1, $this->lookups(), "Alice's task never started.");
+    }
+
+    public function testStopsWhatIsLookedUpWhenTheMemoryAGroupSharedOrTheGroupHasIsForgotten(): void
+    {
+        // Alice's answer is made with her group's memory with Bob, and with what Carol shared.
+        $this->memory()->save(['555', '666'], '- They ship the beta on Friday.');
+        $this->memory()->save('777', '- Carol is learning to sail.');
+        $this->inCall('555', '666');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $session->share('777');
+        $posted = count($this->sent);
+
+        foreach ([1 => ['555', '666'], 2 => '777'] as $number => $forgotten) {
+            $this->ask($vc, '555', self::QUESTION);
+            $this->waitUntil(fn () => count($this->lookups()) === $number, "lookup {$number} to start");
+            $pid = $this->lookups()[$number - 1]['pid'];
+            $this->assertTrue(posix_kill($pid, 0));
+
+            // Only that memory was forgotten, and the task may be made of it.
+            VoiceSession::forget($forgotten);
+
+            $this->waitUntil(fn () => ! posix_kill($pid, 0), "Claude Code to be stopped for lookup {$number}");
+        }
+
+        $this->assertSame([], $this->logged('Looked something up'));
+        $this->assertCount($posted + 2, $this->sent, 'Nothing was posted but the two answers that handed it off.');
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testKeepsLookingSomethingUpForTheGuildOfTheCallOnly(): void
+    {
+        $this->memory()->save('555', '- Is building a game called Bananas.');
+        (new UserSettings($this->discord->getLogger()))->save('555', ['personal_memory_in_calls' => UserSettings::AFTER_SHARE]);
+        $this->inCall('555');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 1, 'the lookup to start');
+        $pid = $this->lookups()[0]['pid'];
+
+        // Bob joined, so the task is no longer wanted, but what happened in another server says nothing of this call.
+        $this->joins('666');
+        VoiceSession::peopleMoved('999');
+        $this->runFor(0.3);
+        $this->assertTrue(posix_kill($pid, 0), 'It is still being looked up.');
+
+        VoiceSession::peopleMoved(self::GUILD_ID);
+        $this->waitUntil(fn () => ! posix_kill($pid, 0), 'Claude Code to be stopped');
+    }
+
+    public function testKeepsNoTrackOfATaskOnceItIsOver(): void
+    {
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1, 'the lookup to start');
+        $lookingUp = new ReflectionProperty(VoiceSession::class, 'lookingUp');
+        $this->assertCount(1, $lookingUp->getValue($session));
+
+        $this->finishLookups($session);
+
+        $this->assertSame([], $lookingUp->getValue($session));
+    }
+
+    public function testTheEventThatTellsWhoJoinedRunsBeforeTheOneThatCanFail(): void
+    {
+        // The event's methods run in this order, and the ones after a method that fails are skipped.
+        $methods = array_values(array_diff(get_class_methods(VoiceStateUpdate::class), get_class_methods(EventAbstract::class)));
+
+        $this->assertSame(['dropLookups', 'followMeetings'], $methods);
     }
 
     public function testKeepsLookingSomethingUpWhenAMemoryItWasNotMadeFromIsForgotten(): void

@@ -119,6 +119,20 @@ final class LookupSlotsTest extends TestCase
         $this->assertNull($fifth);
     }
 
+    public function testNeverLetsANewcomerJumpTheLineWhenTheLimitWasRaised(): void
+    {
+        $this->limit = 1;
+        $slots = $this->slots();
+        $this->take($slots, 'first');
+        $this->take($slots, 'second');
+
+        // Room for two more, but nobody gave a slot back: the one that waits starts first, and the newcomer after it.
+        $this->limit = 3;
+        $this->take($slots, 'third');
+
+        $this->assertSame(['first', 'second', 'third'], $this->started);
+    }
+
     public function testSharesTheSlotsEveryCallAndChatUsesAndStartsFromTheDefaultOfTwo(): void
     {
         $this->assertSame(LookupSlots::shared(), LookupSlots::shared());

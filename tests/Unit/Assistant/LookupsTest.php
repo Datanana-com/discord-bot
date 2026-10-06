@@ -9,6 +9,7 @@ use App\Assistant\Lookups;
 use App\Voice\Claude;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use React\Promise\Deferred;
 use React\Promise\PromiseInterface;
 use RuntimeException;
 use Tests\FakesClaudeOutput;
@@ -432,6 +433,14 @@ final class LookupsTest extends TestCase
         $call = $this->calls()[0];
         $this->assertNotContains('--advisor', $call['args']);
         $this->assertStringNotContainsStringIgnoringCase('advisor', $call['system']);
+        // Everything else is as for a hard one: web search is its only tool, with the same limits.
+        $this->assertSame('sonnet', $this->option($call['args'], '--model'));
+        $this->assertSame('WebSearch', $this->option($call['args'], '--tools'));
+        $this->assertSame('WebSearch', $this->option($call['args'], '--allowedTools'));
+        $this->assertSame('', $this->option($call['args'], '--setting-sources'));
+        $this->assertContains('--strict-mcp-config', $call['args']);
+        $this->assertSame(sys_get_temp_dir() . '/discord-bot-claude', $call['cwd']);
+        $this->assertSame('unset', $call['api_key']);
         $this->assertSame(['user' => '555', 'model' => 'sonnet', 'advisor' => null, 'characters' => mb_strlen(self::TASK)], $this->logged[0][2]);
 
         // The same Claude looks up a hard one next, with the advisor in env.
@@ -497,7 +506,8 @@ final class LookupsTest extends TestCase
         $this->waitForCalls(1);
         $lookup['second']->cancel();
 
-        $this->assertNull($found['second'], 'It is over at once.');
+        $this->assertArrayHasKey('second', $found, 'It is over at once, though it waits behind the first.');
+        $this->assertNull($found['second']);
         $this->assertSame(['first'], $asked);
 
         touch($this->go);
@@ -539,6 +549,43 @@ final class LookupsTest extends TestCase
 
         array_map(fn ($task) => $task->cancel(), $lookup);
         $this->waitUntil(fn () => ! $lookups->full());
+
+        // Whatever was dropped is counted once: with nothing left over, one is looked up and three can wait.
+        $next = [];
+
+        foreach (range(1, 3) as $task) {
+            $next[] = $lookups->lookUp(self::TASK, '555', self::HEADING, fn () => self::SAID);
+        }
+
+        $this->assertFalse($lookups->full(), 'Three tasks: one looked up, two waiting.');
+        $next[] = $lookups->lookUp(self::TASK, '555', self::HEADING, fn () => self::SAID);
+        $this->assertTrue($lookups->full(), 'Four tasks: one looked up, three waiting.');
+
+        array_map(fn ($task) => $task->cancel(), $next);
+    }
+
+    public function testStopsATaskWhileItsConversationIsBeingFetched(): void
+    {
+        $_ENV['CLAUDE_LOOKUP_AT_ONCE'] = '1';
+        $lookups = $this->lookups();
+        $conversation = new Deferred();
+        $found = 'nothing yet';
+        $lookup = $lookups->lookUp(self::TASK, '555', self::HEADING, fn () => $conversation->promise());
+        $lookup->then(function (?string $answer) use (&$found) {
+            $found = $answer;
+        });
+
+        // It can't be told to stop fetching, but it is over for whoever waits for it.
+        $lookup->cancel();
+        $this->assertNull($found);
+
+        // Once the conversation is there, Claude is not asked, and the slot is given back to the next one.
+        $next = $this->lookups()->lookUp(self::TASK, '666', self::HEADING, fn () => self::SAID);
+        $conversation->resolve(self::SAID);
+
+        $this->assertSame(self::FOUND, await($next));
+        $this->assertCount(1, $this->calls(), 'Only the next one was looked up.');
+        $this->assertSame([], $this->timers->pending());
     }
 
     public function testStopsATaskThatWaitsForASlotWithoutStartingIt(): void

@@ -10,6 +10,7 @@ use Discord\Builders\MessageBuilder;
 use Discord\Parts\Channel\Channel;
 use Discord\Parts\Channel\Message;
 use React\EventLoop\LoopInterface;
+use React\Promise\Deferred;
 use React\Promise\PromiseInterface;
 use ReflectionProperty;
 use Tests\Fixtures\ManualTimers;
@@ -48,6 +49,9 @@ trait ChatsInDirectMessages
 
     /** When set, the DM's messages can't be fetched. */
     protected ?Throwable $historyError = null;
+
+    /** When set, the DM's messages are only there once this resolves, for the lookup that gets the last 100. */
+    protected ?Deferred $lookupHistoryHeld = null;
 
     /** @var array<string, Channel> */
     private array $dmChannels = [];
@@ -155,9 +159,11 @@ trait ChatsInDirectMessages
             $this->events[] = "history {$userId}";
             $this->historyOptions[] = $options;
 
-            return $this->historyError === null
+            $history = $this->historyError === null
                 ? resolve(array_reverse(array_slice($this->dms[$userId], -$options['limit'])))
                 : reject($this->historyError);
+
+            return $options['limit'] === 100 && $this->lookupHistoryHeld !== null ? $this->lookupHistoryHeld->promise()->then(fn () => $history) : $history;
         });
         $channel->method('sendMessage')->willReturnCallback(function (MessageBuilder $message) use ($userId): PromiseInterface {
             $this->assertSame(['parse' => []], $message->jsonSerialize()['allowed_mentions'] ?? null, 'Mentions are disabled.');

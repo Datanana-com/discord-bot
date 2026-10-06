@@ -216,11 +216,9 @@ final class Lookups
                     return null;
                 }
 
-                // Not arrow functions: $dropped and $stop change while the conversation is fetched.
+                // Not an arrow function: $dropped and $stop change while the conversation is fetched.
                 return resolve(null)
-                    ->then(function () use ($conversation, &$dropped) {
-                        return $dropped ? null : $conversation();
-                    })
+                    ->then($conversation)
                     ->then(function (?string $said) use ($task, $userId, $heading, $hard, &$dropped, &$stop) {
                         return $said === null || $dropped ? null : $this->ask($task, $userId, $heading, $said, $hard, $stop);
                     })

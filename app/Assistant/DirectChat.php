@@ -270,12 +270,7 @@ final class DirectChat
         $name = $message->author->displayname;
         $typing = null;
 
-        $lookup = $this->lookups->lookUp($task, $this->userId, "The last messages of {$name}'s chat with Claude, in direct messages", function () use ($channel, $name, $forgotten, &$typing) {
-            // Their turn came after they asked to be forgotten.
-            if ($forgotten !== $this->forgotten) {
-                return null;
-            }
-
+        $lookup = $this->lookups->lookUp($task, $this->userId, "The last messages of {$name}'s chat with Claude, in direct messages", function () use ($channel, $name, &$typing) {
             // The bot shows it is typing while it looks something up, as it does while Claude answers.
             $this->showTyping($channel);
             $typing = $this->discord->getLoop()->addPeriodicTimer(self::TYPING_INTERVAL, fn () => $this->showTyping($channel));
@@ -287,9 +282,9 @@ final class DirectChat
         $this->lookingUp[spl_object_id($lookup)] = $lookup;
 
         $lookup->then(
-            function (?string $answer) use ($channel, $name, $forgotten) {
-                // Nothing to send: it was dropped, or what it was made of was forgotten while it was looked up.
-                if ($answer === null || $forgotten !== $this->forgotten) {
+            function (?string $answer) use ($channel, $name) {
+                // Nothing to send: it was dropped, as it is when they use /forget.
+                if ($answer === null) {
                     $this->log('debug', 'Dropped what was handed off to be looked up');
 
                     return null;
@@ -303,7 +298,7 @@ final class DirectChat
                 // What was found has links from the web: Discord shows no preview of each.
                 return $this->send($channel, $answer, suppressEmbeds: true);
             },
-            fn (Throwable $e) => $forgotten === $this->forgotten ? $this->send($channel, Lookups::FAILED . " ({$e->getMessage()})") : null,
+            fn (Throwable $e) => $this->send($channel, Lookups::FAILED . " ({$e->getMessage()})"),
         )->finally(function () use ($lookup, &$typing) {
             unset($this->lookingUp[spl_object_id($lookup)]);
 

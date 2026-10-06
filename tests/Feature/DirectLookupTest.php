@@ -7,6 +7,7 @@ namespace Tests\Feature;
 use App\Assistant\DirectChat;
 use Discord\Parts\Channel\Message;
 use React\Promise\Deferred;
+use ReflectionProperty;
 use RuntimeException;
 use Tests\Fixtures\FakeCdn;
 
@@ -218,6 +219,39 @@ final class DirectLookupTest extends VoiceTestCase
         touch($this->go);
         $this->waitUntil(fn () => count($this->sent) === 4, 'what was looked up');
         $this->assertSame(self::FOUND, $this->sent[3]);
+    }
+
+    public function testStopsATaskWhoseChatIsBeingFetchedWhenThePersonUsesForget(): void
+    {
+        $this->lookupHistoryHeld = new Deferred();
+        $this->chat(self::QUESTION);
+        $this->waitUntil(fn () => count($this->historyOptions) === 2, 'the lookup to ask for the chat');
+        $this->assertContains(8.0, $this->timers->pending(), 'The bot shows it is typing.');
+
+        DirectChat::forget('555');
+
+        // It is over at once for the person, and Claude is never asked once the chat is there.
+        $this->assertNotContains(8.0, $this->timers->pending(), 'The bot stops showing it is typing.');
+        $this->lookupHistoryHeld->resolve(null);
+        $this->runFor(0.4);
+        $this->assertSame([], $this->lookups());
+        $this->assertSame([self::LOOKING], $this->sent);
+        $this->assertCount(1, $this->logged('Dropped what was handed off to be looked up'));
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testKeepsNoTrackOfATaskOnceItIsOver(): void
+    {
+        $this->chat(self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1, 'the lookup to start');
+        $chat = (new ReflectionProperty(DirectChat::class, 'chats'))->getValue()['555'];
+        $lookingUp = new ReflectionProperty(DirectChat::class, 'lookingUp');
+        $this->assertCount(1, $lookingUp->getValue($chat));
+
+        touch($this->go);
+        $this->waitUntil(fn () => count($this->sent) === 2, 'what was looked up');
+
+        $this->assertSame([], $lookingUp->getValue($chat));
     }
 
     public function testDropsWhatWasHandedOffWhileThePersonUsedForgetBeforeTheAnswerWasSent(): void

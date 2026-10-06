@@ -8,8 +8,6 @@ use Closure;
 use React\Promise\Deferred;
 use React\Promise\PromiseInterface;
 
-use function React\Promise\resolve;
-
 /**
  * How many tasks are looked up at once, in every call and every chat together: see {@see Lookups}.
  *
@@ -68,17 +66,24 @@ final class LookupSlots
      */
     public function acquire(): PromiseInterface
     {
-        if ($this->waiting === [] && $this->taken < $this->limit()) {
-            return resolve($this->take());
-        }
-
         $turn = new Deferred(function () use (&$turn) {
             $this->waiting = array_values(array_filter($this->waiting, static fn (Deferred $waiting) => $waiting !== $turn));
             $turn->resolve(null);
         });
         $this->waiting[] = $turn;
+        $this->start();
 
         return $turn->promise();
+    }
+
+    /**
+     * Gives a slot to the ones waiting, in the order they asked, for as long as there are free ones.
+     */
+    private function start(): void
+    {
+        while ($this->waiting !== [] && $this->taken < $this->limit()) {
+            array_shift($this->waiting)->resolve($this->take());
+        }
     }
 
     /**
@@ -105,10 +110,7 @@ final class LookupSlots
             $held = false;
             $this->taken--;
 
-            // The next ones wait for a slot each, in the order they asked.
-            while ($this->waiting !== [] && $this->taken < $this->limit()) {
-                array_shift($this->waiting)->resolve($this->take());
-            }
+            $this->start();
         };
     }
 }
