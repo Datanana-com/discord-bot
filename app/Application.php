@@ -424,6 +424,8 @@ final class Application
                         fn (\Throwable $e) => $this->log->error("Could not save command {$commandName}: {$e->getMessage()}"),
                     );
                 }
+
+                $this->handleLeftoverCommands($registered, array_map(self::describe(...), array_values($commands)));
             },
             fn (\Throwable $e) => $this->log->error('Could not fetch the registered commands: ' . $e->getMessage()),
         );
@@ -459,6 +461,57 @@ final class Application
         return $interaction->isResponded()
             ? $interaction->updateOriginalResponse($reply)
             : $interaction->respondWithMessage($reply, ephemeral: true);
+    }
+
+    /**
+     * Names the global commands Discord has and the bot has no class for, and removes them when BOT_REMOVE_OLD_COMMANDS is set.
+     *
+     * Only the bot's own checkout knows what its commands are: two checkouts with different commands under one
+     * Discord application would remove each other's, so nothing is removed unless asked for.
+     *
+     * @param iterable<Command> $registered The commands Discord has.
+     * @param list<string> $known How the commands the bot has a class for are described: Discord tells commands apart by name and type.
+     */
+    private function handleLeftoverCommands(iterable $registered, array $known): void
+    {
+        $leftovers = [];
+
+        foreach ($registered as $command) {
+            if ($command !== null && ! in_array(self::describe($command), $known, true)) {
+                $leftovers[] = $command;
+            }
+        }
+
+        if ($leftovers === []) {
+            return;
+        }
+
+        usort($leftovers, fn (Command $a, Command $b) => self::describe($a) <=> self::describe($b));
+        $names = implode(', ', array_map(self::describe(...), $leftovers));
+        $remove = filter_var(env('BOT_REMOVE_OLD_COMMANDS', false), FILTER_VALIDATE_BOOLEAN);
+
+        $this->log->warning("Discord has global commands the bot has no class for: {$names}." . ($remove ? '' : ' Set BOT_REMOVE_OLD_COMMANDS to remove them.'));
+
+        if (! $remove) {
+            return;
+        }
+
+        foreach ($leftovers as $command) {
+            $this->discord->application->commands->delete($command)->then(
+                fn () => $this->log->info("Command " . self::describe($command) . " has been removed."),
+                fn (\Throwable $e) => $this->log->error("Could not remove command " . self::describe($command) . ": {$e->getMessage()}"),
+            );
+        }
+    }
+
+    /**
+     * A command by its name, and its type when it is not a slash command: Discord allows the same name for each type.
+     */
+    private static function describe(Command $command): string
+    {
+        $type = $command->type ?? Command::CHAT_INPUT;
+
+        return $type === Command::CHAT_INPUT ? $command->name : "{$command->name} (type {$type})";
     }
 
     /**

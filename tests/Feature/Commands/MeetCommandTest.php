@@ -68,7 +68,7 @@ final class MeetCommandTest extends CommandTestCase
     /** The names people have on Discord. The bot only knows what Bob goes by in the server: Spartan. */
     private const array USERS = ['555' => 'Alice', '666' => 'Bob', '777' => 'Carol', '888' => 'Dave', '999' => 'Claude', '1234' => 'Jukebox'];
 
-    private const string RECORDING = '🔴 Recording the meeting in <#200>. Say "claude" to talk to me, and "stop claude" when you\'re done. It ends when everyone has left, and its channel is deleted. Use /optout if you don\'t want to be recorded. I remember each group\'s calls: see what I remember with /memory, and delete it with /forget.';
+    private const string RECORDING = '🔴 Recording the meeting in <#200>. Say "claude" to talk to me, and "stop claude" when you\'re done. Say "disconnect claude" to make me leave. It ends when everyone has left, and its channel is deleted. Use /optout if you don\'t want to be recorded. I remember each group\'s calls: see what I remember with /memory, and delete it with /forget.';
 
     private const string MISSING_PERMISSION = 'I can\'t make the meeting\'s channel: I need the Manage Channels permission, besides View Channels, Connect and Speak. Ask a server admin to give it to me.';
 
@@ -681,6 +681,34 @@ final class MeetCommandTest extends CommandTestCase
         // No meeting is left to end.
         Meeting::endAll();
         $this->assertSame([self::MEETING], $this->channels->deleted);
+    }
+
+    public function testKeepsTheChannelUntilEveryoneLeftWhenTheRecordingIsEndedByVoice(): void
+    {
+        $this->joinsWith(resolve($vc = $this->voiceClient($this->channels->channel, connected: true)));
+        $this->meet(['666']);
+        $session = VoiceSession::forGuild(self::GUILD_ID);
+        $this->joinsVoice('666');
+
+        // As with /stop: the recording ends, and the channel stays for the people in it.
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => 'Disconnect Claude.']);
+        $this->speak($vc, ssrc: 2, userId: '666', seconds: 1.0);
+        $this->waitUntil(function () {
+            // The timer that ends what Bob said is the bot's, and only runs out here.
+            $this->timers->elapse(0.05);
+
+            return VoiceSession::forGuild(self::GUILD_ID) === null;
+        }, 'the call to end');
+
+        $this->assertSame([], $this->channels->deleted, 'Bob is still in the channel.');
+        $this->assertCount(1, $this->logged('Ended by the leave phrase'));
+
+        $this->leavesVoice('666');
+
+        $this->assertSame([self::MEETING], $this->channels->deleted);
+        $this->assertCount(1, $this->logged('Meeting ended'));
+        await($session->stop());
+        $this->assertSame([], $this->loggedProblems());
     }
 
     public function testLogsWhenTheChannelCannotBeDeleted(): void

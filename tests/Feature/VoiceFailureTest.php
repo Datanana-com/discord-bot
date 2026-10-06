@@ -21,6 +21,8 @@ final class VoiceFailureTest extends VoiceTestCase
 
     private const string NOT_LOGGED_IN = "Sorry, I couldn't get an answer from Claude. (Claude Code: Not logged in · Please run /login)";
 
+    private const string NOT_HEARD = "Sorry, I couldn't make out what was said. The bot's logs say why.";
+
     /** When set, the bot's caches fail with this when they are asked who someone is. */
     public ?Throwable $noNames = null;
 
@@ -32,15 +34,14 @@ final class VoiceFailureTest extends VoiceTestCase
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
         $this->waitUntil(fn () => $this->played !== [], 'the call to be told');
 
-        // Why is posted. The call hears a sentence that is always the same.
-        $this->assertCount(1, $this->sent);
-        $this->assertStringStartsWith("Sorry, I couldn't make out what was said. (", $this->sent[0]);
-        $this->assertStringEndsWith('fake-whisper exited with code 1)', $this->sent[0]);
+        // Neither says why: what whisper failed with holds its path on the bot's machine. That is in the log.
+        $this->assertSame([self::NOT_HEARD], $this->sent);
         $this->assertSame([self::SORRY], array_map(file_get_contents(...), $this->played));
         $this->assertSame('] Claude: ' . self::SORRY . "\n", substr($this->transcript($session), 9));
 
         $this->assertCount(1, $this->loggedProblems());
         $this->assertStringStartsWith('Voice reply failed: ', $this->loggedProblems()[0]);
+        $this->assertStringEndsWith('fake-whisper exited with code 1', $this->loggedProblems()[0]);
         $this->assertSame(['555', 'whisper'], array_values(array_intersect_key($this->logged($this->loggedProblems()[0])[0], ['user' => 0, 'step' => 0])));
         $this->assertSame([1, 0], [$this->usage()['failures'], $this->usage()['answers']]);
         // The fake whisper printed it before it failed.
@@ -75,8 +76,7 @@ final class VoiceFailureTest extends VoiceTestCase
         $this->runFor(0.3);
 
         $this->assertSame([self::SORRY, self::SORRY], array_map(file_get_contents(...), $this->played));
-        $this->assertStringStartsWith("Sorry, I couldn't make out what was said. (", $this->sent[3]);
-        $this->assertStringStartsWith("Sorry, I couldn't make out what was said. (", $this->sent[4]);
+        $this->assertSame([self::NOT_HEARD, self::NOT_HEARD], array_slice($this->sent, 3));
         $this->assertSame(5, $this->usage()['failures']);
     }
 
@@ -92,7 +92,7 @@ final class VoiceFailureTest extends VoiceTestCase
         $this->assertStringStartsWith('Voice reply failed: ', $this->loggedProblems()[0]);
         $this->assertStringStartsWith('Could not say sorry: ', $this->loggedProblems()[1]);
         $this->assertStringEndsWith('fake-piper exited with code 1: The voice model could not be loaded.', $this->loggedProblems()[1]);
-        $this->assertCount(1, $this->sent, 'The channel was told.');
+        $this->assertSame([self::NOT_HEARD], $this->sent, 'The channel was told.');
         $this->assertSame([], $this->played);
         $this->assertSame(1, $this->usage()['failures'], 'What was said failed once.');
 
@@ -117,7 +117,7 @@ final class VoiceFailureTest extends VoiceTestCase
         $this->noNames = null;
 
         // Such an error can hold paths, and other things nobody in a server needs: it is only in the log.
-        $this->assertSame(['Sorry, something went wrong with what was said. The bot\'s logs say what.'], $this->sent);
+        $this->assertSame(['Sorry, something went wrong with what was said. The bot\'s logs say why.'], $this->sent);
         $this->assertSame([self::SORRY], array_map(file_get_contents(...), $this->played));
         $this->assertSame(['Voice reply failed: Cannot read /home/bot/databases/names.sqlite'], $this->loggedProblems());
         $this->assertSame('other', $this->logged($this->loggedProblems()[0])[0]['step']);
@@ -137,8 +137,7 @@ final class VoiceFailureTest extends VoiceTestCase
         $this->transcribe();
         await($stopped);
 
-        $this->assertCount(1, $this->sent);
-        $this->assertStringStartsWith("Sorry, I couldn't make out what was said. (", $this->sent[0]);
+        $this->assertSame([self::NOT_HEARD], $this->sent);
         $this->assertSame([], $this->played, 'The bot is no longer in the call.');
     }
 

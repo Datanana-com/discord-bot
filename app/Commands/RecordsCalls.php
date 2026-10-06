@@ -98,11 +98,14 @@ trait RecordsCalls
     private function howToTalk(VoiceSession $session): string
     {
         $name = VoiceSession::wakeWordName($session->wakeWord);
+        // The first of the leave phrase's spellings, like the wake word's. There is none in a server without a wake word, unless VOICE_LEAVE_PHRASE is set.
+        $leave = VoiceSession::wakeWordName($session->leavePhrase);
 
-        return $name === ''
+        return ($name === ''
             ? 'I answer everything that is said.'
             // The first of the stop phrase's spellings, like the wake word's.
-            : "Say \"{$name}\" to talk to me, and \"" . VoiceSession::wakeWordName($session->stopPhrase) . '" when you\'re done.';
+            : "Say \"{$name}\" to talk to me, and \"" . VoiceSession::wakeWordName($session->stopPhrase) . '" when you\'re done.')
+            . ($leave === '' ? '' : " Say \"{$leave}\" to make me leave.");
     }
 
     /**

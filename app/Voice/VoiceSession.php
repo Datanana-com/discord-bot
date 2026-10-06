@@ -105,7 +105,7 @@ final class VoiceSession
     /** Seconds of quiet that close someone's conversation. */
     private const float CONVERSATION_QUIET = 60.0;
 
-    /** What the bot says when the stop phrase closed a conversation. */
+    /** What the bot says when the stop phrase closed a conversation, and before it leaves a call. */
     private const string OKAY = 'Okay.';
 
     /** What the bot says in the call when something said couldn't be transcribed or answered. Never why: that is posted. */
@@ -242,6 +242,7 @@ final class VoiceSession
         private readonly Speech $speech,
         public readonly string $wakeWord,
         public readonly string $stopPhrase,
+        public readonly string $leavePhrase,
         private readonly Usage $usage,
         /** @var array<string, true> Who opted out of being recorded, by user ID. */
         private array $optedOut,
@@ -289,11 +290,12 @@ final class VoiceSession
     }
 
     /**
-     * The wake word of the servers that didn't choose their own. Empty answers everything.
+     * The wake word of the servers that didn't choose their own. Empty answers everything. Without VOICE_WAKE_WORD
+     * it is "claude" and "claud", which whisper writes for it: no one says "claud", so it costs no unwanted answers.
      */
     public static function defaultWakeWord(): string
     {
-        return trim(env('VOICE_WAKE_WORD', 'claude'));
+        return trim(env('VOICE_WAKE_WORD', 'claude, claud'));
     }
 
     /**
@@ -331,6 +333,23 @@ final class VoiceSession
         // The stop phrase can have several spellings too, and the default has one for each of the wake word's.
         return implode(', ', self::spellings(env('VOICE_STOP_PHRASE', '')))
             ?: implode(', ', array_map(fn (string $spelling) => "stop {$spelling}", $spellings));
+    }
+
+    /**
+     * The phrase that ends the call, for a server with this wake word: "disconnect <spelling>" for each of
+     * its spellings, unless VOICE_LEAVE_PHRASE replaces it. "Disconnect" alone is never the phrase: people say
+     * it in a call, and leaving ends the recording for everyone. Unlike the stop phrase, the variable
+     * also applies in a server without a wake word, which has no conversations to close but a call to leave.
+     *
+     * A spelling without a letter or a number is dropped: mentions() would take it for no words to wait for,
+     * and every sentence would end the call.
+     */
+    public static function defaultLeavePhrase(string $wakeWord): string
+    {
+        $words = fn (string $spelling) => preg_match('/[\p{L}\p{N}]/u', $spelling) === 1;
+
+        return implode(', ', array_filter(self::spellings(env('VOICE_LEAVE_PHRASE', '')), $words))
+            ?: implode(', ', array_map(fn (string $spelling) => "disconnect {$spelling}", array_filter(self::spellings($wakeWord), $words)));
     }
 
     public static function forGuild(string $guildId): ?self
@@ -422,6 +441,7 @@ final class VoiceSession
             Speech::fromEnv($settings['voice']),
             $wakeWord,
             self::defaultStopPhrase($wakeWord),
+            self::defaultLeavePhrase($wakeWord),
             new Usage($discord->getLogger()),
             $optedOut,
             Memory::fromEnv(),
@@ -918,8 +938,8 @@ final class VoiceSession
      * Tells the text channel, and the call, that something said couldn't be transcribed or answered, or
      * that the answer couldn't be spoken.
      *
-     * The text channel is told every time, with why, except when that is nothing the bot expects to fail:
-     * such an error can hold paths, and other things nobody in a server needs. The call is told in a fixed
+     * The text channel is told every time, and not why: what a program failed with holds its path on the
+     * bot's machine, and other things nobody in a server needs. That is in the log. The call is told in a fixed
      * sentence, and once for each thing that fails: with a login that expired, every question does.
      *
      * @return PromiseInterface<mixed> Resolves once it is posted and said. It never rejects.
@@ -928,11 +948,11 @@ final class VoiceSession
     {
         $step = FailedReply::stepOf($e);
         $posted = match ($step) {
-            FailedReply::WHISPER => $this->post("Sorry, I couldn't make out what was said. ({$e->getMessage()})"),
+            FailedReply::WHISPER => $this->post("Sorry, I couldn't make out what was said. The bot's logs say why."),
             // The text channel was told when Claude failed, before the sentences it had finished were spoken.
             FailedReply::CLAUDE => resolve(null),
-            FailedReply::SPEECH => $this->post("Sorry, I couldn't say that out loud. ({$e->getMessage()})"),
-            default => $this->post('Sorry, something went wrong with what was said. The bot\'s logs say what.'),
+            FailedReply::SPEECH => $this->post("Sorry, I couldn't say that out loud. The bot's logs say why."),
+            default => $this->post("Sorry, something went wrong with what was said. The bot's logs say why."),
         };
 
         // What can't be spoken can't be said sorry for either.
@@ -981,6 +1001,12 @@ final class VoiceSession
                     $this->log('debug', 'Not answering', ['user' => $userId, 'reason' => 'the session stopped']);
 
                     return null;
+                }
+
+                // Before the stop phrase and the wake word: by default, it contains the wake word, and the
+                // stop phrase someone set could match it too.
+                if ($this->leavePhrase !== '' && self::mentions($text, $this->leavePhrase)) {
+                    return $this->leave($userId);
                 }
 
                 // Before the wake word: by default, the stop phrase contains it.
@@ -1087,6 +1113,31 @@ final class VoiceSession
             // It holds nothing of anyone's memory, so only the call ending, or them opting out, stops it.
             ->then(fn () => ! $this->stopped && ! isset($this->optedOut[$userId]) ? race([$this->vc->playFile($path), $this->left->promise()]) : null)
             ->catch(fn (Throwable $e) => $this->log('warning', 'Could not say okay: ' . $e->getMessage(), ['user' => $userId]));
+    }
+
+    /**
+     * Says okay, then ends the call because someone said the leave phrase, as /stop would: the summary is
+     * posted, the memories are updated, and the text channel is told who ended it.
+     *
+     * @return PromiseInterface<null> Resolves once the call is stopped, not once it is summarized: the summary
+     *                                waits for this turn, which is on the call's queue like everything said.
+     */
+    private function leave(string $userId): PromiseInterface
+    {
+        // Said to the end first: stop() ends Piper and cuts off what is being played. When it can't be said, it leaves all the same.
+        return $this->sayOkay($userId)->then(function () use ($userId) {
+            // /stop, or someone disconnecting the bot, ended the call while it said okay.
+            if ($this->stopped) {
+                return null;
+            }
+
+            $this->log('info', 'Ended by the leave phrase', ['user' => $userId]);
+            $this->post("{$this->nameOf($userId)} ended the call by voice.");
+            // Not returned: it continues the queue, which holds this turn, so a turn that waited for it would wait for itself.
+            $this->stop();
+
+            return null;
+        });
     }
 
     /**

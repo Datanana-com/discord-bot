@@ -246,10 +246,7 @@ final class VoiceStreamingTest extends VoiceTestCase
         $this->assertSame(["{$session->directory}/claude-2.ogg"], $this->played, 'Nothing is spoken after the sentence that is missing.');
 
         // The answer itself was posted, then that it couldn't be spoken, and both are counted.
-        $this->assertCount(2, $this->sent);
-        $this->assertSame(self::QUESTION . "\n" . self::ANSWER, $this->sent[0]);
-        $this->assertStringStartsWith("Sorry, I couldn't say that out loud. (", $this->sent[1]);
-        $this->assertStringEndsWith('fake-piper exited with code 1: The voice model could not be loaded.)', $this->sent[1]);
+        $this->assertSame([self::QUESTION . "\n" . self::ANSWER, "Sorry, I couldn't say that out loud. The bot's logs say why."], $this->sent);
         $this->assertSame([1, 1], [$this->usage()['failures'], $this->usage()['answers']]);
     }
 }
