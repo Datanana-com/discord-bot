@@ -139,6 +139,13 @@ final class VoiceFailureTest extends VoiceTestCase
 
         $this->assertSame([self::NOT_HEARD], $this->sent);
         $this->assertSame([], $this->played, 'The bot is no longer in the call.');
+        // Nor is the sentence made for nobody, by a Piper started for it, or added to a transcript that has nothing else.
+        $this->assertCount(1, $this->loggedProblems());
+        $this->assertSame('', $this->transcript($session));
+
+        // A call that is over isn't told that the bot leaves it, as when the bot then ends over errors.
+        $session->abandon();
+        $this->assertSame([self::NOT_HEARD], $this->sent);
     }
 
     public function testLeavesTheCallWhenItCanNoLongerKeepWhatIsSaid(): void

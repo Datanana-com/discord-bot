@@ -161,9 +161,12 @@ final class ApplicationStopTest extends VoiceTestCase
             for ($failure = 1; $failure <= 12; $failure++) {
                 Loop::futureTick(fn () => throw new RuntimeException("Failure {$failure}"));
             }
+
+            // Whoever watches it presses Ctrl+C while it is ending.
+            Loop::addTimer(0.1, fn () => posix_kill(getmypid(), SIGINT));
         });
 
-        // Not 0: whatever runs the bot can start it again.
+        // Not 0, whatever it is told while it ends: whatever runs the bot can start it again.
         $this->assertSame(1, $code);
         $this->assertNull(VoiceSession::forGuild(self::GUILD_ID));
         $this->assertSame([VoiceSession::LEFT], $this->sent, 'The call was told why the bot left it.');
@@ -173,6 +176,7 @@ final class ApplicationStopTest extends VoiceTestCase
             [
                 ...array_map(fn (int $failure) => "Something failed in the event loop: Failure {$failure}", range(1, 10)),
                 'Too much is failing in the event loop: leaving every call and stopping',
+                'Stopping now, without waiting for the calls',
             ],
             $this->loggedProblems(),
         );
