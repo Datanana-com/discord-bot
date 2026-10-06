@@ -97,6 +97,38 @@ final class VoiceSessionTest extends TestCase
         yield 'only commas and spaces' => [' , , ', []];
     }
 
+    #[DataProvider('defaultWakeWords')]
+    public function testDefaultWakeWord(?string $env, string $expected): void
+    {
+        $before = $_ENV['VOICE_WAKE_WORD'] ?? null;
+
+        try {
+            unset($_ENV['VOICE_WAKE_WORD']);
+
+            if ($env !== null) {
+                $_ENV['VOICE_WAKE_WORD'] = $env;
+            }
+
+            $this->assertSame($expected, VoiceSession::defaultWakeWord());
+        } finally {
+            if ($before === null) {
+                unset($_ENV['VOICE_WAKE_WORD']);
+            } else {
+                $_ENV['VOICE_WAKE_WORD'] = $before;
+            }
+        }
+    }
+
+    /**
+     * @return iterable<string, array{string|null, string}>
+     */
+    public static function defaultWakeWords(): iterable
+    {
+        yield 'not set: claude and the claud whisper writes for it' => [null, 'claude, claud'];
+        yield 'set and empty: no wake word, everything is answered' => ['', ''];
+        yield 'set: used as it is, without the spaces around it' => [' jarvis ', 'jarvis'];
+    }
+
     #[DataProvider('stopPhrases')]
     public function testDefaultStopPhrase(string $wakeWord, string $env, string $expected): void
     {
