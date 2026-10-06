@@ -66,7 +66,10 @@ final class OggPlayer implements Player
     private readonly Closure $clock;
 
     /**
-     * @param (callable(): float)|null $clock The time now, in seconds: the tests give it one that stands still.
+     * @param (callable(): float)|null $clock The time now, in seconds: the tests give it one that stands still. By
+     *                                        default the clock that only ever goes forward, like the event loop's
+     *                                        timers: the wall clock steps on some machines (WSL2 among them), and a
+     *                                        step back would hold the next packet until it had caught up.
      */
     public function __construct(
         private readonly VoiceClient $vc,
@@ -74,7 +77,7 @@ final class OggPlayer implements Player
         private readonly float $headStart = self::HEAD_START,
         ?callable $clock = null,
     ) {
-        $this->clock = $clock === null ? static fn (): float => microtime(true) : $clock(...);
+        $this->clock = $clock === null ? static fn (): float => hrtime(true) / 1e9 : $clock(...);
     }
 
     public function play(string $path, ?callable $onStart = null): PromiseInterface
