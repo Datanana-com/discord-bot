@@ -184,7 +184,7 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
     git clone https://github.com/ggml-org/whisper.cpp ~/whisper.cpp
     cd ~/whisper.cpp
     cmake -B build -DCMAKE_BUILD_TYPE=Release
-    cmake --build build -j --config Release --target whisper-cli
+    cmake --build build -j --config Release --target whisper-cli whisper-server
     sh ./models/download-ggml-model.sh base
     ```
 
@@ -235,6 +235,7 @@ Set these in `.env`. The notes and measurements behind each one are in [docs/con
 | `VOICE_LEAVE_PHRASE` | `disconnect <wake word>` | What ends the call when anyone in it says it. |
 | `VOICE_PAUSE_SECONDS` | `0.6` | How long someone has to be silent for what they said to be over. |
 | `WHISPER_BINARY` | `whisper-cli` | Path to whisper.cpp's `whisper-cli`. |
+| `WHISPER_SERVER_BINARY` | `whisper-server` next to `WHISPER_BINARY`, if it is there | Path to whisper.cpp's `whisper-server`, which a call keeps running with the model loaded: with a GPU, a short question is transcribed in about 0.1 to 0.3 s instead of the 0.5 to 0.9 s that starting `whisper-cli` takes. It has no password, so leave it empty on a machine shared with people you don't trust. |
 | `WHISPER_MODEL` | | Path to the whisper model, e.g. `~/whisper.cpp/models/ggml-base.bin`. |
 | `WHISPER_LANGUAGE` | `auto` | Language spoken in the call, e.g. `en` or `pt`. `auto` detects it, which takes a second or two longer: set it when one language is spoken. |
 | `WHISPER_THREADS` | | How many threads whisper uses. Empty leaves it to whisper, which takes 4. |
@@ -267,7 +268,7 @@ Every log message, and more queries, in [docs/logs-and-statistics.md](docs/logs-
 
 ## Known limitations
 
-- The bot starts on its answer about two seconds after a short question, as measured on a 10-core desktop CPU with whisper `base`, `WHISPER_LANGUAGE=en`, 8 threads and `CLAUDE_MODEL=haiku`. With the default `auto` language it takes a second or two longer.
+- The bot starts on its answer about two seconds after a short question, as measured on a 10-core desktop CPU with whisper `base`, `WHISPER_LANGUAGE=en`, 8 threads and `CLAUDE_MODEL=haiku`; the whisper server, with a GPU, takes about half a second off that. With the default `auto` language it takes a second or two longer.
 - Only the person the bot is answering can interrupt it.
 - Speech recognition sometimes mishears the wake word ("cloud" for "Claude"). The default wake word already has "Claud", which whisper also writes for it. List the spellings whisper writes for your voice in `VOICE_WAKE_WORD` or `/settings`.
 - The stop phrase and the leave phrase wait their turn behind what was said before them: a sentence is only known once it is transcribed, and sentences are handled one at a time.
@@ -287,10 +288,13 @@ The whole list is in [docs/voice-calls.md](docs/voice-calls.md#known-limitations
 composer test                          # unit and feature tests
 composer test -- --testsuite Unit      # or Feature
 composer test:coverage                 # needs pcov or Xdebug
+composer bench                         # times a question with the real whisper.cpp, Claude Code and Piper
 composer pint                          # fixes the code style
 ```
 
 The feature tests replace whisper.cpp, Claude Code, Piper and, for voice messages, ffmpeg with the scripts in `tests/Fixtures`, so they need no models, Claude login or Discord connection. `VoiceCallTest` uses the real ffmpeg and libopus, and is skipped without them. Examples, and how the tests work, in [docs/development.md](docs/development.md).
+
+The tests can't tell whether the bot got slower: `composer bench` asks it a spoken question with the real programs of your machine and fails when the answer comes clearly later than it did on `master`. Run it before merging something that could slow the bot down: see [the benchmark](docs/development.md#benchmark).
 
 ### Live voice test
 

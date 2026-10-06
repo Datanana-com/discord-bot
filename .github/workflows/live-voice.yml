@@ -101,7 +101,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: .whisper
-          key: whisper.cpp-v1.9.4-base.en-portable-${{ runner.os }}
+          key: whisper.cpp-v1.9.4-base.en-portable-server-${{ runner.os }}
 
       - name: Build whisper.cpp and download its model
         if: steps.whisper-cache.outputs.cache-hit != 'true'
@@ -110,7 +110,7 @@ jobs:
         run: |
           git clone --depth 1 --branch v1.9.4 https://github.com/ggml-org/whisper.cpp .whisper
           cmake -S .whisper -B .whisper/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_TESTS=OFF -DGGML_NATIVE=OFF
-          cmake --build .whisper/build -j --config Release --target whisper-cli
+          cmake --build .whisper/build -j --config Release --target whisper-cli whisper-server
           sh .whisper/models/download-ggml-model.sh base.en
 
       - name: Install Piper and a voice

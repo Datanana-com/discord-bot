@@ -469,6 +469,8 @@ final class VoiceSession
         $session->wait();
         // Piper loads its voice now, and keeps running: the first sentence of an answer doesn't wait for that.
         $session->speech->start("{$directory}/piper");
+        // So does whisper: until its server has loaded the model, whisper-cli transcribes.
+        $session->transcriber->server?->acquire($session->log(...));
         $session->log('info', 'Voice session started', ['channel' => $vc->channel->id, 'directory' => $directory]);
         $session->track(Usage::CALL_STARTED, ['channel' => $vc->channel->id]);
 
@@ -738,6 +740,9 @@ final class VoiceSession
                 $this->allLookedUp->then(function () {
                     unset(self::$unfinished[$this->id]);
                 });
+
+                // Everything said is transcribed by now. The whisper server ends with the last call, and the call is over once it has.
+                return $this->transcriber->server?->release();
             });
     }
 
@@ -922,7 +927,7 @@ final class VoiceSession
         $this->log('info', 'Utterance ended', ['user' => $userId, 'ms' => $ms]);
         $this->track(Usage::UTTERANCE, ['user' => $userId, 'duration_ms' => $ms]);
 
-        $this->inTurn($userId, fn () => $this->handleUtterance($userId, $wavPath, $endedAt, $people));
+        $this->inTurn($userId, fn () => $this->handleUtterance($userId, $wavPath, $endedAt, $people, $seconds));
     }
 
     /**
@@ -995,8 +1000,9 @@ final class VoiceSession
     /**
      * @param float $endedAt When the utterance ended, to time the answer from.
      * @param list<string>|null $people Who was in the call then: see {@see group()}.
+     * @param float $seconds How long it is: whisper has longer to transcribe a longer one.
      */
-    private function handleUtterance(string $userId, string $wavPath, float $endedAt, ?array $people): PromiseInterface
+    private function handleUtterance(string $userId, string $wavPath, float $endedAt, ?array $people, float $seconds): PromiseInterface
     {
         // They opted out while this waited for its turn, and it was deleted then.
         if (! isset($this->clips[$wavPath])) {
@@ -1006,7 +1012,7 @@ final class VoiceSession
         unset($this->clips[$wavPath]);
         $transcribing = microtime(true);
 
-        return $this->transcriber->transcribe($wavPath)
+        return $this->transcriber->transcribe($wavPath, $seconds, $this->log(...))
             ->finally(fn () => unlink($wavPath))
             ->catch(fn (Throwable $e) => throw new FailedReply(FailedReply::WHISPER, $e))
             ->then(function (string $text) use ($userId, $endedAt, $transcribing, $people) {
