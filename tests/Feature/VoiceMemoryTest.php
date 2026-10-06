@@ -356,9 +356,50 @@ final class VoiceMemoryTest extends VoiceTestCase
 
         await($session->stop());
 
-        $this->assertCount(2, $this->claudeCalls(), 'The answer and the summary: there is nothing to remember.');
+        $this->assertCount(1, $this->claudeCalls(), 'Only the answer: nothing is left to summarize or remember.');
         $this->assertFileDoesNotExist("{$this->memories}/555.md");
+        $this->assertFileDoesNotExist("{$session->directory}/transcript.txt");
         $this->assertSame([], $this->logged('Updated memory'));
+    }
+
+    public function testForgettingAMemoryTakesWhatWasSaidOutOfTheTranscriptClaudeIsGiven(): void
+    {
+        $this->inCall('555');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->ask($vc, '555', 'Hey Claude, my PIN is 1234.');
+        $this->assertStringContainsString('Alice: Hey Claude, my PIN is 1234.', $this->transcript($session));
+        VoiceSession::forget('555');
+        $this->ask($vc, '555', 'Hey Claude, I am learning to sail.');
+
+        // What was said, and what Claude answered, before /forget is not in the file, nor in what the next answer is given.
+        $transcript = $this->transcript($session);
+        $this->assertStringNotContainsString('1234', $transcript);
+        $this->assertSame(1, substr_count($transcript, 'Claude: '), 'Only the second answer is left.');
+        $this->assertStringContainsString('Alice: Hey Claude, I am learning to sail.', $transcript);
+        $this->assertStringNotContainsString('1234', $this->claudeCalls()[1]['prompt']);
+        $this->assertStringContainsString('Alice: Hey Claude, I am learning to sail.', $this->claudeCalls()[1]['prompt']);
+
+        await($session->stop());
+
+        // Nor in the summary.
+        $this->assertStringNotContainsString('1234', $this->claudeCalls()[2]['prompt']);
+    }
+
+    public function testForgettingAPersonalMemoryKeepsWhatWasSaidWhileOthersWereThere(): void
+    {
+        $this->inCall('555', '666');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', 'Hey Claude, my PIN is 1234.');
+
+        // It would be remembered in their group's memory, not in Alice's own: /forget without options is about hers.
+        VoiceSession::forget('555');
+        $this->assertStringContainsString('Alice: Hey Claude, my PIN is 1234.', $this->transcript($session));
+
+        VoiceSession::forget(['555', '666']);
+        // What Claude answered with others there was never going to be remembered: it stays.
+        $this->assertStringNotContainsString('1234', $this->transcript($session), "The group's memory was forgotten too.");
+        $this->assertStringContainsString('Claude: ', $this->transcript($session));
     }
 
     public function testAMemoryForgottenWhileItIsBeingUpdatedStaysForgotten(): void

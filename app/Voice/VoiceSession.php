@@ -506,19 +506,6 @@ final class VoiceSession
     }
 
     /**
-     * Stops what is looked up in a guild's calls that is no longer wanted, as someone joined, left or moved between
-     * its voice channels: an answer made for someone alone in a call, or for a group, is not for whoever joined.
-     */
-    public static function peopleMoved(string $guildId): void
-    {
-        foreach (self::$unfinished as $session) {
-            if ((string) $session->vc->channel->guild_id === $guildId) {
-                $session->dropUnwantedLookups();
-            }
-        }
-    }
-
-    /**
      * Transcribes and answers someone again in every call that isn't over, as they used /optin.
      *
      * They are only recorded again once they rejoin: until then, the voice client keeps writing
@@ -542,6 +529,9 @@ final class VoiceSession
         $key = implode('-', Memory::people($people));
 
         foreach (self::$unfinished as $session) {
+            // What would have been remembered is also taken out of the transcript, which what is looked up,
+            // what is answered, the summary and /recall are made from.
+            $session->removeFromTranscript($session->said[$key] ?? []);
             unset($session->said[$key]);
             $session->forgotten[$key] = ($session->forgotten[$key] ?? 0) + 1;
             // A task made of that memory may hold what they asked to forget: it is no longer looked up.
@@ -1415,9 +1405,11 @@ final class VoiceSession
      * The task is made of what they said, and of the memories their answer was made from. So it is
      * no longer looked up, and what was looked up is dropped, not posted, spoken or added to the
      * transcript, once they opt out, one of those memories is taken back or forgotten, or someone
-     * joins the call who the answer was not made for: see {@see stillAlone()} and {@see stillAmong()}.
-     * One that is being looked up is stopped then, not only left to finish for nobody: see {@see dropUnwantedLookups()}.
-     * It is not stopped when the call is: what it finds is still posted then.
+     * is in the call when it is found who the answer was not made for: see {@see stillAlone()} and
+     * {@see stillAmong()}. Someone who joins and leaves again changes nothing.
+     * One that is being looked up is stopped when they opt out or a memory is taken back or forgotten, not
+     * only left to finish for nobody: see {@see dropUnwantedLookups()}. It is not stopped when the call is:
+     * what it finds is still posted then.
      *
      * @param bool $hard Whether Claude handed it off as hard.
      * @param string $question What they said, which the answer is posted under.
@@ -1629,6 +1621,46 @@ final class VoiceSession
                 ? "\n\n{$name} is talking to you. Reply to their last message."
                 // The transcript only holds its last lines, which what was looked up may no longer be among.
                 : "\n\nWhat {$name} asked you has been looked up for them:\n\n{$lookedUp}\n\nTell {$name} what was found, in a few spoken sentences.");
+    }
+
+    /**
+     * Takes lines out of the transcript, the file and what Claude is given of it, as when someone used /forget.
+     * The file is deleted when nothing is left of it: there is no transcript when nobody said anything.
+     *
+     * @param list<string> $lines As they were written to transcript.txt, with their time, one entry each.
+     */
+    private function removeFromTranscript(array $lines): void
+    {
+        if ($lines === []) {
+            return;
+        }
+
+        $path = "{$this->directory}/transcript.txt";
+
+        if (is_file($path)) {
+            $written = file_get_contents($path);
+
+            foreach ($lines as $line) {
+                $at = strpos($written, $line . PHP_EOL);
+
+                if ($at !== false) {
+                    $written = substr_replace($written, '', $at, strlen($line . PHP_EOL));
+                }
+            }
+
+            $written === '' ? unlink($path) : file_put_contents($path, $written);
+        }
+
+        foreach ($lines as $line) {
+            // Without the time that was added when it was written.
+            $index = array_search(preg_replace('/^\[\d\d:\d\d:\d\d\] /', '', $line), $this->transcript, true);
+
+            if ($index !== false) {
+                unset($this->transcript[$index]);
+            }
+        }
+
+        $this->transcript = array_values($this->transcript);
     }
 
     /**

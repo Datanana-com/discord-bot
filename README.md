@@ -101,7 +101,7 @@ sequenceDiagram
 - The model that looks things up (`CLAUDE_LOOKUP_MODEL`, `sonnet` by default) can search the web and do nothing else. For a task Claude hands off as hard (`LOOK UP: [hard] ...`) it must consult an advisor (`CLAUDE_LOOKUP_ADVISOR`, `opus` by default); any other task is looked up without one.
 - It gets the task Claude wrote and the call's transcript, or the DM's last 100 messages. It is never given the memories the bot keeps of people.
 - One task is looked up at a time in each call and each chat, up to 3 more wait their turn, and no more than `CLAUDE_LOOKUP_AT_ONCE` (2 by default) are looked up at once in all of them together.
-- A lookup nobody wants any more (whoever asked opted out, a memory it was made from was taken back or erased with `/forget`, someone joined who it was not made for) is stopped, not left to finish.
+- A lookup nobody wants any more (whoever asked opted out, or a memory it was made from was taken back or erased with `/forget`) is stopped, not left to finish. Someone joining who it was not made for only drops what is found, if they are still there then.
 
 > [!IMPORTANT]
 > Once something is looked up, what was said in the call, or written in the DM, is given to a model that searches the web, so its search queries can hold parts of it, including what Claude said there from a memory.

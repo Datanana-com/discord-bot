@@ -4,12 +4,9 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
-use App\EventAbstract;
-use App\Events\VoiceStateUpdate;
 use App\Settings\UserSettings;
 use App\Voice\VoiceSession;
 use Discord\Parts\Channel\Message;
-use Discord\Parts\WebSockets\VoiceStateUpdate as VoiceState;
 use React\Promise\Deferred;
 use ReflectionProperty;
 
@@ -646,8 +643,9 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->assertSame([], $this->loggedProblems());
     }
 
-    public function testStopsWhatIsLookedUpOnceSomeoneJoinsACallItsAnswerWasMadeForSomeoneAloneIn(): void
+    public function testPostsWhatWasLookedUpForSomeoneAloneWhenWhoJoinedHasLeftAgainByThen(): void
     {
+        // Alice keeps her memory out of calls with others (/privacy): it is used while she is alone with the bot.
         $this->memory()->save('555', '- Is building a game called Bananas.');
         (new UserSettings($this->discord->getLogger()))->save('555', ['personal_memory_in_calls' => UserSettings::AFTER_SHARE]);
         $this->inCall('555');
@@ -656,33 +654,12 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 1, 'the lookup to start');
         $pid = $this->lookups()[0]['pid'];
 
-        // Discord says Bob joined: the voice states are up to date by then, and the search is stopped at once.
+        // Bob joins and leaves again: what is looked up is not stopped, and is only dropped if he is there when it is found.
         $this->joins('666');
-        $this->assertTrue(posix_kill($pid, 0), 'Nothing says it yet.');
-        $this->voiceStateChanged();
-
-        $this->waitUntil(fn () => ! posix_kill($pid, 0), 'Claude Code to be stopped');
-        $this->assertCount(1, $this->logged('Stopped looking something up'));
-        $this->assertSame([], $this->logged('Looked something up'));
-        $this->assertCount(1, $this->sent);
-        $this->assertSame([], $this->loggedProblems());
-    }
-
-    public function testKeepsLookingSomethingUpWhenSomeoneJoinsWhoseMemoryItWasNotMadeFrom(): void
-    {
-        // Nothing of Alice's memory is in her answers when she is not alone with the bot, or shares it: Bob joining changes nothing.
-        $this->inCall('555');
-        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
-        $this->ask($vc, '555', self::QUESTION);
-        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 1, 'the lookup to start');
-        $pid = $this->lookups()[0]['pid'];
-
-        $this->joins('666');
-        $this->voiceStateChanged();
         $this->runFor(0.4);
-
         $this->assertTrue(posix_kill($pid, 0), 'It is still being looked up.');
         $this->assertSame([], $this->logged('Stopped looking something up'));
+        $this->leaves('666');
 
         $this->finishLookups($session);
         $this->assertSame(self::QUOTE . "\n" . self::FOUND, $this->sent[1]);
@@ -708,7 +685,8 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->runFor(0.4);
         $this->assertCount(2, $this->sent, 'Nothing was posted.');
         $this->assertCount(2, $this->played, 'Nothing was told.');
-        $this->assertSame($transcript, $this->transcript($session));
+        $this->assertNotSame('', $transcript);
+        $this->assertSame('', $this->transcript($session), 'What was said alone with the bot is taken out of it, and nothing looked up was added.');
         $this->assertCount(1, $this->lookups());
         $this->assertSame([], $this->logged('Looked something up'));
         $this->assertCount(2, $this->logged('Dropped what was handed off to be looked up'));
@@ -767,26 +745,6 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->assertSame([], $this->loggedProblems());
     }
 
-    public function testKeepsLookingSomethingUpForTheGuildOfTheCallOnly(): void
-    {
-        $this->memory()->save('555', '- Is building a game called Bananas.');
-        (new UserSettings($this->discord->getLogger()))->save('555', ['personal_memory_in_calls' => UserSettings::AFTER_SHARE]);
-        $this->inCall('555');
-        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
-        $this->ask($vc, '555', self::QUESTION);
-        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 1, 'the lookup to start');
-        $pid = $this->lookups()[0]['pid'];
-
-        // Bob joined, so the task is no longer wanted, but what happened in another server says nothing of this call.
-        $this->joins('666');
-        VoiceSession::peopleMoved('999');
-        $this->runFor(0.3);
-        $this->assertTrue(posix_kill($pid, 0), 'It is still being looked up.');
-
-        VoiceSession::peopleMoved(self::GUILD_ID);
-        $this->waitUntil(fn () => ! posix_kill($pid, 0), 'Claude Code to be stopped');
-    }
-
     public function testKeepsNoTrackOfATaskOnceItIsOver(): void
     {
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
@@ -800,12 +758,23 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->assertSame([], $lookingUp->getValue($session));
     }
 
-    public function testTheEventThatTellsWhoJoinedRunsBeforeTheOneThatCanFail(): void
+    public function testALookupIsNotGivenWhatWasSaidBeforeTheMemoryItWasMadeFromWasForgotten(): void
     {
-        // The event's methods run in this order, and the ones after a method that fails are skipped.
-        $methods = array_values(array_diff(get_class_methods(VoiceStateUpdate::class), get_class_methods(EventAbstract::class)));
+        $this->memory()->save('555', '- Lives in Lisbon.');
+        $this->inCall('555');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', 'Hey Claude, my PIN is 1234, which PHP version is the latest?');
+        $this->waitUntil(fn () => count($this->lookups()) === 1, 'the first lookup to start');
 
-        $this->assertSame(['dropLookups', 'followMeetings'], $methods);
+        VoiceSession::forget('555');
+        $this->ask($vc, '555', 'Hey Claude, which Node version is the latest?');
+        $this->waitUntil(fn () => count($this->lookups()) === 2, 'the second lookup to start');
+
+        // /forget takes what was said out of the transcript, which is what the lookup is given.
+        $given = $this->lookups()[1]['prompt'];
+        $this->assertStringNotContainsString('1234', $given);
+        $this->assertStringContainsString('Alice: Hey Claude, which Node version is the latest?', $given);
+        $this->finishLookups($session);
     }
 
     public function testKeepsLookingSomethingUpWhenAMemoryItWasNotMadeFromIsForgotten(): void
@@ -991,7 +960,7 @@ final class VoiceLookupTest extends VoiceTestCase
 
         $this->assertSame('', $this->memory()->read('555'));
         $this->assertSame([], $this->logged('Updated memory'));
-        $this->assertCount(3, $this->claudeCalls(), 'An answer, a lookup and the summary: no memory update, nothing told.');
+        $this->assertCount(2, $this->claudeCalls(), 'An answer and a lookup: nothing left to summarize or remember, nothing told.');
     }
 
     public function testTellsWhatWasLookedUpWhileItIsWrittenEvenWhenNothingMoreCanWait(): void
@@ -1176,17 +1145,6 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->assertSame(self::QUOTE . "\n" . self::FAILED . ' (Claude Code: Usage limit reached)', $this->sent[2]);
         $this->assertCount(1, $this->played, 'Nothing is said: nobody is there to hear it.');
         $this->assertSame($transcript, $this->transcript($session));
-    }
-
-    /**
-     * Discord says someone joined, left or moved between voice channels: what the bot does with that event.
-     */
-    private function voiceStateChanged(): void
-    {
-        $state = static::getStubBuilder(VoiceState::class)->disableOriginalConstructor()->onlyMethods(['__get'])->getStub();
-        $state->method('__get')->willReturnCallback(fn (string $name) => $name === 'guild_id' ? self::GUILD_ID : null);
-
-        (new VoiceStateUpdate($state, $this->discord, ['dropLookups']))->handle();
     }
 
     /**
