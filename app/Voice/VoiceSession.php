@@ -270,11 +270,12 @@ final class VoiceSession
     }
 
     /**
-     * The wake word of the servers that didn't choose their own. Empty answers everything.
+     * The wake word of the servers that didn't choose their own. Empty answers everything. Without VOICE_WAKE_WORD
+     * it is "claude" and "claud", which whisper writes for it: no one says "claud", so it costs no unwanted answers.
      */
     public static function defaultWakeWord(): string
     {
-        return trim(env('VOICE_WAKE_WORD', 'claude'));
+        return trim(env('VOICE_WAKE_WORD', 'claude, claud'));
     }
 
     /**
