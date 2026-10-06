@@ -752,6 +752,29 @@ final class VoiceOpenConversationTest extends VoiceTestCase
         $this->assertSame([['user' => '555']], $this->contexts('Ended by the leave phrase'));
     }
 
+    public function testTheCallIsNotStoppedUntilOkayIsSpokenToTheEnd(): void
+    {
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        // The voice client is still playing "Okay." for as long as the test says: stopping the call would cut it off.
+        $okay = new Deferred();
+        $this->playing = $okay->promise();
+
+        $this->say($vc, '555', 'Disconnect Claude.');
+        $this->waitUntil(fn () => count($this->played) === 1, 'okay to be spoken');
+        $this->runFor(0.5);
+
+        $this->assertSame($session, VoiceSession::forGuild(self::GUILD_ID));
+        $this->assertSame([], $this->cutOff);
+        $this->assertSame([], $this->logged('Ended by the leave phrase'));
+        $this->assertSame([], $this->sent);
+
+        $okay->resolve(null);
+        $this->callEnds($session);
+
+        $this->assertSame([], $this->cutOff, '"Okay." was spoken to the end.');
+        $this->assertSame(['Alice ended the call by voice.', self::ANSWER], $this->sent);
+    }
+
     public function testLeavesAllTheSameWhenOkayCannotBeSpoken(): void
     {
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);
@@ -789,7 +812,8 @@ final class VoiceOpenConversationTest extends VoiceTestCase
 
         $this->setProcessEnv(['FAKE_PIPER_DELAY' => '0.5']);
         $this->say($vc, '555', 'Disconnect Claude.');
-        $this->waitUntil(fn () => $this->pipers() !== [] && count($this->logged('Utterance ended')) === 1, 'okay to be made');
+        // Transcribed, so it has been heard and okay is being made, which takes half a second.
+        $this->waitUntil(fn () => str_contains($this->transcript($session), 'Alice: Disconnect Claude.'), 'it to be transcribed');
         // /stop, or someone disconnecting the bot, ends it first.
         await($session->stop());
         $this->runFor(0.5);
