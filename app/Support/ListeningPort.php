@@ -17,12 +17,12 @@ final class ListeningPort
      */
     public static function of(int $pid): ?int
     {
-        $sockets = [];
+        $sockets = self::sockets($pid);
 
-        foreach (@scandir("/proc/{$pid}/fd") ?: [] as $descriptor) {
-            if (preg_match('/^socket:\[(\d+)\]$/', (string) @readlink("/proc/{$pid}/fd/{$descriptor}"), $socket) === 1) {
-                $sockets[$socket[1]] = true;
-            }
+        // A socket the bot holds as well came with the process when the bot started it, as a program inherits
+        // what its parent had open: the process doesn't listen on it by itself.
+        if ($pid !== getmypid()) {
+            $sockets = array_diff_key($sockets, self::sockets(getmypid()));
         }
 
         foreach (@file('/proc/net/tcp', FILE_IGNORE_NEW_LINES) ?: [] as $line) {
@@ -36,5 +36,21 @@ final class ListeningPort
         }
 
         return null;
+    }
+
+    /**
+     * @return array<string, true> The inodes of the sockets the process has open.
+     */
+    private static function sockets(int $pid): array
+    {
+        $sockets = [];
+
+        foreach (@scandir("/proc/{$pid}/fd") ?: [] as $descriptor) {
+            if (preg_match('/^socket:\[(\d+)\]$/', (string) @readlink("/proc/{$pid}/fd/{$descriptor}"), $socket) === 1) {
+                $sockets[$socket[1]] = true;
+            }
+        }
+
+        return $sockets;
     }
 }
