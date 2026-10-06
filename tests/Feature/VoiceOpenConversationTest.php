@@ -188,6 +188,26 @@ final class VoiceOpenConversationTest extends VoiceTestCase
         $this->assertCount(2, $this->logged('Conversation closed'));
     }
 
+    public function testWithoutAWakeWordInTheEnvAServerHearsClaudAsWellAsClaude(): void
+    {
+        // Whisper writes "Claude" as "Claud" often enough to be a spelling of the default, and no one says "claud".
+        $this->setEnv(['VOICE_WAKE_WORD' => 'claude']);
+        unset($_ENV['VOICE_WAKE_WORD']);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->assertSame('claude, claud', $session->wakeWord);
+        $this->assertSame('stop claude, stop claud', $session->stopPhrase);
+
+        $this->ask($vc, '555', 'Claud, what time is it?');
+        $this->assertSame([['user' => '555']], $this->contexts('Conversation opened'));
+
+        $this->say($vc, '555', 'Stop, claud.');
+        $this->waitUntil(fn () => count($this->played) === 2, 'okay to be spoken');
+        $this->assertSame([['user' => '555', 'reason' => 'stop phrase']], $this->contexts('Conversation closed'));
+
+        // "Cloud" is not a spelling of the default: people talk about the cloud.
+        $this->hearsNoAnswer($vc, $session, '666', 'The cloud is down.');
+    }
+
     public function testTheStopPhraseInTheEnvReplacesTheDefaultForEveryServer(): void
     {
         $this->setEnv(['VOICE_STOP_PHRASE' => ' para claude ']);
