@@ -97,6 +97,38 @@ final class VoiceSessionTest extends TestCase
         yield 'only commas and spaces' => [' , , ', []];
     }
 
+    #[DataProvider('defaultWakeWords')]
+    public function testDefaultWakeWord(?string $env, string $expected): void
+    {
+        $before = $_ENV['VOICE_WAKE_WORD'] ?? null;
+
+        try {
+            unset($_ENV['VOICE_WAKE_WORD']);
+
+            if ($env !== null) {
+                $_ENV['VOICE_WAKE_WORD'] = $env;
+            }
+
+            $this->assertSame($expected, VoiceSession::defaultWakeWord());
+        } finally {
+            if ($before === null) {
+                unset($_ENV['VOICE_WAKE_WORD']);
+            } else {
+                $_ENV['VOICE_WAKE_WORD'] = $before;
+            }
+        }
+    }
+
+    /**
+     * @return iterable<string, array{string|null, string}>
+     */
+    public static function defaultWakeWords(): iterable
+    {
+        yield 'not set: claude and the claud whisper writes for it' => [null, 'claude, claud'];
+        yield 'set and empty: no wake word, everything is answered' => ['', ''];
+        yield 'set: used as it is, without the spaces around it' => [' jarvis ', 'jarvis'];
+    }
+
     #[DataProvider('stopPhrases')]
     public function testDefaultStopPhrase(string $wakeWord, string $env, string $expected): void
     {
@@ -131,6 +163,70 @@ final class VoiceSessionTest extends TestCase
         yield 'the env can have several spellings too' => ['claude', ' para claude ,parar claude, ', 'para claude, parar claude'];
         yield 'the env does not bring back a stop phrase without a wake word' => ['', 'para claude', ''];
         yield 'an env without a spelling is not a phrase that matches everything' => ['claude', ' , ', 'stop claude'];
+    }
+
+    #[DataProvider('leavePhrases')]
+    public function testDefaultLeavePhrase(string $wakeWord, string $env, string $expected): void
+    {
+        $before = $_ENV['VOICE_LEAVE_PHRASE'] ?? null;
+
+        try {
+            $_ENV['VOICE_LEAVE_PHRASE'] = $env;
+
+            $this->assertSame($expected, VoiceSession::defaultLeavePhrase($wakeWord));
+        } finally {
+            if ($before === null) {
+                unset($_ENV['VOICE_LEAVE_PHRASE']);
+            } else {
+                $_ENV['VOICE_LEAVE_PHRASE'] = $before;
+            }
+        }
+    }
+
+    /**
+     * @return iterable<string, array{string, string, string}>
+     */
+    public static function leavePhrases(): iterable
+    {
+        yield 'disconnect and the wake word' => ['claude', '', 'disconnect claude'];
+        yield 'a phrase' => ['okay computer', '', 'disconnect okay computer'];
+        yield 'one for each spelling, so each is heard' => ['claude, cloud, claud', '', 'disconnect claude, disconnect cloud, disconnect claud'];
+        yield 'spelled the way the wake word is cleaned up' => [' Claude ,, cloud, CLAUDE ', '', 'disconnect Claude, disconnect cloud'];
+        yield 'no wake word, no leave phrase' => ['', '', ''];
+        yield 'no spelling left, no leave phrase' => [' , ', '', ''];
+        yield 'the env replaces it' => ['claude', 'hang up', 'hang up'];
+        yield 'the env replaces it for every spelling' => ['claude, cloud', 'hang up', 'hang up'];
+        yield 'the env can have several spellings too' => ['claude', ' hang up ,,hang up now, ', 'hang up, hang up now'];
+        // Unlike the stop phrase, which has no conversation to close without a wake word: a call can be left all the same.
+        yield 'the env brings back a leave phrase without a wake word' => ['', 'hang up', 'hang up'];
+        yield 'an env without a spelling is not a phrase that matches everything' => ['claude', ' , ', 'disconnect claude'];
+        yield 'a spelling of the env without a letter or a number would match everything' => ['claude', 'hang up, -', 'hang up'];
+        yield 'an env with nothing to say falls back to the default' => ['claude', ' - , ... ', 'disconnect claude'];
+        // "disconnect -" would be heard in any sentence with "disconnect" in it.
+        yield 'a wake word spelling without a letter or a number is no leave phrase' => ['claude, -', '', 'disconnect claude'];
+        yield 'a wake word without a letter or a number has no leave phrase' => ['-', '', ''];
+    }
+
+    #[DataProvider('leaveSentences')]
+    public function testTheLeavePhraseIsHeardTheWayTheWakeWordIs(string $text, bool $expected): void
+    {
+        $this->assertSame($expected, VoiceSession::mentions($text, 'disconnect claude'));
+    }
+
+    /**
+     * @return iterable<string, array{string, bool}>
+     */
+    public static function leaveSentences(): iterable
+    {
+        yield 'the phrase' => ['Disconnect Claude', true];
+        yield 'any case' => ['DISCONNECT CLAUDE', true];
+        yield 'with what whisper adds' => ['Disconnect, Claude.', true];
+        yield 'in a sentence' => ['Okay, everyone, disconnect - Claude! Thanks.', true];
+        yield 'not disconnect alone' => ['I think I got disconnect', false];
+        yield 'not a word that holds it' => ['Disconnected Claude', false];
+        yield 'not the wake word and a word that holds disconnect' => ['Claude, I got disconnected', false];
+        yield 'not with another word between them' => ['Disconnect from Claude', false];
+        yield 'not the other way around' => ['Claude disconnect', false];
     }
 
     /**

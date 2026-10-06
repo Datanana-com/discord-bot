@@ -41,7 +41,7 @@ They are registered when `BOT_SLASH_COMMANDS` is set.
 
 ## Voice calls with Claude
 
-`/record` joins your voice channel, records it, and lets everyone in it talk to Claude. The call ends with `/stop`, or when someone disconnects the bot.
+`/record` joins your voice channel, records it, and lets everyone in it talk to Claude. The call ends with `/stop`, when someone says "disconnect Claude", or when someone disconnects the bot.
 
 ```mermaid
 flowchart TD
@@ -62,6 +62,7 @@ flowchart TD
 - **Wake word.** Saying "Claude" opens a conversation for whoever said it, so there is no need to say it in every sentence. Other people open their own.
 - **Answers** are spoken while Claude is still writing them, and posted in the text channel once whole.
 - **Interrupting.** The bot stops speaking when the person it is answering starts talking.
+- **Leaving by voice.** Anyone in the call can say "disconnect Claude": the bot says "Okay.", then stops recording and leaves, as `/stop` does. "Disconnect" alone doesn't count.
 - **Summary.** When the call ends, Claude summarizes its whole transcript in the text channel where `/record` was used.
 
 A conversation belongs to one person:
@@ -217,10 +218,12 @@ Set these in `.env`. The notes and measurements behind each one are in [docs/con
 | Variable | Default | |
 |---|---|---|
 | `BOT_SLASH_COMMANDS` | | Must be set for the slash commands to be registered. |
+| `BOT_REMOVE_OLD_COMMANDS` | | Set it to `true` to remove, when the bot starts, the global commands Discord has for the application and the bot has no class for. Otherwise they are only named in a warning. |
 | `RECORDINGS_PATH` | `recordings` | Where recordings, transcripts and summaries are saved. |
 | `RECORDINGS_RETENTION_DAYS` | | Calls older than this many days are deleted. Leave it empty to keep everything. |
-| `VOICE_WAKE_WORD` | `claude` | Claude only answers what mentions it. List the spellings whisper writes for your voice, separated by commas: `claude, cloud, claud`. With `cloud` in the list, the bot also answers when people talk about the cloud. Leave it empty to answer everything. |
+| `VOICE_WAKE_WORD` | `claude, claud` | Claude only answers what mentions it. List the spellings whisper writes for your voice, separated by commas: `claude, cloud, claud`. With `cloud` in the list, the bot also answers when people talk about the cloud, which is why the default has `claud` and not `cloud`. Leave it empty to answer everything. |
 | `VOICE_STOP_PHRASE` | `stop <wake word>` | What closes the conversation of whoever says it. |
+| `VOICE_LEAVE_PHRASE` | `disconnect <wake word>` | What ends the call when anyone in it says it. |
 | `VOICE_PAUSE_SECONDS` | `0.6` | How long someone has to be silent for what they said to be over. |
 | `WHISPER_BINARY` | `whisper-cli` | Path to whisper.cpp's `whisper-cli`. |
 | `WHISPER_MODEL` | | Path to the whisper model, e.g. `~/whisper.cpp/models/ggml-base.bin`. |
@@ -257,7 +260,8 @@ Every log message, and more queries, in [docs/logs-and-statistics.md](docs/logs-
 
 - The bot starts on its answer about two seconds after a short question, as measured on a 10-core desktop CPU with whisper `base`, `WHISPER_LANGUAGE=en`, 8 threads and `CLAUDE_MODEL=haiku`. With the default `auto` language it takes a second or two longer.
 - Only the person the bot is answering can interrupt it.
-- Speech recognition sometimes mishears the wake word ("cloud" for "Claude"). List the spellings whisper writes in `VOICE_WAKE_WORD` or `/settings`.
+- Speech recognition sometimes mishears the wake word ("cloud" for "Claude"). The default wake word already has "Claud", which whisper also writes for it. List the spellings whisper writes for your voice in `VOICE_WAKE_WORD` or `/settings`.
+- The stop phrase and the leave phrase wait their turn behind what was said before them: a sentence is only known once it is transcribed, and sentences are handled one at a time.
 - The voice library keeps every decoded audio frame in memory until `/stop`, roughly 12 MB per speaker per minute of speech. For very long calls, `/stop` and `/record` again now and then.
 - Discord lets a bot be in one voice channel per server, and doesn't let bots join the calls of direct messages: use `/meet` for a private call.
 - The bot only remembers its meetings while it runs. When it stops during a meeting made with `/meet`, the meeting's channel stays: delete it by hand.
@@ -267,7 +271,7 @@ The whole list is in [docs/voice-calls.md](docs/voice-calls.md#known-limitations
 ## Development
 
 - **Events.** A class in `app/Events` named after a Discord event, such as `MessageCreate`, and extending `App\EventAbstract` handles that event. Its functions run one after the other, until one returns `true`.
-- **Slash commands.** A class in `app/Commands/Global` named `<Name>Command` and extending `App\CommandAbstract` is registered as `/<name>`.
+- **Slash commands.** A class in `app/Commands/Global` named `<Name>Command` and extending `App\CommandAbstract` is registered as `/<name>`. Global commands Discord has that the bot has no class for are named in a warning when it starts, and only removed when `BOT_REMOVE_OLD_COMMANDS` is set.
 
 ```bash
 composer test                          # unit and feature tests
@@ -280,7 +284,7 @@ The feature tests replace whisper.cpp, Claude Code, Piper and, for voice message
 
 ### Live voice test
 
-`tests/Live` asks the bot a question in a real Discord voice call, with a second bot as the speaker. It runs in GitHub Actions every night, on demand, and on pull requests that change the bot. It needs its own private Discord server and two bot tokens: see [docs/development.md](docs/development.md#live-voice-test).
+`tests/Live` asks the bot a question in a real Discord voice call, with a second bot as the speaker. It runs in GitHub Actions every night, on demand, and on pull requests that change the bot. It needs its own private Discord server and two bot applications that nothing else uses: see [docs/development.md](docs/development.md#live-voice-test).
 
 ## Contributing
 

@@ -89,6 +89,8 @@ class MessageCreate extends EventAbstract
 
 Each class in `app/Commands/Global`, named `<Name>Command` and extending `App\CommandAbstract`, is registered as the slash command `/<name>` in every server the bot is in, when `BOT_SLASH_COMMANDS` is set. Commands for a single server, in `app/Commands/Guild`, aren't supported yet.
 
+The bot also looks at the global commands Discord has for its application when it starts. A command it has no class for (Discord tells commands apart by name and type, so a user or message command named like one of the bot's slash commands is also a leftover), such as one registered by an earlier project that used the same bot application or by another checkout of this repository, is named in a warning in the log: `Discord has global commands the bot has no class for: join, leave.` It is only removed when `BOT_REMOVE_OLD_COMMANDS` is set (each removal is logged by name), so switch it on only for an application that this checkout alone registers commands for: two checkouts with different commands under one application would remove each other's, and every command created again counts towards the limit Discord has per day. The bot doesn't remove commands of a single server: it doesn't fetch them.
+
 A command can take options and be shown only to members with a permission: set its `$options`, each as Discord's [option object](https://docs.discord.com/developers/interactions/application-commands#application-command-object-application-command-option-structure), and its `$defaultMemberPermissions`, like `app/Commands/Global/SettingsCommand.php` does. Server admins can change who sees a command, so a command that needs a permission also checks it in `handle()`. A command is saved to Discord again when its description, options or permissions change.
 
 ## Tests
@@ -125,7 +127,7 @@ Everything except Claude is real: Discord with its end-to-end encryption, whispe
 It needs its own private Discord server:
 
 1. Create a server with a voice channel.
-2. In the [Developer Portal](https://discord.com/developers/applications), create two applications, one for the bot under test and one for the "speaker". Copy each bot's token. On the bot under test, enable the **Server Members Intent**.
+2. In the [Developer Portal](https://discord.com/developers/applications), create two applications, one for the bot under test and one for the "speaker". Copy each bot's token. On the bot under test, enable the **Server Members Intent**. Don't use the applications of a bot anyone uses: the test starts the bot of the branch under test with `BOT_SLASH_COMMANDS`, so its commands change with every branch, and a branch's start would warn about the commands of another one (and remove them, were `BOT_REMOVE_OLD_COMMANDS` set; the workflow doesn't set it).
 3. Invite both bots with the `bot` scope and the View Channels, Connect, Speak and Send Messages permissions. Add the `applications.commands` scope for the bot under test.
 4. In the GitHub repository, under Settings → Secrets and variables → Actions, add:
     - the secrets `DISCORD_TEST_BOT_TOKEN` and `DISCORD_TEST_SPEAKER_TOKEN`;
