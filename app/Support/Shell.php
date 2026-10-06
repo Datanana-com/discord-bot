@@ -18,6 +18,9 @@ use Throwable;
  */
 final class Shell
 {
+    /** @var array<int, Process> The programs that are running, as far as the event loop has noticed. */
+    private static array $running = [];
+
     /**
      * Runs a command and collects its output.
      *
@@ -89,6 +92,44 @@ final class Shell
     }
 
     /**
+     * The shell command line that runs a program.
+     *
+     * "exec" replaces the wrapping shell, so terminate() reaches the program itself. With setsid, where
+     * there is one, the program runs in a session of its own: Ctrl+C in the bot's terminal goes to
+     * everything that runs in the terminal's session, and would end the programs the bot still needs
+     * to summarize its calls before it ends. The bot stops them when it ends: see {@see stopAll()}.
+     *
+     * @param list<string> $command Program followed by its arguments; each one is shell-escaped.
+     */
+    public static function command(array $command): string
+    {
+        return 'exec $(command -v setsid) ' . implode(' ', array_map(escapeshellarg(...), $command));
+    }
+
+    /**
+     * Keeps a program that was started, until it has ended: see {@see stopAll()}.
+     */
+    public static function track(Process $process): void
+    {
+        $id = spl_object_id($process);
+        self::$running[$id] = $process;
+        $process->on('exit', static function () use ($id) {
+            unset(self::$running[$id]);
+        });
+    }
+
+    /**
+     * Stops every program that is still running, as when the bot ends. In a session of their own, they would
+     * go on without it: a Claude Code that looks something up, for nobody, can take minutes.
+     */
+    public static function stopAll(): void
+    {
+        foreach (self::$running as $process) {
+            $process->terminate();
+        }
+    }
+
+    /**
      * @param list<string> $command
      * @param (callable(string): void)|null $onLine Gets stdout line by line; without it, stdout is collected.
      * @param array<string, string>|null $env
@@ -100,9 +141,9 @@ final class Shell
         $timedOut = false;
         $failure = null;
 
-        // "exec" replaces the wrapping shell, so terminate() reaches the program itself.
-        $process = new Process('exec ' . implode(' ', array_map(escapeshellarg(...), $command)), $cwd, $env);
+        $process = new Process(self::command($command), $cwd, $env);
         $process->start();
+        self::track($process);
 
         // Cancelling the promise stops the program, which then rejects it like any program that was killed.
         $deferred = new Deferred(fn () => $process->terminate());

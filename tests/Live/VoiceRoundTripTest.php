@@ -138,6 +138,8 @@ final class VoiceRoundTripTest extends TestCase
         $this->assertNotEmpty(preg_grep('/^Command recall (has been saved|already exists)\.$/', $logged), 'The /recall command was registered, with its required question.');
         $this->assertNotEmpty(preg_grep('/^Command meet (has been saved|already exists)\.$/', $logged), 'The /meet command was registered, with the people it takes.');
         $this->assertEmpty(preg_grep('/^Could not (save command|fetch the registered commands)/', $logged), 'Discord accepted every command.');
+        // The workflow doesn't set BOT_REMOVE_OLD_COMMANDS, so nothing is removed, and certainly not what the bot just registered.
+        $this->assertEmpty(preg_grep('/^(Command .+ has been removed\.|Could not remove command)/', $logged), 'No command was removed.');
 
         // The bot heard the question through Discord, and whisper understood it.
         $this->assertMatchesRegularExpression(

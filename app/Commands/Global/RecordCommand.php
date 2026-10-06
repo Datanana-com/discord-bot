@@ -10,6 +10,7 @@ use App\Settings\GuildSettings;
 use App\Voice\VoiceSession;
 use Discord\Builders\MessageBuilder;
 use Discord\Parts\Interactions\Interaction;
+use React\Promise\PromiseInterface;
 use Throwable;
 
 final class RecordCommand extends CommandAbstract
@@ -18,7 +19,7 @@ final class RecordCommand extends CommandAbstract
 
     public string $description = 'Records your voice channel and lets everyone in it talk to Claude.';
 
-    public function handle(Interaction $interaction): void
+    public function handle(Interaction $interaction): ?PromiseInterface
     {
         $voiceChannel = $interaction->member?->getVoiceChannel();
         // Read once, so the call starts with the settings that are checked and announced here.
@@ -27,13 +28,11 @@ final class RecordCommand extends CommandAbstract
         $problem = $voiceChannel === null ? 'Join a voice channel first.' : $this->recordingProblem($interaction, $settings);
 
         if ($problem !== null) {
-            $this->refuse($interaction, '/record', $problem);
-
-            return;
+            return $this->refuse($interaction, '/record', $problem);
         }
 
         // Joining can take longer than the 3 seconds Discord waits for a response.
-        $this->starting($interaction, fn () => $interaction->acknowledgeWithResponse()
+        return $this->starting($interaction, fn () => $interaction->acknowledgeWithResponse()
             ->then(fn () => $this->record($interaction, $voiceChannel, $interaction->channel ?? $voiceChannel, $settings))
             ->then(
                 fn (VoiceSession $session) => $interaction->updateOriginalResponse(MessageBuilder::new()->setContent(

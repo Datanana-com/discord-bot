@@ -22,7 +22,7 @@ use function React\Async\await;
  *
  * `composer bench:baseline` saves the times as this machine's baseline, and `composer bench` fails
  * when a later run is slower than it. Not for CI, which has neither the programs nor the hardware:
- * run it before merging something that could slow the bot down. See "Benchmark" in README.md.
+ * run it before merging something that could slow the bot down. See "Benchmark" in docs/development.md.
  */
 final class VoiceBenchTest extends VoiceTestCase
 {

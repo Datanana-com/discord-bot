@@ -13,6 +13,7 @@ use App\Voice\VoiceSession;
 use Discord\Builders\MessageBuilder;
 use Discord\Parts\Application\Command\Option;
 use Discord\Parts\Interactions\Interaction;
+use React\Promise\PromiseInterface;
 use Discord\Parts\Permissions\Permission;
 
 final class SettingsCommand extends CommandAbstract
@@ -56,12 +57,12 @@ final class SettingsCommand extends CommandAbstract
     /** Manage Server. */
     public ?int $defaultMemberPermissions = 1 << Permission::MANAGE_GUILD;
 
-    public function handle(Interaction $interaction): void
+    public function handle(Interaction $interaction): ?PromiseInterface
     {
         // Discord refuses messages over 2000 characters, and many voices can be installed.
         $reply = mb_substr($this->reply($interaction), 0, 2000);
 
-        $interaction->respondWithMessage(MessageBuilder::new()->setContent($reply), ephemeral: true);
+        return $interaction->respondWithMessage(MessageBuilder::new()->setContent($reply), ephemeral: true);
     }
 
     private function reply(Interaction $interaction): string
