@@ -41,6 +41,7 @@ final class StatsCommand extends CommandAbstract
             sprintf('Speech: %d utterances from %d people (%s)', $usage['utterances'], $usage['speakers'], self::duration($usage['speech_ms'])),
             sprintf('Questions answered: %d', $usage['answers'])
                 . ($usage['answer_ms'] === null ? '' : sprintf(', in %.1f s on average', $usage['answer_ms'] / 1000)),
+            sprintf('Looked up: %d', $usage['lookups']),
             sprintf('Failures: %d', $usage['failures']),
         ]);
     }

@@ -163,6 +163,7 @@ trait ChatsInDirectMessages
             $this->assertSame(['parse' => []], $message->jsonSerialize()['allowed_mentions'] ?? null, 'Mentions are disabled.');
             $this->events[] = "sent {$userId}";
             $this->sent[] = $message->getContent();
+            $this->sentFlags[] = $message->getFlags();
             $this->dms[$userId][] = (object) ['content' => $message->getContent(), 'author' => (object) ['id' => '999', 'displayname' => 'Bot', 'bot' => true]];
 
             return $this->sendError === null ? $this->sending ?? resolve(null) : reject($this->sendError);

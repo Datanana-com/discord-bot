@@ -213,6 +213,22 @@ final class ClaudeTest extends TestCase
         $this->assertStringContainsString("api_key=unset\n", $log);
     }
 
+    public function testLooksThingsUpWithoutTheLimitOnThinkingTheBotWasStartedWith(): void
+    {
+        $_ENV['CLAUDE_BINARY'] = __DIR__ . '/../../Fixtures/fake-claude';
+        putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeResult('PHP 8.5.'));
+        // `composer serve` starts the bot like this, so that answers in a call never wait for thinking.
+        putenv('MAX_THINKING_TOKENS=0');
+
+        await(Claude::forLookups(300.0)->ask('Task: the latest version of PHP.', 'You look things up.'));
+
+        $this->assertStringContainsString("thinking=unset\n", file_get_contents($this->log), 'A lookup that may not think is no better than an answer.');
+
+        // What is not a lookup keeps it.
+        await($this->claude()->ask('Hello'));
+        $this->assertStringContainsString("thinking=0\n", file_get_contents($this->log));
+    }
+
     public function testLooksThingsUpWithTheModelAndTheAdvisorInEnv(): void
     {
         $_ENV['CLAUDE_LOOKUP_MODEL'] = 'opus';
