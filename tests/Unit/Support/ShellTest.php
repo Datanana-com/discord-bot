@@ -7,6 +7,7 @@ namespace Tests\Unit\Support;
 use App\Support\CommandFailedException;
 use App\Support\Shell;
 use PHPUnit\Framework\TestCase;
+use ReflectionProperty;
 use RuntimeException;
 
 use function React\Async\await;
@@ -14,6 +15,9 @@ use function React\Async\delay;
 
 final class ShellTest extends TestCase
 {
+    /** Prints the ID of the session the shell that runs it is in. */
+    private const string SESSION = 'read -r pid name state parent group session rest < /proc/$$/stat; echo "$session"';
+
     public function testResolvesWithStdout(): void
     {
         $this->assertSame("hello world\n", await(Shell::run(['echo', 'hello world'])));
@@ -207,6 +211,55 @@ final class ShellTest extends TestCase
         // An exception thrown into the event loop would stop the whole bot instead.
         $this->assertSame(['first'], $lines, 'Nothing more is handed over.');
         $this->assertLessThan(5, microtime(true) - $started);
+    }
+
+    public function testRunsProgramsInASessionOfTheirOwn(): void
+    {
+        // Ctrl+C in the bot's terminal goes to everything in the terminal's session: there, it would end the
+        // programs the bot still needs before it ends.
+        $ours = posix_getsid(getmypid());
+
+        $this->assertNotSame($ours, (int) await(Shell::run(['sh', '-c', self::SESSION])));
+
+        $kept = null;
+        $program = Shell::open(['sh', '-c', self::SESSION], function (string $line) use (&$kept) {
+            $kept = (int) $line;
+        });
+        await($program->done());
+
+        $this->assertIsInt($kept);
+        $this->assertNotSame($ours, $kept, 'A program that keeps running too.');
+    }
+
+    public function testRunsProgramsInTheBotsSessionWhereThereIsNoSetsid(): void
+    {
+        $this->assertSame(posix_getsid(getmypid()), (int) await(Shell::run(['/bin/sh', '-c', self::SESSION], env: ['PATH' => '/nowhere'])));
+    }
+
+    public function testStopsEveryProgramThatIsStillRunning(): void
+    {
+        $tracked = fn (): int => count((new ReflectionProperty(Shell::class, 'running'))->getValue());
+        $before = $tracked();
+        $started = microtime(true);
+        $run = Shell::run(['sleep', '30']);
+        $kept = Shell::open(['sleep', '30']);
+        await(Shell::run(['true']));
+        $this->assertSame($before + 2, $tracked(), 'One that has ended is no longer kept.');
+
+        // What the bot does when it ends: they would go on without it.
+        Shell::stopAll();
+
+        foreach ([$run, $kept->done()] as $ended) {
+            try {
+                await($ended);
+                $this->fail('The program should have been stopped.');
+            } catch (CommandFailedException $e) {
+                $this->assertSame('sleep was killed by signal 15', $e->getMessage());
+            }
+        }
+
+        $this->assertLessThan(5, microtime(true) - $started);
+        $this->assertSame($before, $tracked());
     }
 
     public function testStreamRejectsWhenTheLastLineCannotBeHandled(): void

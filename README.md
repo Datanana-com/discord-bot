@@ -15,20 +15,27 @@ Requires PHP 8.5. It also includes a voice bot that records calls and lets peopl
 require_once 'bootstrap.php';
 
 use App\Application;
-use Discord\WebSockets\Event;
+use App\Logs\Failures;
+use App\Logs\Logger;
 use Discord\WebSockets\Intents;
 
 /**
  * @see https://discord.com/developers/docs/intro
  */
 
+$logger = new Logger();
+// What nothing catches is written to the bot's log before PHP ends, not only to the terminal.
+Failures::register($logger);
+
 $app = new Application([
     'token' => env('DISCORD_TOKEN'),
     'intents' => Intents::getDefaultIntents() | Intents::GUILD_MEMBERS,
     'loadAllMembers' => true,
+    'logger' => $logger,
 ]);
 
-$app->discord->run();
+// Until it is stopped: with Ctrl+C or a signal, it first leaves its calls.
+exit($app->run());
 
 ```
 
@@ -94,6 +101,8 @@ Each class in `app/Commands/Global`, named `<Name>Command` and extending `App\Co
 
 A command can take options and be shown only to members with a permission: set its `$options`, each as Discord's [option object](https://docs.discord.com/developers/interactions/application-commands#application-command-object-application-command-option-structure), and its `$defaultMemberPermissions`, like `app/Commands/Global/SettingsCommand.php` does. Server admins can change who sees a command, so a command that needs a permission also checks it in `handle()`. A command is saved to Discord again when its description, options or permissions change.
 
+A command's `handle()` returns the promise of what it is still doing when it returns, such as sending its reply, or `null`. When `handle()` throws, or that promise is rejected, whoever used the command is told "Something went wrong with /<name>. The bot's logs say what.", which only they see, and the bot goes on. A reply the command had already sent is changed to that, as Discord takes one reply to a command. The message never says what failed: that is logged as `/<name> failed`, with the error (see [Logs and statistics](#logs-and-statistics)). An error in a class of `app/Events` is logged with the event's name, and the bot goes on too.
+
 ## Voice calls with Claude
 
 `/record` joins your voice channel, records it, and lets everyone in it talk to Claude:
@@ -120,7 +129,14 @@ You can interrupt the bot: it stops speaking when the person it is answering sta
 
 What someone says is over once they have been silent for 0.6 seconds, which the bot checks for every 0.05 seconds. Set `VOICE_PAUSE_SECONDS` to more for people who pause longer in the middle of a sentence: the bot then waits that much longer before it answers. Sounds less than that pause apart are one thing said, so they also add up towards the half second that interrupts the bot.
 
-A call ends with `/stop`, or when someone disconnects the bot from the voice channel. An answer the bot is speaking at that moment is cut off, but still posted in the text channel. For the summary, the whole transcript is sent to Claude, including what was said without the wake word. The summary is written in the language of the call, once everything said is transcribed, so it includes the last thing said. A summary that doesn't fit in one Discord message is split into several, never in the middle of a sentence. When nobody said anything, there is no summary. When Claude can't make one (it isn't logged in, the usage limit is reached, ...), the bot says so in the text channel, and why.
+When something said can't be transcribed or answered, the bot says so, in the call and in the text channel, and the call goes on:
+
+- The text channel is told every time, with why: "Sorry, I couldn't make out what was said. (...)" when whisper failed, "Sorry, I couldn't get an answer from Claude. (...)" when Claude did, and "Sorry, I couldn't say that out loud. (...)" when Piper, or playing the sentence, did. The answer itself is still posted when Claude wrote one.
+- The call hears "Sorry, something went wrong.", with the call's Piper voice, and never why. It hears it once for each thing that fails, whoever asks: with a Claude login that expired every question fails, and the text channel is still told each time. It is added to the transcript like an answer, and isn't counted as one. What can't be spoken can't be said sorry for out loud, so then only the text channel is told. When the sentence itself can't be spoken, that is logged as the warning `Could not say sorry`.
+- When what failed is nothing the bot expects to fail, the text channel is told "Sorry, something went wrong with what was said. The bot's logs say what.", without the error: it can hold paths, and other things nobody in a server needs.
+- When the call can no longer keep or hand on what is said, as when its folder is gone, that is logged as `Something failed in the call`. The third time the same thing fails, the bot tells the text channel "I ran into an error and had to leave the call. The bot's logs say what." and leaves the call, which is then summarized like one that was stopped. Its calls in other servers go on.
+
+A call ends with `/stop`, when someone disconnects the bot from the voice channel, or when the bot is stopped (see [Stopping the bot, and starting it again](#stopping-the-bot-and-starting-it-again)). An answer the bot is speaking at that moment is cut off, but still posted in the text channel. For the summary, the whole transcript is sent to Claude, including what was said without the wake word. The summary is written in the language of the call, once everything said is transcribed, so it includes the last thing said. A summary that doesn't fit in one Discord message is split into several, never in the middle of a sentence. When nobody said anything, there is no summary. When Claude can't make one (it isn't logged in, the usage limit is reached, ...), the bot says so in the text channel, and why.
 
 > [!IMPORTANT]
 > Only record people who have agreed to it. The bot announces in the channel when it starts recording, that it remembers each group's calls (and that `/memory` and `/forget` show and delete those memories), and that anyone who doesn't want to be recorded can use `/optout`. Memories of a group are kept for exactly the people who were in the call: see [Memory in calls](#memory-in-calls).
@@ -359,6 +375,48 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
     composer serve
     ```
 
+    Stop it with Ctrl+C: see below.
+
+### Stopping the bot, and starting it again
+
+**Ctrl+C in the bot's terminal, or `kill` of its process** (SIGINT or SIGTERM, which is also what a service manager sends), stops the bot the way `/stop` stops a call:
+
+- It leaves every voice channel at once, and finishes the recordings. The meetings made with `/meet` end too, and their channels are deleted.
+- It then goes on until every call is summarized and its memories are updated, however long that takes, closes its connection to Discord and ends, with exit code 0. What is still being [looked up](#looking-things-up) is dropped.
+- Ctrl+C a second time ends it without waiting for that. A call that wasn't summarized by then keeps its `transcript.txt`.
+- The programs it started that are still running, such as a Claude Code that is looking something up, are ended with it.
+- The programs the bot runs (whisper.cpp, Claude Code, Piper, ffmpeg) are started in a session of their own, with `setsid`, where there is one. Ctrl+C goes to everything that runs in the terminal, and would otherwise end the Claude Code that is writing a summary.
+- This needs PHP's `pcntl` extension. Without it, the bot says so in a warning when it starts, and Ctrl+C ends it at once, still in its calls.
+
+**When something fails**, the bot goes on where it can:
+
+- An exception in a callback of the event loop, the bot's own or a library's, is logged as `Something failed in the event loop`, and the bot goes on. Ten of them within ten seconds are no longer something that failed once: the bot tells the text channel of each call that it had to leave, leaves, and ends with exit code 1.
+- An exception nothing caught, and a PHP fatal error such as running out of memory, are logged as `The bot ends: ...`, and the bot ends with exit code 255. It can't leave its calls then: see [Known limitations](#known-limitations).
+
+**Nothing starts the bot again** once it has ended: `composer serve` runs it once. To have it started again after it ended over an error, but not after you stopped it, run it under something that looks at its exit code. In a terminal, with `php` itself, as Composer ends with an error of its own when it is interrupted with Ctrl+C:
+
+```bash
+until php index.php; do sleep 5; done
+```
+
+Or as a systemd user service, in `~/.config/systemd/user/discord-bot.service` (`systemctl --user enable --now discord-bot`), which also stops it with SIGTERM, and waits for the summaries:
+
+```ini
+[Unit]
+Description=Discord bot
+
+[Service]
+WorkingDirectory=%h/discord-bot
+ExecStart=/usr/bin/php index.php
+Restart=on-failure
+RestartSec=5
+# The bot ends by itself once its calls are summarized.
+TimeoutStopSec=infinity
+
+[Install]
+WantedBy=default.target
+```
+
 ### Configuration
 
 | Variable | Default | |
@@ -441,6 +499,17 @@ jq -c 'select(.level >= 300) | [.datetime, .message, .context]' logs/*.log
 
 A call also logs `Interrupted` when the person the bot is answering talks over it, with the `user`, the call's `session` and how long the bot had been speaking (`ms`). Three warnings are about the programs a call keeps running: `No Claude Code process was waiting for the question` and `The waiting Claude Code process did not answer`, each with the `user` who asked, when a question had to start its own Claude Code, and `Piper had stopped: starting it again`. A `VOICE_PAUSE_SECONDS` that isn't a number of seconds, 0.1 or more, is logged as a warning when a call starts, and the call then uses 0.6.
 
+**Errors** are logged with the `exception` (its class, message, file and line) and a `trace`: what called what, each with its file and line, and never what it was called with. PHP's own stack traces show the start of every text a function was given, which in a call is what someone said, so none is logged or printed.
+
+- `/<name> failed`: a slash command threw, or the promise it worked with was rejected. With the `guild`, the `channel` and the `user`. `Could not tell that /<name> failed` is the warning for a reply that couldn't be sent either.
+- `Error while handling event` and `Event "<method>" failed with the following error`: a class of `app/Events` threw, with the `event`.
+- `Voice reply failed`: something said in a call couldn't be transcribed or answered, or the answer couldn't be spoken, with the `user` and the `step` that failed: `whisper`, `claude`, `speech`, or `other` for what the bot doesn't expect to fail.
+- `Something failed in the call`, and `Leaving the call: the same thing has failed 3 times`: see [Voice calls with Claude](#voice-calls-with-claude). `Could not keep what was being said` is the warning for what someone was saying when a call stopped, and couldn't be transcribed for it.
+- `Something failed in the event loop`, and the critical `Too much is failing in the event loop: leaving every call and stopping`: see [Stopping the bot, and starting it again](#stopping-the-bot-and-starting-it-again).
+- `A promise was rejected, and nothing handled that`: the bot goes on.
+- `Stopping the bot`, with the `reason` (`received SIGINT`, `received SIGTERM` or `too many errors`) and how many `calls` weren't over, and the warning `Stopping now, without waiting for the calls` for a second Ctrl+C.
+- The critical `The bot ends: ...`: an exception nothing caught, or a PHP fatal error, with its `file` and `line`. It is the last line of a bot that didn't stop by itself. A log that ends in the middle of a call without it, and without `Stopping the bot`, is of a bot that was killed (`kill -9`, the machine going down).
+
 **Statistics** are kept in `STATS_DATABASE`, one row per event in the `events` table: `call_started`, `call_ended` (with the call's length), `utterance` (with its length), `answered` (with the time from the end of the question to the answer being posted) and `failed` (something said couldn't be transcribed or answered, or the answer couldn't be spoken), each with the server, channel, user and session. `/stats` shows the server it is used in its totals: calls and minutes recorded, utterances and people speaking, questions answered and how long that took on average, and failures. Summaries, `/recall`, direct messages and what is looked up aren't counted; telling a call what was looked up is an answer, and counts as one, timed from when it was found, so with the time it waited for its turn. Only whoever used `/stats` sees them. To query the statistics yourself:
 
 ```bash
@@ -455,7 +524,8 @@ sqlite3 databases/stats.sqlite "SELECT guild_id, COUNT(*) AS answers FROM events
 - The wake word is looked for as whole words. In languages written without spaces between words, such as Japanese or Thai, it is only heard when whisper writes a space or punctuation around it.
 - The voice library (`discord-php-helpers/voice` 8.3.0) keeps every decoded audio frame in memory until `/stop`, roughly 12 MB per speaker per minute of speech. That's fine for normal calls; for very long ones, `/stop` and `/record` again now and then.
 - The voice library also writes a copy of each speaker's audio to the system's temp folder, as `<date>_<time>-<SSRC>.ogg`. The bot doesn't use these files. It deletes them when the call ends, and when it starts, those that a call it didn't get to end left behind, as when it crashed. It takes every file named like that in the temp folder to be one of them.
-- The bot only remembers its meetings while it runs. When it stops during a meeting made with `/meet`, the meeting's channel stays: delete it by hand.
+- The bot only remembers its meetings while it runs. Stopped with Ctrl+C or a signal, it ends them and deletes their channels. When it ends another way during a meeting made with `/meet`, the meeting's channel stays: delete it by hand.
+- A bot that ends without being stopped (a PHP fatal error such as running out of memory, `kill -9`, the machine going down) can't leave its calls. It stays in the voice channel until Discord notices that its connection is gone, the calls aren't summarized or remembered, and the speakers' WAV files are left with a header that says they are empty, though the audio is in them. The transcripts are complete up to the last thing transcribed.
 
 ### Tests
 

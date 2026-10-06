@@ -398,7 +398,8 @@ final class SpeechTest extends TestCase
             $this->fail('Synthesizing should have failed.');
         } catch (CommandFailedException $e) {
             $this->assertStringStartsWith('/nowhere/piper exited with code 127: ', $e->getMessage());
-            $this->assertStringContainsString('not found', $e->getMessage());
+            // What the shell says, or setsid where programs are started with it.
+            $this->assertMatchesRegularExpression('/not found|No such file/', $e->getMessage());
         }
     }
 

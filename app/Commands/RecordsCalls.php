@@ -42,23 +42,25 @@ trait RecordsCalls
     /**
      * Tells whoever used the command why it does nothing. Only they see it.
      */
-    private function refuse(Interaction $interaction, string $command, string $problem): void
+    private function refuse(Interaction $interaction, string $command, string $problem): PromiseInterface
     {
         $this->log->info("{$command} refused: {$problem}", ['guild' => $interaction->guild_id]);
-        $interaction->respondWithMessage(MessageBuilder::new()->setContent($problem), ephemeral: true);
+
+        return $interaction->respondWithMessage(MessageBuilder::new()->setContent($problem), ephemeral: true);
     }
 
     /**
      * Has other calls refused in the server until this one has started, or couldn't.
      *
      * @param callable(): PromiseInterface<mixed> $start Starts the call. Its promise settles once it is known how that went.
+     * @return PromiseInterface<mixed> That promise.
      */
-    private function starting(Interaction $interaction, callable $start): void
+    private function starting(Interaction $interaction, callable $start): PromiseInterface
     {
         $guildId = (string) $interaction->guild_id;
         VoiceSession::starting($guildId);
 
-        $start()->finally(fn () => VoiceSession::starting($guildId, false));
+        return $start()->finally(fn () => VoiceSession::starting($guildId, false));
     }
 
     /**

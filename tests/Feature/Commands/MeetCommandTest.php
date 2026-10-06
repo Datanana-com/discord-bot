@@ -645,6 +645,44 @@ final class MeetCommandTest extends CommandTestCase
         $this->assertSame([], $this->loggedProblems());
     }
 
+    public function testEveryMeetingEndsWhenTheBotStops(): void
+    {
+        // It expects to be closed exactly once.
+        $this->joinsWith(resolve($this->voiceClient($this->channels->channel, connected: true)));
+        $this->meet(['666']);
+        $this->joinsVoice('555');
+
+        // What Ctrl+C in the bot's terminal does.
+        $this->app->stop('received SIGINT');
+
+        // People are still in it, but nothing would delete its channel once the bot is gone.
+        $this->assertNull(VoiceSession::forGuild(self::GUILD_ID));
+        $this->assertSame([self::MEETING], $this->channels->deleted);
+        $this->assertCount(1, $this->logged('Meeting ended'));
+        $this->assertNotContains(Meeting::JOIN_SECONDS, $this->timers->pending(), 'Nothing is left waiting for people to join.');
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testEndingEveryMeetingIsOverOnceEachChannelIsDeletedOrCouldNotBe(): void
+    {
+        $this->channels->deleteError = new RuntimeException('Unknown Channel');
+        $this->joinsWith(resolve($this->voiceClient($this->channels->channel)));
+        $this->meet(['666']);
+        $over = false;
+
+        Meeting::endAll()->then(function () use (&$over) {
+            $over = true;
+        });
+
+        // The bot waits for this before it ends: a channel that can't be deleted must not keep it.
+        $this->assertTrue($over);
+        $this->assertSame(['Could not delete the meeting\'s channel: Unknown Channel'], $this->loggedProblems());
+
+        // No meeting is left to end.
+        Meeting::endAll();
+        $this->assertSame([self::MEETING], $this->channels->deleted);
+    }
+
     public function testLogsWhenTheChannelCannotBeDeleted(): void
     {
         $this->channels->deleteError = new RuntimeException('Unknown Channel');

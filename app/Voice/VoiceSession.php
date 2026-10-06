@@ -10,9 +10,11 @@ use App\Assistant\Lookups;
 use App\Assistant\Memory;
 use App\Assistant\MemoryGroup;
 use App\Assistant\MemoryWriter;
+use App\Logs\Failures;
 use App\Privacy\OptOuts;
 use App\Settings\GuildSettings;
 use App\Settings\UserSettings;
+use Closure;
 use Discord\Builders\MessageBuilder;
 use Discord\Discord;
 use Discord\Parts\Channel\Channel;
@@ -73,6 +75,11 @@ use function React\Promise\resolve;
  * their questions while they are alone with the bot, or once they shared it. When their setting can't
  * be read, or who else is in the call isn't known, it is left out too.
  *
+ * When something said can't be transcribed or answered, or the answer can't be spoken, the text channel
+ * is told, and so is the call, in a fixed sentence: once for each thing that fails, as with a login that
+ * expired every question fails. When what the call itself runs on keeps failing, the bot tells the text
+ * channel and leaves the call: see {@see guarded()}.
+ *
  * Each step is logged with the session's ID and how long it took, and the call's usage is
  * recorded for /stats. Neither includes what anyone said: that is only in transcript.txt
  * and summary.md.
@@ -100,6 +107,15 @@ final class VoiceSession
 
     /** What the bot says when the stop phrase closed a conversation. */
     private const string OKAY = 'Okay.';
+
+    /** What the bot says in the call when something said couldn't be transcribed or answered. Never why: that is posted. */
+    private const string SORRY = 'Sorry, something went wrong.';
+
+    /** What the text channel is told when the bot leaves a call over an error. */
+    public const string LEFT = 'I ran into an error and had to leave the call. The bot\'s logs say what.';
+
+    /** How often one of the call's own callbacks may fail before the bot leaves the call: see {@see guarded()}. */
+    private const int BROKEN = 3;
 
     /**
      * A Claude Code process that ended sooner than this many seconds after it started to wait isn't
@@ -212,6 +228,9 @@ final class VoiceSession
 
     /** @var array{utterances: int, answers: int, failures: int} */
     private array $counts = ['utterances' => 0, 'answers' => 0, 'failures' => 0];
+
+    /** @var array<string, true> What failed that the call was already told about, in a spoken sentence: see {@see FailedReply}. */
+    private array $apologized = [];
 
     private function __construct(
         private readonly VoiceClient $vc,
@@ -635,8 +654,13 @@ final class VoiceSession
         // Piper ends too, once it has spoken the sentence it may be working on.
         $piperEnded = $this->speech->stop();
 
-        // Speech still in progress is transcribed for the transcript, but no longer answered.
-        $this->splitter->flushAll();
+        try {
+            // Speech still in progress is transcribed for the transcript, but no longer answered.
+            $this->splitter->flushAll();
+        } catch (Throwable $e) {
+            // What a call is left over can fail here too, and the bot still has to leave.
+            $this->log('warning', 'Could not keep what was being said: ' . $e->getMessage());
+        }
 
         try {
             // Finalizes every speaker's WAV file.
@@ -677,6 +701,21 @@ final class VoiceSession
                     unset(self::$unfinished[$this->id]);
                 });
             });
+    }
+
+    /**
+     * Leaves the call because of an error the bot can't go on after, and tells the text channel. The call
+     * is then summarized and remembered like one that was stopped. Safe to call more than once.
+     *
+     * @return PromiseInterface<mixed> As {@see stop()}.
+     */
+    public function abandon(): PromiseInterface
+    {
+        if (! $this->stopped) {
+            $this->post(self::LEFT);
+        }
+
+        return $this->stop();
     }
 
     /**
@@ -753,13 +792,13 @@ final class VoiceSession
             array_push($this->ssrcs, ...$ssrcs);
             $stream = $this->vc->getReceiveStream($userId);
             // Checked for each bit of audio: someone can opt out, or back in, during the call.
-            $stream?->on('pcm', function (string $pcm) use ($userId) {
+            $stream?->on('pcm', $this->guarded(function (string $pcm) use ($userId) {
                 if (! isset($this->optedOut[$userId])) {
                     $now = microtime(true);
                     $this->splitter->push($userId, $pcm, $now);
                     $this->hear($userId, $pcm, $now);
                 }
-            });
+            }));
 
             if (isset($this->optedOut[$userId])) {
                 $this->log('info', 'Skipping a speaker who opted out', ['user' => $userId]);
@@ -785,11 +824,46 @@ final class VoiceSession
         // Often enough for the wait after someone's last word to be the pause itself, and little more.
         $this->ticker = $this->discord->getLoop()->addPeriodicTimer(
             0.05,
-            fn () => $this->splitter->flushSilent(microtime(true)),
+            $this->guarded(fn () => $this->splitter->flushSilent(microtime(true))),
         );
 
         // Also clean up when someone else disconnects the bot from the call.
         $this->vc->once('close', $this->stop(...));
+    }
+
+    /**
+     * Has one of the call's own callbacks, which run many times a second, not take the bot down with what it
+     * throws: the voice client would hand that on to the event loop. It is logged, and the call goes on.
+     *
+     * A callback that has failed {@see BROKEN} times in a call is not expected to work again in it: what it
+     * needs is gone, such as the call's folder, and the call no longer hears what is said, or never answers.
+     * So the bot leaves the call, and says so in the text channel. The other calls go on.
+     *
+     * @param callable(mixed...): mixed $callback
+     */
+    private function guarded(callable $callback): Closure
+    {
+        $failed = 0;
+
+        return function (mixed ...$arguments) use ($callback, &$failed): void {
+            try {
+                $callback(...$arguments);
+            } catch (Throwable $e) {
+                // It was logged often enough, and the bot has left the call over it.
+                if (++$failed > self::BROKEN) {
+                    return;
+                }
+
+                $this->log('error', 'Something failed in the call: ' . $e->getMessage(), Failures::context($e));
+
+                if ($failed === self::BROKEN) {
+                    $this->log('error', 'Leaving the call: the same thing has failed ' . self::BROKEN . ' times');
+                    // Once whatever called this is done: the voice client is in the middle of handing on audio
+                    // that leaving the call closes the recordings of.
+                    $this->discord->getLoop()->futureTick($this->abandon(...));
+                }
+            }
+        };
     }
 
     private function queueUtterance(string $userId, string $wavPath, float $seconds): void
@@ -828,14 +902,49 @@ final class VoiceSession
             ->then($turn)
             ->catch(function (Throwable $e) use ($userId) {
                 $this->counts['failures']++;
-                $this->log('error', 'Voice reply failed: ' . $e->getMessage(), ['user' => $userId]);
+                $this->log('error', 'Voice reply failed: ' . $e->getMessage(), ['user' => $userId, 'step' => FailedReply::stepOf($e)]);
                 $this->track(Usage::FAILED, ['user' => $userId]);
+
+                return $this->apologize($e, $userId);
             })
             ->finally(function () use ($userId) {
                 // Answered and spoken, or not answered at all: their conversation is quiet from now on.
                 $this->waiting[$userId]--;
                 $this->startQuiet($userId);
             });
+    }
+
+    /**
+     * Tells the text channel, and the call, that something said couldn't be transcribed or answered, or
+     * that the answer couldn't be spoken.
+     *
+     * The text channel is told every time, with why, except when that is nothing the bot expects to fail:
+     * such an error can hold paths, and other things nobody in a server needs. The call is told in a fixed
+     * sentence, and once for each thing that fails: with a login that expired, every question does.
+     *
+     * @return PromiseInterface<mixed> Resolves once it is posted and said. It never rejects.
+     */
+    private function apologize(Throwable $e, string $userId): PromiseInterface
+    {
+        $step = FailedReply::stepOf($e);
+        $posted = match ($step) {
+            FailedReply::WHISPER => $this->post("Sorry, I couldn't make out what was said. ({$e->getMessage()})"),
+            // The text channel was told when Claude failed, before the sentences it had finished were spoken.
+            FailedReply::CLAUDE => resolve(null),
+            FailedReply::SPEECH => $this->post("Sorry, I couldn't say that out loud. ({$e->getMessage()})"),
+            default => $this->post('Sorry, something went wrong with what was said. The bot\'s logs say what.'),
+        };
+
+        // What can't be spoken can't be said sorry for either.
+        if ($step === FailedReply::SPEECH || isset($this->apologized[$step]) || ! $this->stillTalkingTo($userId)) {
+            return $posted;
+        }
+
+        $this->apologized[$step] = true;
+
+        return $posted
+            ->then(fn () => $this->say(self::SORRY, $userId))
+            ->catch(fn (Throwable $e) => $this->log('warning', 'Could not say sorry: ' . $e->getMessage(), ['user' => $userId]));
     }
 
     /**
@@ -854,6 +963,7 @@ final class VoiceSession
 
         return $this->transcriber->transcribe($wavPath)
             ->finally(fn () => unlink($wavPath))
+            ->catch(fn (Throwable $e) => throw new FailedReply(FailedReply::WHISPER, $e))
             ->then(function (string $text) use ($userId, $endedAt, $transcribing, $people) {
                 $this->log('info', 'Transcribed', ['user' => $userId, 'ms' => $this->msSince($transcribing), 'characters' => mb_strlen($text)]);
 
@@ -1031,7 +1141,7 @@ final class VoiceSession
                 // The voice client never says the sentence finished when it is closed while speaking it, and
                 // rarely does when it is stopped, as it is when they talk over the answer: see hear().
                 return race([$this->vc->playFile($oggPath), $this->left->promise(), $this->speaking['cut']->promise()]);
-            });
+            })->catch(fn (Throwable $e) => throw FailedReply::of(FailedReply::SPEECH, $e));
         });
 
         // The line that hands a question off is never spoken: the start of a line waits until it is known not to be it.
@@ -1112,7 +1222,7 @@ final class VoiceSession
                 $this->post("Sorry, I couldn't get an answer from Claude. ({$e->getMessage()})");
 
                 // The sentences Claude finished are still spoken, and the next answer waits for them.
-                return $spoken->finally(fn () => throw $e);
+                return $spoken->finally(fn () => throw new FailedReply(FailedReply::CLAUDE, $e));
             },
         )->finally(function () {
             // The bot is no longer speaking: nobody can talk over it.
@@ -1448,7 +1558,7 @@ final class VoiceSession
         return $this->synthesize($sentence, $oggPath)->then(
             // The voice client never says the sentence finished when it is closed while speaking it.
             fn () => $this->stillTalkingTo($userId) ? race([$this->vc->playFile($oggPath), $this->left->promise()]) : null,
-        );
+        )->catch(fn (Throwable $e) => throw new FailedReply(FailedReply::SPEECH, $e));
     }
 
     /**
