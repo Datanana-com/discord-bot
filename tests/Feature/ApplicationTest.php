@@ -30,6 +30,7 @@ use React\EventLoop\LoopInterface;
 use React\EventLoop\StreamSelectLoop;
 use React\Promise\PromiseInterface;
 use ReflectionClass;
+use ReflectionProperty;
 use RuntimeException;
 use Tests\Fixtures\Events\RecordingEvent;
 use TypeError;
@@ -635,13 +636,21 @@ final class ApplicationTest extends TestCase
         $client->emit('init', [$client]);
 
         $this->assertContains('Error while preparing command classes: Discord API unavailable', $this->logged());
+        // Once, with what called what: not PHP's stack trace.
+        $failures = array_values(array_filter($this->loggedWithContext(), fn (array $line) => str_starts_with($line[0], 'Error while preparing')));
+        $this->assertCount(1, $failures);
+        $this->assertSame(['exception', 'trace'], array_keys($failures[0][1]));
+        // The bot didn't just stop: whatever runs it can tell.
+        $this->assertSame(1, (new ReflectionProperty(Application::class, 'exitCode'))->getValue($app));
     }
 
     /**
      * @param Closure(): mixed $fails What the command's reply does, the first time.
+     * @param list<array{string, bool}> $replies What they are replied.
+     * @param list<string> $edits What the command's own reply is changed to.
      */
     #[DataProvider('failingReplies')]
-    public function testTellsWhoeverUsedACommandThatItFailed(Closure $fails, string $message): void
+    public function testTellsWhoeverUsedACommandThatItFailed(Closure $fails, string $message, array $replies, array $edits): void
     {
         [$app, $commands] = $this->appWithCommands();
         $app->prepareCommandClasses();
@@ -650,9 +659,9 @@ final class ApplicationTest extends TestCase
         // /unshare replies that there is nothing to take back, which fails.
         ($commands->listeners['unshare'])($interaction);
 
-        // Only they see it, and it doesn't say what failed: that is in the log, with the command's name.
-        $this->assertSame([['Something went wrong with /unshare. The bot\'s logs say what.', true]], $this->replies);
-        $this->assertSame([], $this->edits);
+        // It doesn't say what failed: that is in the log, with the command's name.
+        $this->assertSame($replies, $this->replies);
+        $this->assertSame($edits, $this->edits);
         $failure = array_values(array_filter($this->logs->getRecords(), fn ($record) => $record->level === Level::Error));
         $this->assertCount(1, $failure);
         $this->assertSame("/unshare failed: {$message}", $failure[0]->message);
@@ -662,19 +671,24 @@ final class ApplicationTest extends TestCase
         $this->assertSame(Failures::trace($failure[0]->context['exception']), $failure[0]->context['trace']);
 
         // The bot goes on: the next command is handled.
+        $this->replies = [];
         ($commands->listeners['unshare'])($this->interaction());
-        $this->assertSame(['You are not sharing your memory with a call I am recording.', true], end($this->replies));
+        $this->assertSame([['You are not sharing your memory with a call I am recording.', true]], $this->replies);
     }
 
     /**
-     * @return iterable<string, array{Closure(): mixed, string}>
+     * @return iterable<string, array{Closure(): mixed, string, list<array{string, bool}>, list<string>}>
      */
     public static function failingReplies(): iterable
     {
-        yield 'the command throws an exception' => [fn () => throw new RuntimeException('Discord is unavailable'), 'Discord is unavailable'];
+        $told = 'Something went wrong with /unshare. The bot\'s logs say what.';
+
+        // Before it replied anything: they are replied to, which only they see.
+        yield 'the command throws an exception' => [fn () => throw new RuntimeException('Discord is unavailable'), 'Discord is unavailable', [[$told, true]], []];
         // What DiscordPHP throws on, from inside a rejected promise nothing handles.
-        yield 'the command throws an error' => [fn () => strlen([]), 'strlen(): Argument #1 ($string) must be of type string, array given'];
-        yield 'the promise the command works with is rejected' => [fn () => reject(new RuntimeException('Unknown interaction')), 'Unknown interaction'];
+        yield 'the command throws an error' => [fn () => strlen([]), 'strlen(): Argument #1 ($string) must be of type string, array given', [[$told, true]], []];
+        // Its reply was tried, so it is that reply that is changed: Discord takes one reply to a command.
+        yield 'the promise the command works with is rejected' => [fn () => reject(new RuntimeException('Service unavailable')), 'Service unavailable', [], [$told]];
     }
 
     public function testChangesTheReplyOfACommandThatHadRepliedBeforeItFailed(): void
@@ -694,7 +708,7 @@ final class ApplicationTest extends TestCase
         [$app, $commands] = $this->appWithCommands();
         $app->prepareCommandClasses();
 
-        // Discord no longer knows the interaction: neither reply arrives.
+        // Discord no longer knows the interaction: neither the reply nor what it is changed to arrives.
         ($commands->listeners['unshare'])($this->interaction(fn () => reject(new RuntimeException('Unknown interaction')), fn () => reject(new RuntimeException('Unknown interaction, still'))));
 
         $this->assertContains(['Could not tell that /unshare failed: Unknown interaction, still', ['guild' => '100']], $this->loggedWithContext());
@@ -739,7 +753,7 @@ final class ApplicationTest extends TestCase
 
         $this->assertSame(0, $app->run());
 
-        $this->assertContains('The pcntl extension is not loaded: stopped with Ctrl+C, the bot ends without leaving its calls.', $this->logged());
+        $this->assertContains('The pcntl extension is not loaded: stopped with Ctrl+C, the bot ends without leaving its calls, and the programs it runs go on without it.', $this->logged());
     }
 
     /**
@@ -761,13 +775,18 @@ final class ApplicationTest extends TestCase
             'user' => (object) ['id' => '555'],
             default => null,
         });
-        $interaction->method('isResponded')->willReturn($responded);
+        $interaction->method('isResponded')->willReturnCallback(function () use (&$responded) {
+            return $responded;
+        });
         $outcomes = [$first, $second];
-        $reply = function (array &$sent, MessageBuilder $message, ?bool $ephemeral = null) use (&$outcomes): PromiseInterface {
+        $reply = function (array &$sent, MessageBuilder $message, ?bool $ephemeral = null) use (&$outcomes, &$responded): PromiseInterface {
             $outcome = array_shift($outcomes);
+            $result = $outcome === null ? null : $outcome();
+            // Like DiscordPHP, which takes a reply for sent as soon as it tries to send it, also when Discord then refuses it.
+            $responded = true;
 
-            if ($outcome !== null) {
-                return $outcome();
+            if ($result !== null) {
+                return $result;
             }
 
             $sent[] = $ephemeral === null ? $message->getContent() : [$message->getContent(), $ephemeral];

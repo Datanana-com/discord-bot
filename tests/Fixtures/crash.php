@@ -9,6 +9,7 @@ require dirname(__DIR__, 2) . '/vendor/autoload.php';
 
 use App\Logs\Failures;
 use App\Logs\Logger;
+use React\EventLoop\Loop;
 
 use function React\Promise\reject;
 
@@ -21,6 +22,14 @@ function hears(string $said): never
 }
 
 Failures::register(new Logger());
+
+if ($argv[1] === 'exception') {
+    // Like the bot, which has started to connect to Discord before its loop runs. ReactPHP runs a loop that
+    // never ran when PHP ends, unless PHP ends over a fatal error.
+    Loop::addTimer(0.2, function () {
+        echo "The event loop ran\n";
+    });
+}
 
 match ($argv[1]) {
     'exception' => hears('what Alice said in the call'),

@@ -34,17 +34,6 @@ final class FailedReply extends RuntimeException
     }
 
     /**
-     * What failed as that step, unless it is already known which step failed: a sentence waits for the
-     * ones before it, and fails with them.
-     *
-     * @param self::WHISPER|self::CLAUDE|self::SPEECH $step
-     */
-    public static function of(string $step, Throwable $e): self
-    {
-        return $e instanceof self ? $e : new self($step, $e);
-    }
-
-    /**
      * @return self::WHISPER|self::CLAUDE|self::SPEECH|self::OTHER
      */
     public static function stepOf(Throwable $e): string

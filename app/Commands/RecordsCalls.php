@@ -21,6 +21,9 @@ use Throwable;
 trait RecordsCalls
 {
     /** What the announcement of a recording says about what the bot remembers of it. */
+    /** What whoever wants a call recorded is told while the bot is stopping. */
+    private const string STOPPING = 'I am being stopped right now, so I can\'t record. Try again once I am back.';
+
     private const string REMEMBERED = ' I remember each group\'s calls: see what I remember with /memory, and delete it with /forget.';
 
     /**
@@ -31,6 +34,7 @@ trait RecordsCalls
     private function recordingProblem(Interaction $interaction, array $settings): ?string
     {
         return match (true) {
+            VoiceSession::refusesNewCalls() => self::STOPPING,
             VoiceSession::forGuild((string) $interaction->guild_id) !== null => 'I am already recording in this server. Use /stop first.',
             // Discord lets a bot be in one voice channel per server, and joining one takes a while.
             VoiceSession::isStarting((string) $interaction->guild_id) => 'I am already joining a voice channel in this server.',
@@ -75,6 +79,13 @@ trait RecordsCalls
     {
         return $this->discord->joinVoiceChannel($voiceChannel, mute: false, deaf: false)->then(
             function (VoiceClient $vc) use ($interaction, $textChannel, $settings) {
+                // The bot was told to stop while it was joining: nothing would stop this call before it ends.
+                if (VoiceSession::refusesNewCalls()) {
+                    $vc->close();
+
+                    throw new RuntimeException(self::STOPPING);
+                }
+
                 try {
                     return VoiceSession::start($vc, $textChannel, $this->discord, $settings);
                 } catch (Throwable $e) {

@@ -116,8 +116,9 @@ final class Application
                 try {
                     $this->prepareCommandClasses();
                 } catch (\Throwable $th) {
-                    $discord->getLogger()->error('Error while preparing command classes: ' . $th->getMessage());
-                    $discord->getLogger()->error('Error while preparing command classes: ' . $th->getTraceAsString());
+                    $discord->getLogger()->error('Error while preparing command classes: ' . $th->getMessage(), Failures::context($th));
+                    // Not 0: the bot didn't just stop.
+                    $this->exitCode = 1;
                     $this->discord->close();
                 }
 
@@ -144,7 +145,7 @@ final class Application
             }
         } catch (BadMethodCallException) {
             // The event loop can only be told about signals with the pcntl extension.
-            $this->log->warning('The pcntl extension is not loaded: stopped with Ctrl+C, the bot ends without leaving its calls.');
+            $this->log->warning('The pcntl extension is not loaded: stopped with Ctrl+C, the bot ends without leaving its calls, and the programs it runs go on without it.');
         }
 
         try {
@@ -185,6 +186,8 @@ final class Application
         }
 
         $this->stopping = true;
+        // None that would start while the ones there are are summarized: nothing would stop it.
+        VoiceSession::refuseNewCalls();
         $calls = VoiceSession::unfinished();
         $this->log->info('Stopping the bot', ['reason' => $reason, 'calls' => count($calls)]);
 
@@ -432,8 +435,9 @@ final class Application
     }
 
     /**
-     * Logs that a command failed, and tells whoever used it, which only they see: Discord would otherwise
-     * tell them that the application did not respond, or leave what the command had replied so far.
+     * Logs that a command failed, and tells whoever used it: Discord would otherwise tell them that the
+     * application did not respond, or leave what the command had replied so far. Only they see it, unless
+     * the command had already answered in the channel, as /record and /meet do: that answer is changed.
      *
      * They aren't told what failed: an error nobody expected can hold paths, and other things nobody in a
      * server needs.

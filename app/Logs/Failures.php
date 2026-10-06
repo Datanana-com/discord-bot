@@ -26,21 +26,22 @@ final class Failures
     /** The errors PHP ends with, which no code can catch. */
     private const int FATAL = E_ERROR | E_PARSE | E_CORE_ERROR | E_COMPILE_ERROR | E_USER_ERROR | E_RECOVERABLE_ERROR;
 
+    /** Whether PHP is ending over an exception nothing caught. */
+    private static bool $uncaught = false;
+
     /**
      * Has what nothing caught logged, from now on: an exception, which PHP then ends with, a fatal error,
      * and a rejected promise nothing handled, which the bot goes on after.
+     *
+     * Call it before anything uses the event loop: see {@see ending()}.
      *
      * @param (Closure(int): mixed)|null $end Ends PHP with an exit code: exit(), unless a test replaces it.
      */
     public static function register(LoggerInterface $log, ?Closure $end = null): void
     {
         $end ??= exit(...);
-        set_exception_handler(function (Throwable $e) use ($log, $end) {
-            self::uncaught($log, $e);
-            // PHP ends with 0 after an exception that was handled here, as if the bot had just stopped.
-            $end(255);
-        });
-        register_shutdown_function(fn () => self::fatal($log, error_get_last()));
+        set_exception_handler(fn (Throwable $e) => self::uncaught($log, $e));
+        register_shutdown_function(fn () => self::ending($log, error_get_last(), $end));
         self::rejections($log);
     }
 
@@ -80,7 +81,29 @@ final class Failures
      */
     public static function uncaught(LoggerInterface $log, Throwable $e): void
     {
+        self::$uncaught = true;
         $log->critical('The bot ends: nothing caught an exception: ' . $e->getMessage(), self::context($e));
+    }
+
+    /**
+     * What happens when PHP ends: the first thing, as it was registered before anything used the event loop.
+     *
+     * After an exception that was logged here, PHP would end with 0, as if the bot had just stopped, and
+     * ReactPHP, which only looks for a fatal error, would first run the event loop the bot never got to run:
+     * the bot would connect to Discord half set up, and stay. Ending PHP from here keeps both from happening.
+     *
+     * @param array{type: int, message: string, file: string, line: int}|null $error What error_get_last() says.
+     * @param Closure(int): mixed $end
+     */
+    public static function ending(LoggerInterface $log, ?array $error, Closure $end): void
+    {
+        if (self::$uncaught) {
+            $end(255);
+
+            return;
+        }
+
+        self::fatal($log, $error);
     }
 
     /**

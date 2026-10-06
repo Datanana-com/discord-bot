@@ -97,7 +97,7 @@ final class Shell
      * "exec" replaces the wrapping shell, so terminate() reaches the program itself. With setsid, where
      * there is one, the program runs in a session of its own: Ctrl+C in the bot's terminal goes to
      * everything that runs in the terminal's session, and would end the programs the bot still needs
-     * to summarize its calls before it ends. Without the bot, they end as before: their stdin is closed.
+     * to summarize its calls before it ends. The bot stops them when it ends: see {@see stopAll()}.
      *
      * @param list<string> $command Program followed by its arguments; each one is shell-escaped.
      */

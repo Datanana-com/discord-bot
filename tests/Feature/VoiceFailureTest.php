@@ -6,6 +6,7 @@ namespace Tests\Feature;
 
 use App\Voice\VoiceSession;
 use LogicException;
+use React\Promise\Deferred;
 use RuntimeException;
 use Throwable;
 
@@ -148,6 +149,91 @@ final class VoiceFailureTest extends VoiceTestCase
         $this->assertSame([self::NOT_HEARD], $this->sent);
     }
 
+    public function testTellsTheChannelWhenTheVoiceClientCannotPlayASentence(): void
+    {
+        // Piper made the sentence, and the voice library fails to play it.
+        $this->playError = new RuntimeException('The voice connection is gone');
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => count($this->sent) === 2, 'the channel to be told');
+        $this->runFor(0.2);
+
+        // Like a sentence Piper can't make: the answer is posted, and that it couldn't be said. Nothing more is tried in the call.
+        $this->assertStringEndsWith("It is a quarter past four.", $this->sent[0]);
+        $this->assertSame("Sorry, I couldn't say that out loud. The bot's logs say why.", $this->sent[1]);
+        $this->assertSame(['Voice reply failed: The voice connection is gone'], $this->loggedProblems());
+        $this->assertSame('speech', $this->logged('Voice reply failed: The voice connection is gone')[0]['step']);
+        $this->assertSame([1, 1], [$this->usage()['failures'], $this->usage()['answers']]);
+    }
+
+    public function testSaysNothingMoreWhenTheCallStoppedWhileItsChannelWasTold(): void
+    {
+        $this->setProcessEnv(['FAKE_WHISPER_EXIT' => '1']);
+        // Discord takes a moment with the message.
+        $told = new Deferred();
+        $this->sending = $told->promise();
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => count($this->sent) === 1, 'the channel to be told');
+        $stopped = $session->stop();
+        $told->resolve(null);
+        await($stopped);
+
+        // Nobody is left to hear it: no sentence is made by a Piper started for it, or added to the transcript.
+        $this->assertSame([], $this->played);
+        $this->assertSame('', $this->transcript($session));
+        $this->assertCount(1, $this->pipers());
+        $this->assertCount(1, $this->loggedProblems());
+    }
+
+    public function testTellsTheCallOnlyOnceItHasStoppedSpeakingTheAnswerThatFailed(): void
+    {
+        // A call of two, with a memory of them together: the bot looks at who is in the channel while it answers.
+        $this->memory()->save(['555', '666'], 'They are planning a trip.');
+        $this->inCall('555', '666');
+        $this->playSeconds = 0.6;
+        $this->setProcessEnv([
+            'FAKE_CLAUDE_OUTPUT' => self::claudeText('It is a quarter past four. ') . "\n" . self::claudeResult('It is a quarter past four.'),
+            'FAKE_CLAUDE_PAUSE' => '10',
+        ]);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->played !== [], 'the first sentence to be spoken');
+        // While it is spoken, Claude finishes, and what the bot does with a finished answer fails.
+        $this->voiceStates[] = $this->unreadable();
+        touch($this->claudeResume);
+        $this->waitUntil(fn () => count($this->played) === 2, 'the call to be told');
+        $this->inCall('555', '666');
+
+        // After the sentence, not over it: the voice client plays one file at a time, and refuses another.
+        $this->assertSame(['It is a quarter past four.', self::SORRY], array_map(file_get_contents(...), $this->played));
+        $this->assertSame(['Voice reply failed: The voice states cannot be read'], $this->loggedProblems());
+        $this->assertSame(['Sorry, something went wrong with what was said. The bot\'s logs say why.'], $this->sent);
+    }
+
+    public function testWhatFailsBetweenPiperAndTheCallIsNotTakenForASentenceThatCannotBeSpoken(): void
+    {
+        $this->memory()->save(['555', '666'], 'They are planning a trip.');
+        $this->inCall('555', '666');
+        // Piper takes its time: the bot looks at who is in the channel again before it speaks the sentence.
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is a quarter past four.'), 'FAKE_PIPER_DELAY' => '0.5']);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->logged('Claude answered') !== [], 'Claude to answer');
+        $this->voiceStates[] = $this->unreadable();
+        $this->waitUntil(fn () => $this->played !== [], 'the call to be told');
+        $this->inCall('555', '666');
+
+        // Piper and the voice client both work, so the call can be told, and is.
+        $this->assertSame('other', $this->logged('Voice reply failed: The voice states cannot be read')[0]['step']);
+        $this->assertSame('Sorry, something went wrong with what was said. The bot\'s logs say why.', end($this->sent));
+        $this->assertSame([self::SORRY], array_map(file_get_contents(...), $this->played));
+    }
+
     public function testLeavesTheCallWhenItCanNoLongerKeepWhatIsSaid(): void
     {
         // Its voice client expects to be closed exactly once.
@@ -176,12 +262,7 @@ final class VoiceFailureTest extends VoiceTestCase
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);
         $this->inCall('555');
         // The bot's cache of who is in the channel fails when it is read: every time someone has finished saying something.
-        $this->voiceStates[] = new class () {
-            public function __get(string $name): never
-            {
-                throw new RuntimeException('The voice states cannot be read');
-            }
-        };
+        $this->voiceStates[] = $this->unreadable();
         $failed = fn (): int => count($this->logged('Something failed in the call: The voice states cannot be read'));
 
         foreach ([1, 2] as $utterance) {
@@ -210,12 +291,7 @@ final class VoiceFailureTest extends VoiceTestCase
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);
         // Someone is in the middle of saying something when the call is stopped.
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
-        $this->voiceStates[] = new class () {
-            public function __get(string $name): never
-            {
-                throw new RuntimeException('The voice states cannot be read');
-            }
-        };
+        $this->voiceStates[] = $this->unreadable();
 
         await($session->stop());
 
@@ -223,6 +299,19 @@ final class VoiceFailureTest extends VoiceTestCase
         $this->assertSame(['Could not keep what was being said: The voice states cannot be read'], $this->loggedProblems());
         $this->assertCount(1, $this->logged('Voice session stopped'));
         $this->assertNotContains($session, VoiceSession::unfinished());
+    }
+
+    /**
+     * Someone's voice state that fails when it is read, and with it the bot's look at who is in the channel.
+     */
+    private function unreadable(): object
+    {
+        return new class () {
+            public function __get(string $name): never
+            {
+                throw new RuntimeException('The voice states cannot be read');
+            }
+        };
     }
 
     /**

@@ -28,17 +28,4 @@ final class FailedReplyTest extends TestCase
     {
         $this->assertSame('other', FailedReply::stepOf(new RuntimeException('A bug')));
     }
-
-    public function testAStepThatFailedIsNotTakenForTheOneThatWaitedForIt(): void
-    {
-        // A sentence waits for the ones before it, and fails with them: it is the first one that failed.
-        $first = new FailedReply(FailedReply::CLAUDE, new RuntimeException('Claude Code: Not logged in'));
-
-        $this->assertSame($first, FailedReply::of(FailedReply::SPEECH, $first));
-
-        $piper = new RuntimeException('piper exited with code 1');
-        $failed = FailedReply::of(FailedReply::SPEECH, $piper);
-
-        $this->assertSame(['speech', $piper], [$failed->step, $failed->getPrevious()]);
-    }
 }

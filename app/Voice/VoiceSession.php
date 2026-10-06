@@ -152,6 +152,9 @@ final class VoiceSession
     /** @var array<string, true> The servers a call is about to start in, by guild ID. */
     private static array $starting = [];
 
+    /** Whether the bot is stopping, and starts no call any more. */
+    private static bool $refusing = false;
+
     private UtteranceSplitter $splitter;
 
     private TimerInterface $ticker;
@@ -375,6 +378,20 @@ final class VoiceSession
         } else {
             unset(self::$starting[$guildId]);
         }
+    }
+
+    /**
+     * Says that the bot is stopping. No call is started from now on: nothing would stop it before the bot
+     * ends, however long that takes while the calls there were are summarized.
+     */
+    public static function refuseNewCalls(): void
+    {
+        self::$refusing = true;
+    }
+
+    public static function refusesNewCalls(): bool
+    {
+        return self::$refusing;
     }
 
     /**
@@ -960,10 +977,17 @@ final class VoiceSession
             return $posted;
         }
 
-        $this->apologized[$step] = true;
-
         return $posted
-            ->then(fn () => $this->say(self::SORRY, $userId))
+            ->then(function () use ($step, $userId) {
+                // Checked again: the call may have stopped, or they may have opted out, while it was posted.
+                if (! $this->stillTalkingTo($userId)) {
+                    return null;
+                }
+
+                $this->apologized[$step] = true;
+
+                return $this->say(self::SORRY, $userId);
+            })
             ->catch(fn (Throwable $e) => $this->log('warning', 'Could not say sorry: ' . $e->getMessage(), ['user' => $userId]));
     }
 
@@ -1166,7 +1190,10 @@ final class VoiceSession
         // What the last sentence so far waits for: Piper to be done with it, and the bot to have said it.
         $synthesized = $spoken = resolve(null);
 
-        $sentences = new SentenceSplitter(function (string $sentence) use (&$synthesized, &$spoken, $userId, $depends, $basis, $among, $endedAt) {
+        // Only Piper and the voice client: anything else that fails on the way is nothing the bot expects to.
+        $unspoken = static fn (Throwable $e) => throw new FailedReply(FailedReply::SPEECH, $e);
+
+        $sentences = new SentenceSplitter(function (string $sentence) use (&$synthesized, &$spoken, $unspoken, $userId, $depends, $basis, $among, $endedAt) {
             if (! $this->stillAnswering($userId, $depends, $basis, $among)) {
                 return;
             }
@@ -1178,8 +1205,8 @@ final class VoiceSession
             // A sentence is synthesized as soon as Piper is free, while the ones before it are spoken. It is
             // spoken once they are over: the voice client refuses to play a file while it is playing another.
             // Once the call stops, they opt out or talk over the answer, the sentences still waiting for Piper are no longer synthesized either.
-            $synthesized = $synthesized->then(fn () => $this->stillAnswering($userId, $depends, $basis, $among) ? $this->synthesize($sentence, $oggPath) : null);
-            $spoken = $synthesized->finally(fn () => $before)->then(function () use ($userId, $depends, $basis, $among, $oggPath, $endedAt) {
+            $synthesized = $synthesized->then(fn () => $this->stillAnswering($userId, $depends, $basis, $among) ? $this->synthesize($sentence, $oggPath)->catch($unspoken) : null);
+            $spoken = $synthesized->finally(fn () => $before)->then(function () use ($unspoken, $userId, $depends, $basis, $among, $oggPath, $endedAt) {
                 if (! $this->stillAnswering($userId, $depends, $basis, $among)) {
                     return null;
                 }
@@ -1191,8 +1218,8 @@ final class VoiceSession
 
                 // The voice client never says the sentence finished when it is closed while speaking it, and
                 // rarely does when it is stopped, as it is when they talk over the answer: see hear().
-                return race([$this->vc->playFile($oggPath), $this->left->promise(), $this->speaking['cut']->promise()]);
-            })->catch(fn (Throwable $e) => throw FailedReply::of(FailedReply::SPEECH, $e));
+                return race([$this->vc->playFile($oggPath)->catch($unspoken), $this->left->promise(), $this->speaking['cut']->promise()]);
+            });
         });
 
         // The line that hands a question off is never spoken: the start of a line waits until it is known not to be it.
@@ -1275,7 +1302,11 @@ final class VoiceSession
                 // The sentences Claude finished are still spoken, and the next answer waits for them.
                 return $spoken->finally(fn () => throw new FailedReply(FailedReply::CLAUDE, $e));
             },
-        )->finally(function () {
+        )->catch(function (Throwable $e) use (&$spoken) {
+            // Whatever failed, also in what is done with Claude's answer: the turn is only over once the bot has
+            // stopped speaking, or the call would be told that it failed over the sentences still being spoken.
+            return $spoken->finally(fn () => throw $e);
+        })->finally(function () {
             // The bot is no longer speaking: nobody can talk over it.
             $this->speaking = null;
         });

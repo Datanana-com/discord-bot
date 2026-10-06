@@ -103,7 +103,7 @@ The bot also looks at the global commands Discord has for its application when i
 
 A command can take options and be shown only to members with a permission: set its `$options`, each as Discord's [option object](https://docs.discord.com/developers/interactions/application-commands#application-command-object-application-command-option-structure), and its `$defaultMemberPermissions`, like `app/Commands/Global/SettingsCommand.php` does. Server admins can change who sees a command, so a command that needs a permission also checks it in `handle()`. A command is saved to Discord again when its description, options or permissions change.
 
-A command's `handle()` returns the promise of what it is still doing when it returns, such as sending its reply, or `null`. When `handle()` throws, or that promise is rejected, whoever used the command is told "Something went wrong with /<name>. The bot's logs say what.", which only they see, and the bot goes on. A reply the command had already sent is changed to that, as Discord takes one reply to a command. The message never says what failed: that is logged as `/<name> failed`, with the error (see [Logs and statistics](#logs-and-statistics)). An error in a class of `app/Events` is logged with the event's name, and the bot goes on too.
+A command's `handle()` returns the promise of what it is still doing when it returns, such as sending its reply, or `null`. When `handle()` throws, or that promise is rejected, whoever used the command is told "Something went wrong with /<name>. The bot's logs say what.", and the bot goes on. Only they see it, unless the command had already replied: that reply is then changed to it, as Discord takes one reply to a command, and stays as visible as it was, which for `/record` and `/meet` is to everyone in the channel. The message never says what failed: that is logged as `/<name> failed`, with the error (see [Logs and statistics](#logs-and-statistics)). An error in a class of `app/Events` is logged with the event's name, and the bot goes on too.
 
 ## Voice calls with Claude
 
@@ -386,24 +386,25 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
 **Ctrl+C in the bot's terminal, or `kill` of its process** (SIGINT or SIGTERM, which is also what a service manager sends), stops the bot the way `/stop` stops a call:
 
 - It leaves every voice channel at once, and finishes the recordings. The meetings made with `/meet` end too, and their channels are deleted.
-- It then goes on until every call is summarized and its memories are updated, however long that takes, closes its connection to Discord and ends, with exit code 0. What is still being [looked up](#looking-things-up) is dropped.
+- It then goes on until every call is summarized and its memories are updated, however long that takes, closes its connection to Discord and ends, with exit code 0. What is still being [looked up](#looking-things-up) is dropped. Meanwhile it starts no call: `/record` and `/meet` answer that it is being stopped.
 - Ctrl+C a second time ends it without waiting for that. A call that wasn't summarized by then keeps its `transcript.txt`.
 - The programs it started that are still running, such as a Claude Code that is looking something up, are ended with it.
 - The programs the bot runs (whisper.cpp, Claude Code, Piper, ffmpeg) are started in a session of their own, with `setsid`, where there is one. Ctrl+C goes to everything that runs in the terminal, and would otherwise end the Claude Code that is writing a summary.
-- This needs PHP's `pcntl` extension. Without it, the bot says so in a warning when it starts, and Ctrl+C ends it at once, still in its calls.
+- This needs PHP's `pcntl` extension. Without it, the bot says so in a warning when it starts, and Ctrl+C ends it at once, still in its calls, while the programs it had started go on until they are done.
 
 **When something fails**, the bot goes on where it can:
 
 - An exception in a callback of the event loop, the bot's own or a library's, is logged as `Something failed in the event loop`, and the bot goes on. Ten of them within ten seconds are no longer something that failed once: the bot tells the text channel of each call that it had to leave, leaves, and ends with exit code 1.
+- A bot that can't set its slash commands up when it starts, as when a command's class can't be made, logs `Error while preparing command classes` and ends with exit code 1.
 - An exception nothing caught, and a PHP fatal error such as running out of memory, are logged as `The bot ends: ...`, and the bot ends with exit code 255. It can't leave its calls then: see [Known limitations](#known-limitations).
 
-**Nothing starts the bot again** once it has ended: `composer serve` runs it once. To have it started again after it ended over an error, but not after you stopped it, run it under something that looks at its exit code. In a terminal, with `php` itself, as Composer ends with an error of its own when it is interrupted with Ctrl+C:
+**Nothing starts the bot again** once it has ended: `composer serve` runs it once. To have it started again after it ended over an error, but not after you stopped it, run it under something that looks at its exit code. A bot that fails the same way every time it starts is then started over and over, every few seconds. In a terminal, with `php` itself, as Composer ends with an error of its own when it is interrupted with Ctrl+C:
 
 ```bash
 until php index.php; do sleep 5; done
 ```
 
-Or as a systemd user service, in `~/.config/systemd/user/discord-bot.service` (`systemctl --user enable --now discord-bot`), which also stops it with SIGTERM, and waits for the summaries:
+Or as a systemd user service, in `~/.config/systemd/user/discord-bot.service` (`systemctl --user enable --now discord-bot`), which also stops it with SIGTERM, and waits for the summaries. `KillMode=mixed` is what has it send that signal to the bot alone: without it, the programs the bot runs get it too, and a summary that was being written is lost.
 
 ```ini
 [Unit]
@@ -414,7 +415,8 @@ WorkingDirectory=%h/discord-bot
 ExecStart=/usr/bin/php index.php
 Restart=on-failure
 RestartSec=5
-# The bot ends by itself once its calls are summarized.
+# Only the bot is told to stop, and it ends by itself once its calls are summarized.
+KillMode=mixed
 TimeoutStopSec=infinity
 
 [Install]
@@ -509,6 +511,7 @@ A call also logs `Interrupted` when the person the bot is answering talks over i
 
 - `/<name> failed`: a slash command threw, or the promise it worked with was rejected. With the `guild`, the `channel` and the `user`. `Could not tell that /<name> failed` is the warning for a reply that couldn't be sent either.
 - `Error while handling event` and `Event "<method>" failed with the following error`: a class of `app/Events` threw, with the `event`.
+- `Error while preparing command classes`: the bot's slash commands couldn't be set up when it started, and it ends.
 - `Voice reply failed`: something said in a call couldn't be transcribed or answered, or the answer couldn't be spoken, with the `user` and the `step` that failed: `whisper`, `claude`, `speech`, or `other` for what the bot doesn't expect to fail.
 - `Something failed in the call`, and `Leaving the call: the same thing has failed 3 times`: see [Voice calls with Claude](#voice-calls-with-claude). `Could not keep what was being said` is the warning for what someone was saying when a call stopped, and couldn't be transcribed for it.
 - `Something failed in the event loop`, and the critical `Too much is failing in the event loop: leaving every call and stopping`: see [Stopping the bot, and starting it again](#stopping-the-bot-and-starting-it-again).

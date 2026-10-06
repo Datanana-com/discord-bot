@@ -54,10 +54,12 @@ final class ApplicationStopTest extends VoiceTestCase
         $second = VoiceSession::start($this->voiceClient($other = $this->voiceChannel('400', '300'), connected: true), $other, $this->discord);
         $this->ask($vc, '555', 'Claude, what time is it?');
         $posted = count($this->sent);
+        $this->assertFalse(VoiceSession::refusesNewCalls());
 
         $code = $this->runBot(fn () => Loop::addTimer(0.1, fn () => posix_kill(getmypid(), $signal)));
 
         $this->assertSame(0, $code, 'It was told to stop: nothing failed.');
+        $this->assertTrue(VoiceSession::refusesNewCalls(), 'No call starts while it waits for the ones there were: nothing would stop it.');
         $this->assertSame(['received ' . $name], array_column($this->logged('Stopping the bot'), 'reason'));
         $this->assertGreaterThanOrEqual(2, $this->logged('Stopping the bot')[0]['calls']);
         $this->assertNull(VoiceSession::forGuild(self::GUILD_ID));
@@ -185,6 +187,21 @@ final class ApplicationStopTest extends VoiceTestCase
             array_values(array_filter($this->logs->getRecords(), fn ($record) => str_starts_with($record->message, 'Too much')))[0]->level,
         );
         $this->assertSame(['too many errors'], array_column($this->logged('Stopping the bot'), 'reason'));
+    }
+
+    public function testTenFailuresWithinTenSecondsAreTooMany(): void
+    {
+        $app = $this->app();
+        // Nine things failed over the last five seconds.
+        (new ReflectionProperty(Application::class, 'caughtAt'))->setValue($app, array_fill(0, 9, microtime(true) - 5));
+
+        $code = $this->runBot(fn () => Loop::futureTick(fn () => throw new RuntimeException('The tenth')), $app);
+
+        $this->assertSame(1, $code);
+        $this->assertSame(
+            [['failures' => 10, 'seconds' => 10.0]],
+            $this->logged('Too much is failing in the event loop: leaving every call and stopping'),
+        );
     }
 
     /**

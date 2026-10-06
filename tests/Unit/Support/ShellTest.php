@@ -241,9 +241,19 @@ final class ShellTest extends TestCase
         $tracked = fn (): int => count((new ReflectionProperty(Shell::class, 'running'))->getValue());
         $before = $tracked();
         $started = microtime(true);
-        $run = Shell::run(['sleep', '30']);
-        $kept = Shell::open(['sleep', '30']);
+        $up = 0;
+        $count = function () use (&$up) {
+            $up++;
+        };
+        // Each says so once it runs: stopped sooner, the shell that starts it would be what is stopped.
+        $run = Shell::stream(['sh', '-c', 'echo up; exec sleep 30'], $count);
+        $kept = Shell::open(['sh', '-c', 'echo up; exec sleep 30'], $count);
         await(Shell::run(['true']));
+
+        while ($up < 2 && microtime(true) - $started < 10) {
+            delay(0.05);
+        }
+
         $this->assertSame($before + 2, $tracked(), 'One that has ended is no longer kept.');
 
         // What the bot does when it ends: they would go on without it.
@@ -254,7 +264,7 @@ final class ShellTest extends TestCase
                 await($ended);
                 $this->fail('The program should have been stopped.');
             } catch (CommandFailedException $e) {
-                $this->assertSame('sleep was killed by signal 15', $e->getMessage());
+                $this->assertSame('sh was killed by signal 15', $e->getMessage());
             }
         }
 

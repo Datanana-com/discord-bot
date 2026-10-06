@@ -20,12 +20,16 @@ final class GuardedLoopTest extends TestCase
 {
     private GuardedLoop $loop;
 
+    /** The loop it guards. What is added to it directly runs unguarded. */
+    private StreamSelectLoop $inner;
+
     /** @var list<Throwable> What the loop's callbacks threw. */
     private array $caught = [];
 
     protected function setUp(): void
     {
-        $this->loop = new GuardedLoop(new StreamSelectLoop(), function (Throwable $e) {
+        $this->inner = new StreamSelectLoop();
+        $this->loop = new GuardedLoop($this->inner, function (Throwable $e) {
             $this->caught[] = $e;
         });
     }
@@ -141,7 +145,9 @@ final class GuardedLoopTest extends TestCase
             throw new RuntimeException('Could not stop');
         };
         $this->loop->addSignal(SIGUSR1, $listener);
-        $this->loop->futureTick(fn () => posix_kill(getmypid(), SIGUSR1));
+        // Not from a callback of the guarded loop: PHPUnit has signals handled at once, which would be inside
+        // that callback, and its guard. The bot's loop hands signals on between two callbacks.
+        $this->inner->futureTick(fn () => posix_kill(getmypid(), SIGUSR1));
 
         $this->loop->run();
 
@@ -166,7 +172,7 @@ final class GuardedLoopTest extends TestCase
         // One that was never added, and one of a signal nothing listens to.
         $this->loop->removeSignal(SIGUSR1, fn () => null);
         $this->loop->removeSignal(SIGUSR2, $kept);
-        $this->loop->futureTick(fn () => posix_kill(getmypid(), SIGUSR1));
+        $this->inner->futureTick(fn () => posix_kill(getmypid(), SIGUSR1));
 
         $this->loop->run();
 
