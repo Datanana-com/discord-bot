@@ -49,12 +49,12 @@ final class ApplicationTest extends TestCase
         RecordingEvent::$before = null;
         $this->originalRecordingsPath = $_ENV['RECORDINGS_PATH'] ?? null;
         // No recordings are deleted when the bot is ready, unless a test asks for it.
-        unset($_ENV['BOT_SLASH_COMMANDS'], $_SERVER['BOT_SLASH_COMMANDS'], $_ENV['RECORDINGS_RETENTION_DAYS'], $_SERVER['RECORDINGS_RETENTION_DAYS']);
+        unset($_ENV['BOT_SLASH_COMMANDS'], $_SERVER['BOT_SLASH_COMMANDS'], $_ENV['BOT_REMOVE_OLD_COMMANDS'], $_SERVER['BOT_REMOVE_OLD_COMMANDS'], $_ENV['RECORDINGS_RETENTION_DAYS'], $_SERVER['RECORDINGS_RETENTION_DAYS']);
     }
 
     protected function tearDown(): void
     {
-        unset($_ENV['BOT_SLASH_COMMANDS'], $_ENV['RECORDINGS_RETENTION_DAYS'], $_ENV['RECORDINGS_PATH']);
+        unset($_ENV['BOT_SLASH_COMMANDS'], $_ENV['BOT_REMOVE_OLD_COMMANDS'], $_ENV['RECORDINGS_RETENTION_DAYS'], $_ENV['RECORDINGS_PATH']);
 
         if ($this->originalRecordingsPath !== null) {
             $_ENV['RECORDINGS_PATH'] = $this->originalRecordingsPath;
@@ -201,17 +201,24 @@ final class ApplicationTest extends TestCase
             'share' => ['Lets the bot use your personal memory for everyone in the call it is recording.', Command::CHAT_INPUT],
             'stats' => ['Shows how this server has used the bot.', Command::CHAT_INPUT],
             'stop' => ['Stops recording and leaves the voice channel.', Command::CHAT_INPUT],
-            'test' => ['A test global command', Command::CHAT_INPUT],
             'unshare' => ['Takes your personal memory back from the call it was shared with.', Command::CHAT_INPUT],
         ], $commands->saved);
-        $this->assertContains('Global commands found: ForgetCommand, MeetCommand, MemoryCommand, OptinCommand, OptoutCommand, PrivacyCommand, RecallCommand, RecordCommand, SettingsCommand, ShareCommand, StatsCommand, StopCommand, TestCommand, UnshareCommand', $this->logged());
+        $this->assertContains('Global commands found: ForgetCommand, MeetCommand, MemoryCommand, OptinCommand, OptoutCommand, PrivacyCommand, RecallCommand, RecordCommand, SettingsCommand, ShareCommand, StatsCommand, StopCommand, UnshareCommand', $this->logged());
         $this->assertContains('Command record has been saved.', $this->logged());
+        $this->assertSame(['forget', 'meet', 'memory', 'optin', 'optout', 'privacy', 'recall', 'record', 'settings', 'share', 'stats', 'stop', 'unshare'], array_keys($commands->listeners));
+    }
 
-        // Each command's interactions go to its class, and are logged: /test logs a greeting.
-        $this->assertSame(['forget', 'meet', 'memory', 'optin', 'optout', 'privacy', 'recall', 'record', 'settings', 'share', 'stats', 'stop', 'test', 'unshare'], array_keys($commands->listeners));
-        ($commands->listeners['test'])(new Interaction($app->discord, ['guild_id' => '100', 'channel_id' => '200', 'user' => ['id' => '555', 'username' => 'alice']], true));
-        $this->assertContains(['/test used', ['guild' => '100', 'channel' => '200', 'user' => '555']], $this->loggedWithContext());
-        $this->assertContains('Hello, World!', $this->logged());
+    public function testHandsACommandsInteractionsToItsClassAndLogsThem(): void
+    {
+        $this->addAppFile('Commands/Global/PingCommand.php', "<?php\n\nnamespace App\\Commands\\Global;\n\nuse App\\CommandAbstract;\nuse Discord\\Parts\\Interactions\\Interaction;\n\nfinal class PingCommand extends CommandAbstract\n{\n    public string \$description = 'Answers with a pong';\n\n    public function handle(Interaction \$interaction): void\n    {\n        \$this->log->info('Pong!');\n    }\n}\n");
+        [$app, $commands] = $this->appWithCommands();
+
+        $app->prepareCommandClasses();
+
+        $this->assertSame(['Answers with a pong', Command::CHAT_INPUT], $commands->saved['ping']);
+        ($commands->listeners['ping'])(new Interaction($app->discord, ['guild_id' => '100', 'channel_id' => '200', 'user' => ['id' => '555', 'username' => 'alice']], true));
+        $this->assertContains(['/ping used', ['guild' => '100', 'channel' => '200', 'user' => '555']], $this->loggedWithContext());
+        $this->assertContains('Pong!', $this->logged());
     }
 
     public function testOnlyRegistersGlobalCommands(): void
@@ -223,7 +230,7 @@ final class ApplicationTest extends TestCase
         $app->prepareCommandClasses();
 
         $this->assertContains('Guild specific commands found: PingCommand', $this->logged());
-        $this->assertSame(['forget', 'meet', 'memory', 'optin', 'optout', 'privacy', 'recall', 'record', 'settings', 'share', 'stats', 'stop', 'test', 'unshare'], array_keys($commands->saved));
+        $this->assertSame(['forget', 'meet', 'memory', 'optin', 'optout', 'privacy', 'recall', 'record', 'settings', 'share', 'stats', 'stop', 'unshare'], array_keys($commands->saved));
     }
 
     public function testDoesNotSaveCommandsDiscordAlreadyHas(): void
@@ -235,10 +242,10 @@ final class ApplicationTest extends TestCase
 
         $app->prepareCommandClasses();
 
-        $this->assertSame(['forget', 'meet', 'memory', 'optin', 'optout', 'privacy', 'recall', 'settings', 'share', 'stats', 'test', 'unshare'], array_keys($commands->saved));
+        $this->assertSame(['forget', 'meet', 'memory', 'optin', 'optout', 'privacy', 'recall', 'settings', 'share', 'stats', 'unshare'], array_keys($commands->saved));
         $this->assertContains('Command record already exists.', $this->logged());
         $this->assertContains('Command stop already exists.', $this->logged());
-        $this->assertSame(['forget', 'meet', 'memory', 'optin', 'optout', 'privacy', 'recall', 'record', 'settings', 'share', 'stats', 'stop', 'test', 'unshare'], array_keys($commands->listeners), 'Existing commands are still handled.');
+        $this->assertSame(['forget', 'meet', 'memory', 'optin', 'optout', 'privacy', 'recall', 'record', 'settings', 'share', 'stats', 'stop', 'unshare'], array_keys($commands->listeners), 'Existing commands are still handled.');
     }
 
     public function testSavesCommandsThatChanged(): void
@@ -404,7 +411,7 @@ final class ApplicationTest extends TestCase
 
         $this->assertSame([], $commands->saved);
         $this->assertContains('Could not fetch the registered commands: Discord API unavailable', $this->logged());
-        $this->assertSame(['forget', 'meet', 'memory', 'optin', 'optout', 'privacy', 'recall', 'record', 'settings', 'share', 'stats', 'stop', 'test', 'unshare'], array_keys($commands->listeners), 'Commands Discord already has keep working.');
+        $this->assertSame(['forget', 'meet', 'memory', 'optin', 'optout', 'privacy', 'recall', 'record', 'settings', 'share', 'stats', 'stop', 'unshare'], array_keys($commands->listeners), 'Commands Discord already has keep working.');
     }
 
     public function testLogsCommandsThatCannotBeSaved(): void
@@ -415,6 +422,123 @@ final class ApplicationTest extends TestCase
 
         $this->assertContains('Could not save command record: Invalid Form Body', $this->logged());
         $this->assertNotContains('Command record has been saved.', $this->logged());
+    }
+
+    public function testNamesTheCommandsDiscordHasAndTheBotDoesNotAndLeavesThem(): void
+    {
+        [$app, $commands] = $this->appWithCommands(registered: self::leftovers());
+
+        $app->prepareCommandClasses();
+
+        $this->assertSame([], $commands->removed, 'Nothing is removed unless BOT_REMOVE_OLD_COMMANDS is set.');
+        $this->assertContains('Discord has global commands the bot has no class for: join, leave, live. Set BOT_REMOVE_OLD_COMMANDS to remove them.', $this->logged());
+        $this->assertTrue($this->logs->hasWarning('Discord has global commands the bot has no class for: join, leave, live. Set BOT_REMOVE_OLD_COMMANDS to remove them.'));
+    }
+
+    #[DataProvider('switchesThatRemove')]
+    public function testRemovesTheCommandsDiscordHasAndTheBotDoesNotWhenToldTo(string $value): void
+    {
+        $_ENV['BOT_REMOVE_OLD_COMMANDS'] = $value;
+        // /record is one of the bot's own, saved in the same start because its description changed.
+        [$app, $commands] = $this->appWithCommands(registered: [
+            ...self::leftovers(),
+            ['id' => '4', 'name' => 'record', 'description' => 'Starts recording the current voice channel.', 'type' => Command::CHAT_INPUT],
+        ]);
+
+        $app->prepareCommandClasses();
+
+        $this->assertSame(['join' => '1', 'leave' => '2', 'live' => '3'], $commands->removed, 'Only what the bot has no class for, each by its id.');
+        $this->assertContains('Discord has global commands the bot has no class for: join, leave, live.', $this->logged());
+        $this->assertContains('Command join has been removed.', $this->logged());
+        $this->assertContains('Command leave has been removed.', $this->logged());
+        $this->assertContains('Command live has been removed.', $this->logged());
+        $this->assertContains('record', array_keys($commands->saved), 'The bot still saves its own.');
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function switchesThatRemove(): iterable
+    {
+        yield 'true' => ['true'];
+        yield '1' => ['1'];
+        yield 'yes' => ['yes'];
+        yield 'on' => ['on'];
+    }
+
+    #[DataProvider('switchesThatDoNotRemove')]
+    public function testDoesNotRemoveWhenTheSwitchIsOffOrNotAnAnswer(string $value): void
+    {
+        $_ENV['BOT_REMOVE_OLD_COMMANDS'] = $value;
+        [$app, $commands] = $this->appWithCommands(registered: self::leftovers());
+
+        $app->prepareCommandClasses();
+
+        $this->assertSame([], $commands->removed);
+        $this->assertContains('Discord has global commands the bot has no class for: join, leave, live. Set BOT_REMOVE_OLD_COMMANDS to remove them.', $this->logged());
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function switchesThatDoNotRemove(): iterable
+    {
+        yield 'empty' => [''];
+        yield 'false' => ['false'];
+        yield '0' => ['0'];
+        yield 'off' => ['off'];
+        yield 'no' => ['no'];
+        yield 'anything else' => ['maybe'];
+    }
+
+    public function testSaysNothingWhenDiscordHasNoCommandTheBotLacks(): void
+    {
+        $_ENV['BOT_REMOVE_OLD_COMMANDS'] = 'true';
+        [$app, $commands] = $this->appWithCommands(registered: [
+            ['id' => '4', 'name' => 'record', 'description' => 'Records your voice channel and lets everyone in it talk to Claude.', 'type' => Command::CHAT_INPUT],
+        ]);
+
+        $app->prepareCommandClasses();
+
+        $this->assertSame([], $commands->removed);
+        $this->assertSame([], preg_grep('/^Discord has global commands/', $this->logged()));
+    }
+
+    public function testLogsACommandThatCannotBeRemovedAndGoesOn(): void
+    {
+        $_ENV['BOT_REMOVE_OLD_COMMANDS'] = 'true';
+        [$app, $commands] = $this->appWithCommands(registered: self::leftovers(), removeErrors: ['join' => new RuntimeException('Missing Access')]);
+
+        $app->prepareCommandClasses();
+
+        $this->assertContains('Could not remove command join: Missing Access', $this->logged());
+        $this->assertNotContains('Command join has been removed.', $this->logged());
+        $this->assertSame(['leave' => '2', 'live' => '3'], $commands->removed, 'The others are still removed.');
+        $this->assertContains('Command record has been saved.', $this->logged(), 'And the bot still saves its own.');
+    }
+
+    public function testRemovesNothingWhenTheRegisteredCommandsCannotBeFetched(): void
+    {
+        $_ENV['BOT_REMOVE_OLD_COMMANDS'] = 'true';
+        [$app, $commands] = $this->appWithCommands(registered: self::leftovers(), fetchError: new RuntimeException('Discord API unavailable'));
+
+        $app->prepareCommandClasses();
+
+        $this->assertSame([], $commands->removed);
+        $this->assertSame([], preg_grep('/^Discord has global commands/', $this->logged()));
+    }
+
+    public function testRemovesNothingWhenSlashCommandsAreDisabled(): void
+    {
+        $_ENV['BOT_REMOVE_OLD_COMMANDS'] = 'true';
+        [$app, $commands] = $this->appWithCommands(registered: self::leftovers());
+        unset($_ENV['BOT_SLASH_COMMANDS']);
+
+        $app->prepareCommandClasses();
+
+        $this->assertSame([], $commands->removed);
+        $this->assertSame([], $commands->saved);
+        $this->assertContains('Slash commands are disabled.', $this->logged());
     }
 
     public function testClosesTheBotWhenCommandsCannotBeRegistered(): void
@@ -486,9 +610,10 @@ final class ApplicationTest extends TestCase
      * An application with slash commands enabled, whose Discord application already has the given commands.
      *
      * @param list<array<string, mixed>> $registered Attributes of the commands Discord already has.
-     * @return array{Application, object} The application, and the command repository that records what is saved.
+     * @param array<string, \Throwable> $removeErrors Why removing the command of that name fails.
+     * @return array{Application, object} The application, and the command repository that records what is saved and removed.
      */
-    private function appWithCommands(array $registered = [], ?\Throwable $fetchError = null, ?\Throwable $saveError = null): array
+    private function appWithCommands(array $registered = [], ?\Throwable $fetchError = null, ?\Throwable $saveError = null, array $removeErrors = []): array
     {
         $_ENV['BOT_SLASH_COMMANDS'] = 'true';
         $app = $this->app();
@@ -496,7 +621,7 @@ final class ApplicationTest extends TestCase
         $registered = array_map(fn (array $attributes) => new Command($client, $attributes, true), $registered);
 
         // Behaves like DiscordPHP's GlobalCommandRepository: freshen() fetches the registered commands.
-        $commands = new class ($registered, $fetchError, $saveError) {
+        $commands = new class ($registered, $fetchError, $saveError, $removeErrors) implements \IteratorAggregate {
             /** @var array<string, array{string, int}> Saved commands: name => [description, type]. */
             public array $saved = [];
 
@@ -506,12 +631,35 @@ final class ApplicationTest extends TestCase
             /** @var array<string, callable> Interaction handlers by command name. */
             public array $listeners = [];
 
-            /** @param list<Command> $registered */
+            /** @var array<string, string> The commands removed from Discord: name => the ID that was sent. */
+            public array $removed = [];
+
+            /**
+             * @param list<Command> $registered
+             * @param array<string, \Throwable> $removeErrors
+             */
             public function __construct(
                 private array $registered,
                 private ?\Throwable $fetchError,
                 private ?\Throwable $saveError,
+                private array $removeErrors,
             ) {
+            }
+
+            public function getIterator(): \Traversable
+            {
+                return new \ArrayIterator($this->registered);
+            }
+
+            public function delete(Command $command): PromiseInterface
+            {
+                if (isset($this->removeErrors[$command->name])) {
+                    return reject($this->removeErrors[$command->name]);
+                }
+
+                $this->removed[$command->name] = $command->id;
+
+                return resolve($command);
             }
 
             public function freshen(): PromiseInterface
@@ -546,6 +694,20 @@ final class ApplicationTest extends TestCase
         $app->discord = $this->discordStub($client, ['application' => (object) ['commands' => $commands]], $commands->listeners);
 
         return [$app, $commands];
+    }
+
+    /**
+     * Commands Discord has that no class of the bot makes, as an earlier project registered them: listed out of order.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private static function leftovers(): array
+    {
+        return [
+            ['id' => '3', 'name' => 'live', 'description' => 'Starts a live.', 'type' => Command::CHAT_INPUT],
+            ['id' => '1', 'name' => 'join', 'description' => 'Joins your channel.', 'type' => Command::CHAT_INPUT],
+            ['id' => '2', 'name' => 'leave', 'description' => 'Leaves your channel.', 'type' => Command::CHAT_INPUT],
+        ];
     }
 
     /**

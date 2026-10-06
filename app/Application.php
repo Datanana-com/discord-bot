@@ -273,9 +273,52 @@ final class Application
                         fn (\Throwable $e) => $this->log->error("Could not save command {$commandName}: {$e->getMessage()}"),
                     );
                 }
+
+                $this->handleLeftoverCommands($registered, array_keys($commands));
             },
             fn (\Throwable $e) => $this->log->error('Could not fetch the registered commands: ' . $e->getMessage()),
         );
+    }
+
+    /**
+     * Names the global commands Discord has and the bot has no class for, and removes them when BOT_REMOVE_OLD_COMMANDS is set.
+     *
+     * Only the bot's own checkout knows what its commands are: two checkouts with different commands under one
+     * Discord application would remove each other's, so nothing is removed unless asked for.
+     *
+     * @param iterable<Command> $registered The commands Discord has.
+     * @param list<string> $known The names of the commands the bot has a class for.
+     */
+    private function handleLeftoverCommands(iterable $registered, array $known): void
+    {
+        $leftovers = [];
+
+        foreach ($registered as $command) {
+            if ($command !== null && ! in_array($command->name, $known, true)) {
+                $leftovers[] = $command;
+            }
+        }
+
+        if ($leftovers === []) {
+            return;
+        }
+
+        usort($leftovers, fn (Command $a, Command $b) => $a->name <=> $b->name);
+        $names = implode(', ', array_map(fn (Command $command) => $command->name, $leftovers));
+        $remove = filter_var(env('BOT_REMOVE_OLD_COMMANDS', false), FILTER_VALIDATE_BOOLEAN);
+
+        $this->log->warning("Discord has global commands the bot has no class for: {$names}." . ($remove ? '' : ' Set BOT_REMOVE_OLD_COMMANDS to remove them.'));
+
+        if (! $remove) {
+            return;
+        }
+
+        foreach ($leftovers as $command) {
+            $this->discord->application->commands->delete($command)->then(
+                fn () => $this->log->info("Command {$command->name} has been removed."),
+                fn (\Throwable $e) => $this->log->error("Could not remove command {$command->name}: {$e->getMessage()}"),
+            );
+        }
     }
 
     /**
