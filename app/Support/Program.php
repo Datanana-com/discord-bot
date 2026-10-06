@@ -62,8 +62,7 @@ final class Program
         // Nobody may be waiting for a program to end, and it can still fail.
         $this->done->promise()->catch(static fn () => null);
 
-        // "exec" replaces the wrapping shell, so terminate() reaches the program itself.
-        $this->process = new Process('exec ' . implode(' ', array_map(escapeshellarg(...), $command)), $cwd, $env);
+        $this->process = new Process(Shell::command($command), $cwd, $env);
 
         try {
             $this->process->start();
@@ -76,6 +75,7 @@ final class Program
             return;
         }
 
+        Shell::track($this->process);
         $this->process->stdout->on('data', fn (string $chunk) => $this->read('stdout', $chunk));
         $this->process->stderr->on('data', fn (string $chunk) => $this->read('stderr', $chunk));
         $this->process->on('exit', $this->exited(...));

@@ -100,6 +100,9 @@ abstract class VoiceTestCase extends TestCase
     /** When set, posting in the text channel fails with this error. */
     protected ?\Throwable $sendError = null;
 
+    /** When set, the voice client can't play a file, and fails with this error. */
+    protected ?\Throwable $playError = null;
+
     /** When set, a message only arrives in the text channel once this resolves. */
     protected ?PromiseInterface $sending = null;
 
@@ -185,6 +188,8 @@ abstract class VoiceTestCase extends TestCase
         await(all(array_map(fn (VoiceSession $session) => $session->stop(), VoiceSession::unfinished())));
         // A call a test left starting, as when the bot never got to join, is not starting in the next test.
         (new ReflectionProperty(VoiceSession::class, 'starting'))->setValue(null, []);
+        // Nor is a bot that was stopped in one test still stopping in the next.
+        (new ReflectionProperty(VoiceSession::class, 'refusing'))->setValue(null, false);
 
         foreach ($this->originalProcessEnv as $name => $value) {
             putenv($value === false ? $name : "{$name}={$value}");
@@ -492,6 +497,10 @@ abstract class VoiceTestCase extends TestCase
         // The file being played, when one is, and what is resolved when it has been.
         $busy = $finished = null;
         $vc->method('playFile')->willReturnCallback(function (string $file) use (&$busy, &$finished): PromiseInterface {
+            if ($this->playError !== null) {
+                return reject($this->playError);
+            }
+
             // Like the voice library, which plays one file at a time.
             if ($busy !== null) {
                 return reject(new AudioAlreadyPlayingException());

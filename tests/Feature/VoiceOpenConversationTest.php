@@ -880,11 +880,12 @@ final class VoiceOpenConversationTest extends VoiceTestCase
     private function hearsNoAnswer(VoiceClient $vc, VoiceSession $session, string $userId, string $text): void
     {
         $sent = $this->sent;
-        $played = $this->played;
         $asked = count($this->claudeCalls());
 
         $this->say($vc, $userId, $text);
         $this->waitUntil(fn () => str_contains($this->transcript($session), '] ' . self::MEMBERS[$userId] . ": {$text}\n"), 'it to be transcribed');
+        // Only now: it waited its turn behind the answer before it, whose last sentence may still have been spoken.
+        $played = $this->played;
         $this->runFor(0.5);
 
         $this->assertSame($sent, $this->sent, 'Nothing was posted.');

@@ -191,9 +191,10 @@ final class VoiceClaudeTest extends VoiceTestCase
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
         $this->waitUntil(fn () => $this->loggedProblems() !== [], 'the failure to be logged');
 
-        // Its first sentence was spoken: asking another process would say it again.
+        // Its first sentence was spoken: asking another process would say it again. The call is told instead.
+        $this->waitUntil(fn () => count($this->played) === 2, 'the call to be told');
         $this->assertCount(1, $this->claudeCalls());
-        $this->assertCount(1, $this->played);
+        $this->assertSame('Sorry, something went wrong.', file_get_contents($this->played[1]));
         $this->assertCount(1, $this->sent);
         $this->assertStringStartsWith("Sorry, I couldn't get an answer from Claude. (", $this->sent[0]);
         $this->assertCount(1, $this->loggedProblems());

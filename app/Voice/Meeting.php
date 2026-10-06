@@ -9,7 +9,11 @@ use Discord\Parts\Channel\Channel;
 use Discord\Parts\Guild\Guild;
 use Discord\Parts\WebSockets\VoiceStateUpdate;
 use React\EventLoop\TimerInterface;
+use React\Promise\PromiseInterface;
 use Throwable;
+
+use function React\Promise\all;
+use function React\Promise\resolve;
 
 /**
  * A private voice channel that /meet made for the people invited and the bot.
@@ -75,6 +79,16 @@ final class Meeting
     }
 
     /**
+     * Ends every meeting, as when the bot stops: nothing would delete their channels afterwards.
+     *
+     * @return PromiseInterface<mixed> Resolves once every channel is deleted, or couldn't be. It never rejects.
+     */
+    public static function endAll(): PromiseInterface
+    {
+        return all(array_map(fn (self $meeting) => $meeting->end(), self::$meetings));
+    }
+
+    /**
      * The bot joined the channel and records it with this call.
      *
      * @return bool False when the meeting is already over: the bot took longer to join than the
@@ -96,11 +110,13 @@ final class Meeting
 
     /**
      * Stops recording and deletes the channel. Safe to call more than once.
+     *
+     * @return PromiseInterface<mixed> Resolves once the channel is deleted, or couldn't be. It never rejects.
      */
-    public function end(): void
+    public function end(): PromiseInterface
     {
         if (! isset(self::$meetings[$this->channel->id])) {
-            return;
+            return resolve(null);
         }
 
         unset(self::$meetings[$this->channel->id]);
@@ -115,10 +131,12 @@ final class Meeting
             }
         } finally {
             // Also when the call couldn't be stopped: nothing else would delete a channel only its people see.
-            $this->guild->channels->delete($this->channel)->catch(function (Throwable $e) {
+            $deleted = $this->guild->channels->delete($this->channel)->catch(function (Throwable $e) {
                 $this->log('warning', 'Could not delete the meeting\'s channel: ' . $e->getMessage());
             });
         }
+
+        return $deleted;
     }
 
     private function see(VoiceStateUpdate $state): void

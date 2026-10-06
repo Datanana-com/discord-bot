@@ -1103,6 +1103,26 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->assertSame([], $this->loggedProblems());
     }
 
+    public function testPostsThatASentenceOfItsOwnCouldNotBeSpoken(): void
+    {
+        // Piper fails on the sentence that says so.
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT_LOOKUP' => self::claudeResult('Usage limit reached', isError: true), 'FAKE_PIPER_FAILS_ON' => 'look that up']);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 1, 'the lookup to start');
+
+        touch($this->go);
+        $this->waitUntil(fn () => count($this->sent) === 3, 'both failures to be posted');
+
+        // Like a sentence of an answer: the channel is told, and the call isn't told that it wasn't.
+        $this->assertSame("Sorry, I couldn't say that out loud. The bot's logs say why.", $this->sent[2]);
+        $this->assertCount(1, $this->played);
+        $failure = array_values(preg_grep('/^Voice reply failed: /', $this->loggedProblems()));
+        $this->assertCount(1, $failure);
+        $this->assertSame('speech', $this->logged($failure[0])[0]['step']);
+        $this->assertSame(1, $this->usage()['failures']);
+    }
+
     public function testPostsAndSaysThatSomethingCouldNotBeLookedUp(): void
     {
         $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT_LOOKUP' => self::claudeResult('Usage limit reached', isError: true)]);

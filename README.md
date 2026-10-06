@@ -41,7 +41,7 @@ They are registered when `BOT_SLASH_COMMANDS` is set.
 
 ## Voice calls with Claude
 
-`/record` joins your voice channel, records it, and lets everyone in it talk to Claude. The call ends with `/stop`, when someone says "disconnect Claude", or when someone disconnects the bot.
+`/record` joins your voice channel, records it, and lets everyone in it talk to Claude. The call ends with `/stop`, when someone says "disconnect Claude", when someone disconnects the bot, or when the bot is stopped.
 
 ```mermaid
 flowchart TD
@@ -64,6 +64,7 @@ flowchart TD
 - **Interrupting.** The bot stops speaking when the person it is answering starts talking.
 - **Leaving by voice.** Anyone in the call can say "disconnect Claude": the bot says "Okay.", then stops recording and leaves, as `/stop` does. "Disconnect" alone doesn't count.
 - **Summary.** When the call ends, Claude summarizes its whole transcript in the text channel where `/record` was used.
+- **When something fails.** What can't be transcribed, answered or spoken is said in the text channel, and the call hears "Sorry, something went wrong.", once for each thing that fails. The call goes on.
 
 A conversation belongs to one person:
 
@@ -211,6 +212,14 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
     composer serve
     ```
 
+## Stopping the bot, and when something fails
+
+- **Ctrl+C, or `kill`,** stops the bot the way `/stop` stops a call: it leaves every voice channel at once, ends the meetings made with `/meet`, and ends by itself once every call is summarized and its memories are updated. Ctrl+C a second time ends it without waiting for that.
+- **An error doesn't take the bot down.** What fails is logged with what called what, never with what was said, and the bot goes on. A slash command that failed tells whoever used it. Only when errors keep coming, ten within ten seconds, does the bot tell its calls, leave them and end, with exit code 1.
+- **Nothing starts the bot again** once it has ended. Run it under a loop, or as a systemd service, that looks at its exit code: 0 when you stopped it.
+
+More in [docs/stopping-and-errors.md](docs/stopping-and-errors.md): what is waited for, the exit codes, and a systemd unit.
+
 ## Configuration
 
 Set these in `.env`. The notes and measurements behind each one are in [docs/configuration.md](docs/configuration.md).
@@ -264,14 +273,15 @@ Every log message, and more queries, in [docs/logs-and-statistics.md](docs/logs-
 - The stop phrase and the leave phrase wait their turn behind what was said before them: a sentence is only known once it is transcribed, and sentences are handled one at a time.
 - The voice library keeps every decoded audio frame in memory until `/stop`, roughly 12 MB per speaker per minute of speech. For very long calls, `/stop` and `/record` again now and then.
 - Discord lets a bot be in one voice channel per server, and doesn't let bots join the calls of direct messages: use `/meet` for a private call.
-- The bot only remembers its meetings while it runs. When it stops during a meeting made with `/meet`, the meeting's channel stays: delete it by hand.
+- The bot only remembers its meetings while it runs. Stopped with Ctrl+C or a signal, it ends them and deletes their channels. When it ends another way during a meeting made with `/meet`, the meeting's channel stays: delete it by hand.
+- A bot that ends without being stopped (out of memory, `kill -9`, the machine going down) can't leave its calls: it stays in the voice channel until Discord notices, and the calls aren't summarized.
 
 The whole list is in [docs/voice-calls.md](docs/voice-calls.md#known-limitations).
 
 ## Development
 
 - **Events.** A class in `app/Events` named after a Discord event, such as `MessageCreate`, and extending `App\EventAbstract` handles that event. Its functions run one after the other, until one returns `true`.
-- **Slash commands.** A class in `app/Commands/Global` named `<Name>Command` and extending `App\CommandAbstract` is registered as `/<name>`. Global commands Discord has that the bot has no class for are named in a warning when it starts, and only removed when `BOT_REMOVE_OLD_COMMANDS` is set.
+- **Slash commands.** A class in `app/Commands/Global` named `<Name>Command` and extending `App\CommandAbstract` is registered as `/<name>`. Global commands Discord has that the bot has no class for are named in a warning when it starts, and only removed when `BOT_REMOVE_OLD_COMMANDS` is set. A command that throws, or whose promise is rejected, tells whoever used it that it failed, and is logged with its name.
 
 ```bash
 composer test                          # unit and feature tests

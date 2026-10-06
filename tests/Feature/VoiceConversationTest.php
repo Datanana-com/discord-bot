@@ -243,11 +243,13 @@ arg=A voice call with the assistant Claude.
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
 
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
-        $this->waitUntil(fn () => $this->sent !== [], 'a message in the channel');
+        $this->waitUntil(fn () => $this->played !== [], 'the call to be told');
 
+        // Why is only posted: whoever is in the call hears that it failed, in a sentence that is always the same.
         $this->assertSame(["Sorry, I couldn't get an answer from Claude. (Claude Code: Not logged in · Please run /login)"], $this->sent);
-        $this->assertSame([], $this->played);
+        $this->assertSame(['Sorry, something went wrong.'], array_map(file_get_contents(...), $this->played));
         $this->assertStringContainsString('] Alice: Hey Claude, what time is it?', $this->transcript($session));
+        $this->assertStringContainsString('] Claude: Sorry, something went wrong.', $this->transcript($session));
         $this->assertSame(['Voice reply failed: Claude Code: Not logged in · Please run /login'], $this->loggedProblems());
         $this->assertSame('555', $this->logged('Voice reply failed: Claude Code: Not logged in · Please run /login')[0]['user']);
         $this->assertSame([1, 0], [$this->usage()['failures'], $this->usage()['answers']]);

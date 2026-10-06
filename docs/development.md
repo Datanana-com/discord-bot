@@ -12,20 +12,27 @@
 require_once 'bootstrap.php';
 
 use App\Application;
-use Discord\WebSockets\Event;
+use App\Logs\Failures;
+use App\Logs\Logger;
 use Discord\WebSockets\Intents;
 
 /**
  * @see https://discord.com/developers/docs/intro
  */
 
+$logger = new Logger();
+// What nothing catches is written to the bot's log before PHP ends, not only to the terminal.
+Failures::register($logger);
+
 $app = new Application([
     'token' => env('DISCORD_TOKEN'),
     'intents' => Intents::getDefaultIntents() | Intents::GUILD_MEMBERS,
     'loadAllMembers' => true,
+    'logger' => $logger,
 ]);
 
-$app->discord->run();
+// Until it is stopped: with Ctrl+C or a signal, it first leaves its calls.
+exit($app->run());
 
 ```
 
@@ -92,6 +99,8 @@ Each class in `app/Commands/Global`, named `<Name>Command` and extending `App\Co
 The bot also looks at the global commands Discord has for its application when it starts. A command it has no class for (Discord tells commands apart by name and type, so a user or message command named like one of the bot's slash commands is also a leftover), such as one registered by an earlier project that used the same bot application or by another checkout of this repository, is named in a warning in the log: `Discord has global commands the bot has no class for: join, leave.` It is only removed when `BOT_REMOVE_OLD_COMMANDS` is set (each removal is logged by name), so switch it on only for an application that this checkout alone registers commands for: two checkouts with different commands under one application would remove each other's, and every command created again counts towards the limit Discord has per day. The bot doesn't remove commands of a single server: it doesn't fetch them.
 
 A command can take options and be shown only to members with a permission: set its `$options`, each as Discord's [option object](https://docs.discord.com/developers/interactions/application-commands#application-command-object-application-command-option-structure), and its `$defaultMemberPermissions`, like `app/Commands/Global/SettingsCommand.php` does. Server admins can change who sees a command, so a command that needs a permission also checks it in `handle()`. A command is saved to Discord again when its description, options or permissions change.
+
+A command's `handle()` returns the promise of what it is still doing when it returns, such as sending its reply, or `null`. When `handle()` throws, or that promise is rejected, whoever used the command is told "Something went wrong with /<name>. The bot's logs say what.", and the bot goes on. Only they see it, unless the command had already replied: that reply is then changed to it, as Discord takes one reply to a command, and stays as visible as it was, which for `/record` and `/meet` is to everyone in the channel. The message never says what failed: that is logged as `/<name> failed`, with the error (see [Logs and statistics](logs-and-statistics.md#logs-and-statistics)). An error in a class of `app/Events` is logged with the event's name, and the bot goes on too.
 
 ## Tests
 
