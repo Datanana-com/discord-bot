@@ -60,8 +60,14 @@ final class VoiceCallTest extends VoiceTestCase
     /** @var list<string> Packets the bot sent to the media server. */
     private array $sentPackets = [];
 
+    /** @var list<float> When each of them arrived. */
+    private array $packetTimes = [];
+
     /** @var list<array<string, mixed>> Payloads the bot sent to the voice gateway. */
     private array $gatewayPayloads = [];
+
+    /** @var list<float> When each of them was sent. */
+    private array $payloadTimes = [];
 
     protected function setUp(): void
     {
@@ -73,13 +79,15 @@ final class VoiceCallTest extends VoiceTestCase
         }
 
         $fixtures = dirname(__DIR__) . '/Fixtures';
-        $this->setEnv(['PIPER_BINARY' => "{$fixtures}/fake-piper-tone", 'FFMPEG_BINARY' => 'ffmpeg']);
+        // Real Ogg Opus files, sent by the bot's own player, as in a call.
+        $this->setEnv(['PIPER_BINARY' => "{$fixtures}/fake-piper-tone", 'FFMPEG_BINARY' => 'ffmpeg', 'VOICE_PLAYER' => 'bot']);
         $this->secretKey = random_bytes(32);
 
         $server = stream_socket_server('udp://127.0.0.1:0', $errno, $error, STREAM_SERVER_BIND);
         $this->mediaServer = new Socket(Loop::get(), $server);
         $this->mediaServer->on('message', function (string $packet) {
             $this->sentPackets[] = $packet;
+            $this->packetTimes[] = microtime(true);
         });
     }
 
@@ -129,6 +137,15 @@ final class VoiceCallTest extends VoiceTestCase
         $this->assertEqualsWithDelta(1.0, $this->seconds($answer), 0.05, 'Length of the answer.');
         $this->assertEqualsWithDelta(660, $this->frequency($answer), 20, 'Pitch of the answer.');
 
+        // The first packet followed the word that the bot speaks after the head start, not after the half second the
+        // voice library waits: a generous bound, as the machine running the tests may be busy.
+        $this->assertGreaterThanOrEqual(0.03, $this->packetTimes[0] - $this->payloadTimes[0], 'From the speaking flag to the first packet.');
+        $this->assertLessThan(0.3, $this->packetTimes[0] - $this->payloadTimes[0], 'From the speaking flag to the first packet.');
+        // "Started speaking" was logged when that packet went out, not the head start earlier, when the file was handed over.
+        $started = array_values(array_filter($this->logs->getRecords(), fn ($record) => $record->message === 'Started speaking'));
+        $this->assertCount(1, $started);
+        $this->assertEqualsWithDelta($this->packetTimes[0], (float) $started[0]->datetime->format('U.u'), 0.02);
+
         $this->assertSame([], $this->loggedProblems());
     }
 
@@ -140,15 +157,16 @@ final class VoiceCallTest extends VoiceTestCase
         $this->announceSpeaker($vc, self::ALICE_SSRC, '555');
         $this->sendAudio($this->opusFrames(440), from: self::ALICE_SSRC, to: $this->udp->getLocalAddress());
         $this->waitUntil(
-            fn () => count(array_keys(array_column(array_column($this->gatewayPayloads, 'd'), 'speaking'), VoiceClient::NOT_SPEAKING, true)) === 2,
-            'both sentences to finish playing',
+            fn () => in_array(VoiceClient::NOT_SPEAKING, array_column(array_column($this->gatewayPayloads, 'd'), 'speaking'), true),
+            'the answer to finish playing',
             timeout: 30.0,
         );
         await($session->stop());
 
-        // The real voice client was given the second sentence once it had finished the first one, and played both.
+        // The second sentence was ready while the first was spoken, and followed it in the same stream: the bot said
+        // it was speaking once, and both sentences were sent, without a gap between them.
         $this->assertSame(
-            [VoiceClient::MICROPHONE, VoiceClient::NOT_SPEAKING, VoiceClient::MICROPHONE, VoiceClient::NOT_SPEAKING],
+            [VoiceClient::MICROPHONE, VoiceClient::NOT_SPEAKING],
             array_column(array_column($this->gatewayPayloads, 'd'), 'speaking'),
         );
         $this->assertFileExists("{$session->directory}/claude-2.ogg");
@@ -158,6 +176,9 @@ final class VoiceCallTest extends VoiceTestCase
         $answer = $this->decodeSentAudio();
         $this->assertEqualsWithDelta(2.0, $this->seconds($answer), 0.1, 'Length of the answer.');
         $this->assertEqualsWithDelta(660, $this->frequency($answer), 20, 'Pitch of the answer.');
+        // The packets came 20 ms apart, the second sentence's right after the first one's: no half second between them.
+        $gaps = array_map(fn (int $i) => $this->packetTimes[$i] - $this->packetTimes[$i - 1], range(1, count($this->packetTimes) - 1));
+        $this->assertLessThan(0.3, max($gaps), 'The longest gap between two packets.');
 
         $this->assertSame([], $this->loggedProblems());
     }
@@ -271,6 +292,7 @@ final class VoiceCallTest extends VoiceTestCase
         $socket = static::getStubBuilder(WebSocket::class)->disableOriginalConstructor()->onlyMethods(['send'])->getStub();
         $socket->method('send')->willReturnCallback(function (string $payload): void {
             $this->gatewayPayloads[] = json_decode($payload, true);
+            $this->payloadTimes[] = microtime(true);
         });
         $this->setProperty($ws, WS::class, 'socket', $socket);
 

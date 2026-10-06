@@ -9,6 +9,7 @@ use App\Support\Shell;
 use App\Voice\Transcriber;
 use App\Voice\VoiceSession;
 use Discord\Voice\Processes\OpusDecoderInterface;
+use Discord\Voice\Rtp\UDP;
 use Dotenv\Dotenv;
 use ReflectionProperty;
 use Tests\Feature\VoiceTestCase;
@@ -79,8 +80,9 @@ final class VoiceBenchTest extends VoiceTestCase
             fn (string $name) => preg_match(self::SETTINGS, $name) === 1 && preg_match(self::SECRETS, $name) === 0,
             ARRAY_FILTER_USE_KEY,
         );
-        // Without a wake word, so the bench doesn't depend on whisper hearing "Claude" exactly.
-        $this->settings = ['FFMPEG_BINARY' => 'ffmpeg', ...array_map(strval(...), $settings), 'VOICE_WAKE_WORD' => ''];
+        // Without a wake word, so the bench doesn't depend on whisper hearing "Claude" exactly. With the bot's own
+        // player, the one it plays with unless .env says otherwise: "Started speaking" is then the first packet.
+        $this->settings = ['FFMPEG_BINARY' => 'ffmpeg', 'VOICE_PLAYER' => 'bot', ...array_map(strval(...), $settings), 'VOICE_WAKE_WORD' => ''];
         $this->setEnv($this->settings);
 
         // Claude Code reads this one from the environment it is started in. Answers in a call never think,
@@ -105,7 +107,8 @@ final class VoiceBenchTest extends VoiceTestCase
 
     public function testAnswersAQuestionAsFastAsTheBaseline(): void
     {
-        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        // A voice client the bot's own player can send its packets through: they are collected, not sent.
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel(), sendsPackets: true), $channel, $this->discord);
 
         // A whisper server transcribes once it has loaded its model, which a person talking to the bot takes longer to start than this does.
         if (Transcriber::fromEnv()->server !== null) {
@@ -155,17 +158,27 @@ final class VoiceBenchTest extends VoiceTestCase
 
         $ended = array_map(fn ($record) => (float) $record->datetime->format('U.u'), $this->recorded('Utterance ended'));
         $speaking = array_column($this->logged('Started speaking'), 'ms');
+        // When each packet of audio was sent, by the bot's own player: the wait between two sentences is in them.
+        $packets = array_column(array_filter($this->packets, fn (array $packet) => $packet[1] !== UDP::SILENCE_FRAME), 0);
         $runs = [];
 
         for ($asked = 0; $asked < self::QUESTIONS; $asked++) {
             $silence = (int) round(($ended[$asked] - $saidAt[$asked]) * 1000);
-            $runs[] = [
+            $run = [
                 'silence' => $silence,
                 'whisper' => $this->logged('Transcribed')[$asked]['ms'],
                 'claude' => $this->logged('Claude answered')[$asked]['ms'],
                 'speaking' => $speaking[$asked],
                 'total' => $silence + $speaking[$asked],
             ];
+            // The longest wait between two packets of the answer: a frame, unless the second sentence waited for Piper.
+            $sent = array_values(array_filter($packets, fn (float $at) => $at > $saidAt[$asked] && $at < ($saidAt[$asked + 1] ?? INF)));
+
+            if (count($sent) > 1) {
+                $run['gap'] = (int) round(max(array_map(fn (int $i) => $sent[$i] - $sent[$i - 1], range(1, count($sent) - 1))) * 1000);
+            }
+
+            $runs[] = $run;
         }
 
         $steps = array_combine(array_keys($runs[0]), array_keys($runs[0]));
@@ -232,18 +245,25 @@ final class VoiceBenchTest extends VoiceTestCase
             'claude' => 'Claude, the whole answer',
             'speaking' => 'from the utterance to the first sentence spoken',
             'total' => 'from the end of the question to the first sentence spoken',
+            'gap' => 'longest gap between two packets of the answer',
             'summary' => "the call's summary, once",
         ];
         $lines = ['', 'Milliseconds for "' . self::QUESTION . '", asked ' . self::QUESTIONS . ' times, at ' . (self::commit() ?: 'an unknown commit') . ':', ''];
 
         foreach ($runs as $number => $run) {
-            $lines[] = sprintf('  question %d: silence %d, whisper %d, Claude %d, first sentence %d, total %d', $number + 1, ...array_values($run));
+            $lines[] = sprintf('  question %d: silence %d, whisper %d, Claude %d, first sentence %d, total %d', $number + 1, $run['silence'], $run['whisper'], $run['claude'], $run['speaking'], $run['total'])
+                . (isset($run['gap']) ? sprintf(', longest gap %d', $run['gap']) : '');
         }
 
         $lines[] = '';
         $lines[] = sprintf('  %-58s %7s %7s%s', '', 'fastest', 'median', $baseline === null ? '' : ' baseline  change');
 
         foreach ($steps as $step => $label) {
+            // Only the bot's own player sends packets the gap can be read from.
+            if (! isset($times[$step])) {
+                continue;
+            }
+
             $before = $baseline['times'][$step] ?? null;
             $lines[] = sprintf(
                 '  %-58s %7d %7d%s%s',

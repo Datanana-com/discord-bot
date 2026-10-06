@@ -775,6 +775,8 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->waitUntil(fn () => count($this->played) === $spoken + 2, 'both of its sentences');
         $this->assertSame(self::BUSY, implode(' ', array_map(file_get_contents(...), array_slice($this->played, $spoken))), 'Not what Claude wrote before the line.');
         $this->assertStringEndsWith('] Claude: ' . self::BUSY . "\n", $this->transcript($session));
+        // Which the log says: that answer was held back until it was whole, unlike the four before it.
+        $this->assertSame([false, false, false, false, true], array_column($this->logged('Claude started answering'), 'held'));
 
         // Meanwhile, an answer that hands nothing off is still given as it is.
         $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is a quarter past four.')]);

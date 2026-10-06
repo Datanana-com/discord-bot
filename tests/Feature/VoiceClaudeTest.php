@@ -142,6 +142,7 @@ final class VoiceClaudeTest extends VoiceTestCase
         $this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');
         $this->assertSame(['No Claude Code process was waiting for the question'], $this->loggedProblems());
         $this->assertSame('555', $this->logged('No Claude Code process was waiting for the question')[0]['user']);
+        $this->assertNull($this->logged('Asked Claude')[0]['waited_ms'], 'No process had been waiting for the question.');
 
         // One is started again for the next question, once.
         $this->waitUntil(fn () => count($this->waitingClaudes()) === 2, 'Claude Code to be started again');

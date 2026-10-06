@@ -636,6 +636,86 @@ final class ClaudeTest extends TestCase
         $this->assertSame('', file_get_contents($this->log), 'Nobody got the prompt.');
     }
 
+    public function testSaysOnceWhenClaudeStartedAnsweringAndWhereTheTimeWent(): void
+    {
+        // Recorded from Claude Code: a rate limit event and the init event come before the first word.
+        putenv('FAKE_CLAUDE_OUTPUT=' . file_get_contents(__DIR__ . '/../../Fixtures/claude-stream.jsonl'));
+        $timing = null;
+        $order = [];
+
+        await($this->claude()->ask(
+            'Tell me about the sea.',
+            onText: function () use (&$order) {
+                $order[] = 'text';
+            },
+            onStarted: function (array $told) use (&$timing, &$order) {
+                $timing = $told;
+                $order[] = 'started';
+            },
+        ));
+
+        $this->assertSame('started', $order[0], 'Before the first piece.');
+        $this->assertCount(1, array_keys($order, 'started', true), 'Said once.');
+        $this->assertSame(['ms', 'init_ms', 'retries', 'rate_limits'], array_keys($timing));
+        $this->assertGreaterThanOrEqual(0, $timing['ms']);
+        $this->assertIsInt($timing['init_ms']);
+        $this->assertLessThanOrEqual($timing['ms'], $timing['init_ms'], 'Claude Code had finished starting before it wrote.');
+        $this->assertSame([0, 1], [$timing['retries'], $timing['rate_limits']]);
+    }
+
+    public function testCountsTheRequestsTriedAgainAndKnowsWhenClaudeCodeNeverSaidItHadStarted(): void
+    {
+        putenv('FAKE_CLAUDE_OUTPUT=' . implode("\n", [
+            '{"type":"system","subtype":"api_retry","attempt":1,"delay_ms":500}',
+            '{"type":"system","subtype":"api_retry","attempt":2,"delay_ms":1000}',
+            '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi."}}}',
+            '{"type":"result","is_error":false,"result":"Hi."}',
+        ]));
+        $timing = null;
+
+        await($this->claude()->ask('Hello', onText: $this->collect(...), onStarted: function (array $told) use (&$timing) {
+            $timing = $told;
+        }));
+
+        $this->assertSame(['Hi.'], $this->pieces);
+        $this->assertSame([2, 0, null], [$timing['retries'], $timing['rate_limits'], $timing['init_ms']]);
+    }
+
+    public function testAnAnswerThatWasNotStreamedStartsWhenItIsWhole(): void
+    {
+        putenv('FAKE_CLAUDE_OUTPUT={"type":"result","is_error":false,"result":"It is a quarter past four."}');
+        $order = [];
+
+        await($this->claude()->ask(
+            'What time is it?',
+            onText: function () use (&$order) {
+                $order[] = 'text';
+            },
+            onStarted: function () use (&$order) {
+                $order[] = 'started';
+            },
+        ));
+
+        $this->assertSame(['started', 'text'], $order);
+    }
+
+    public function testAWaitingProcessSaysHowLongItHasWaitedAndWhenItStartedAnswering(): void
+    {
+        putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeStream('It is a quarter', ' past four.'));
+        $waiting = $this->waiting($this->claude()->wait());
+        delay(0.1);
+        $timing = null;
+
+        $this->assertGreaterThanOrEqual(100, $waiting->waitedMs());
+
+        await($waiting->ask('What time is it?', $this->collect(...), function (array $told) use (&$timing) {
+            $timing = $told;
+        }));
+
+        $this->assertSame(['It is a quarter', ' past four.'], $this->pieces);
+        $this->assertSame(['ms', 'init_ms', 'retries', 'rate_limits'], array_keys($timing));
+    }
+
     private function claude(): Claude
     {
         return new Claude(__DIR__ . '/../../Fixtures/fake-claude', 'haiku', $this->workingDirectory);

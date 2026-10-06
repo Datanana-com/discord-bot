@@ -20,17 +20,32 @@ final class ClaudeAnswer
     /** Whether text of the answer was handed over while Claude was writing it. */
     private bool $streamed = false;
 
+    /** When the prompt was given: what the times of {@see timing()} count from. */
+    private readonly float $askedAt;
+
+    /** When Claude Code said it had finished starting (its `init` event), when it did. */
+    private ?float $initAt = null;
+
+    /** How often Claude Code said it was trying a request again. */
+    private int $retries = 0;
+
+    /** How often Claude Code said something about a rate limit. */
+    private int $rateLimits = 0;
+
     /**
      * @param (Closure(string $text): void)|null $onText Called with each piece of the answer while Claude is
      *                                                   writing it. Together, the pieces are the whole answer.
+     * @param (Closure(array{ms: int, init_ms: ?int, retries: int, rate_limits: int} $timing): void)|null $onStarted
+     *        Called once, just before the first piece of the answer is handed over, with how long that took: see {@see timing()}.
      */
-    public function __construct(private readonly ?Closure $onText)
+    public function __construct(private readonly ?Closure $onText, private readonly ?Closure $onStarted = null)
     {
+        $this->askedAt = microtime(true);
     }
 
     /**
-     * Reads a line Claude Code printed. Most events are about the session, hooks, rate limits or Claude's
-     * thinking: only two matter here.
+     * Reads a line Claude Code printed. Most events are about the session, hooks or Claude's thinking: the
+     * answer is in two of them, and three others say where the time to it went.
      */
     public function read(string $line): void
     {
@@ -39,9 +54,14 @@ final class ClaudeAnswer
 
         if ($type === 'result') {
             $this->result = $event;
+        } elseif ($type === 'system' && ($event['subtype'] ?? null) === 'init') {
+            $this->initAt ??= microtime(true);
+        } elseif ($type === 'system' && ($event['subtype'] ?? null) === 'api_retry') {
+            $this->retries++;
+        } elseif ($type === 'rate_limit_event') {
+            $this->rateLimits++;
         } elseif ($this->onText !== null && $type === 'stream_event' && ($event['event']['delta']['type'] ?? null) === 'text_delta') {
-            $this->streamed = true;
-            ($this->onText)($event['event']['delta']['text']);
+            $this->handOver($event['event']['delta']['text']);
         }
     }
 
@@ -51,6 +71,23 @@ final class ClaudeAnswer
     public function started(): bool
     {
         return $this->streamed || $this->result !== null;
+    }
+
+    /**
+     * How long Claude took to start answering, counted from the prompt: to now (`ms`), to Claude Code saying it
+     * had finished starting (`init_ms`, null when it never said so), and how often it tried a request again or
+     * was told about a rate limit meanwhile. Numbers only: nothing of the answer.
+     *
+     * @return array{ms: int, init_ms: ?int, retries: int, rate_limits: int}
+     */
+    public function timing(): array
+    {
+        return [
+            'ms' => (int) round((microtime(true) - $this->askedAt) * 1000),
+            'init_ms' => $this->initAt === null ? null : (int) round(($this->initAt - $this->askedAt) * 1000),
+            'retries' => $this->retries,
+            'rate_limits' => $this->rateLimits,
+        ];
     }
 
     /**
@@ -65,7 +102,7 @@ final class ClaudeAnswer
 
             // A Claude Code that doesn't send the text while it is written still hands over its answer.
             if ($this->onText !== null && ! $this->streamed) {
-                ($this->onText)($answer);
+                $this->handOver($answer);
             }
 
             return $answer;
@@ -77,6 +114,22 @@ final class ClaudeAnswer
                 ? new RuntimeException('Claude Code: ' . $this->result['result'])
                 : $e;
         });
+    }
+
+    /**
+     * Hands a piece of the answer over, and first says that the answer started when it is the first piece.
+     */
+    private function handOver(string $text): void
+    {
+        if (! $this->streamed) {
+            $this->streamed = true;
+
+            if ($this->onStarted !== null) {
+                ($this->onStarted)($this->timing());
+            }
+        }
+
+        ($this->onText)($text);
     }
 
     /**

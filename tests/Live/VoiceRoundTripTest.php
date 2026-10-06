@@ -181,6 +181,8 @@ final class VoiceRoundTripTest extends TestCase
         $this->assertCount(1, $speaker['recordings'], 'Only the bot spoke to the speaker.');
         $heard = await(Transcriber::fromEnv()->transcribe($speaker['recordings'][0]));
         $this->assertMatchesRegularExpression('/quarter.+meeting/is', $heard, "The speaker heard both sentences, in order: {$heard}");
+        // From the first word: the bot sends the first packet of an answer soon after it says it speaks, and nothing of the start may be lost on the way.
+        $this->assertMatchesRegularExpression('/^\W*(it is|it\'s) a quarter/i', $heard, "The speaker heard the answer from its first word: {$heard}");
     }
 
     protected function tearDown(): void

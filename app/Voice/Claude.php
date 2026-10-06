@@ -103,11 +103,13 @@ final readonly class Claude
      *                                                    writing it. Together, the pieces are the whole answer.
      * @param bool $thinks Whether Claude may think before it answers. In a call it doesn't: thinking takes
      *                     seconds before the first word of a one-line answer.
+     * @param (callable(array{ms: int, init_ms: ?int, retries: int, rate_limits: int} $timing): void)|null $onStarted
+     *        Called once, before the first piece, with how long Claude took to start answering: see {@see ClaudeAnswer::timing()}.
      * @return PromiseInterface<string> Claude's answer.
      */
-    public function ask(string $prompt, string $systemPrompt = self::SYSTEM_PROMPT, ?callable $onText = null, bool $thinks = true): PromiseInterface
+    public function ask(string $prompt, string $systemPrompt = self::SYSTEM_PROMPT, ?callable $onText = null, bool $thinks = true, ?callable $onStarted = null): PromiseInterface
     {
-        $answer = new ClaudeAnswer($onText === null ? null : $onText(...));
+        $answer = new ClaudeAnswer($onText === null ? null : $onText(...), $onStarted === null ? null : $onStarted(...));
 
         return $answer->after(Shell::stream(
             $this->command($systemPrompt),

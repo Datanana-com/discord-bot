@@ -244,6 +244,7 @@ final class VoiceSession
         private readonly Transcriber $transcriber,
         private readonly Claude $claude,
         private readonly Speech $speech,
+        private readonly Player $player,
         public readonly string $wakeWord,
         public readonly string $stopPhrase,
         public readonly string $leavePhrase,
@@ -424,6 +425,30 @@ final class VoiceSession
     }
 
     /**
+     * The player a call plays its sentences with, as VOICE_PLAYER says: the bot's own (`bot`, the default), which
+     * sends the packets of a sentence itself from the moment its file is ready, or the voice library's (`library`),
+     * which waits half a second first. Anything else plays like `bot`, with a warning when the call starts.
+     */
+    private static function player(VoiceClient $vc, Discord $discord): Player
+    {
+        return self::playerSetting() === 'library' ? new LibraryPlayer($vc) : new OggPlayer($vc, $discord->getLoop());
+    }
+
+    /**
+     * VOICE_PLAYER: `bot` or `library`, `bot` when it isn't set, and null when it is something else.
+     */
+    private static function playerSetting(): ?string
+    {
+        $player = strtolower(trim((string) env('VOICE_PLAYER', '')));
+
+        return match ($player) {
+            '' => 'bot',
+            'bot', 'library' => $player,
+            default => null,
+        };
+    }
+
+    /**
      * Starts recording the channel the voice client is connected to.
      *
      * A call keeps the settings it starts with: changing them applies from the next call.
@@ -457,6 +482,7 @@ final class VoiceSession
             Transcriber::fromEnv($settings['language']),
             Claude::fromEnv($settings['model']),
             Speech::fromEnv($settings['voice']),
+            self::player($vc, $discord),
             $wakeWord,
             self::defaultStopPhrase($wakeWord),
             self::defaultLeavePhrase($wakeWord),
@@ -476,6 +502,10 @@ final class VoiceSession
 
         if (self::pauseSeconds() === null) {
             $session->log('warning', 'VOICE_PAUSE_SECONDS is not a number of seconds, 0.1 or more: what someone says ends after ' . UtteranceSplitter::SILENCE_SECONDS . ' s of silence.');
+        }
+
+        if (self::playerSetting() === null) {
+            $session->log('warning', 'VOICE_PLAYER is neither bot nor library: the bot sends the packets of its sentences itself.');
         }
 
         self::$unfinished[$session->id] = $session;
@@ -709,15 +739,18 @@ final class VoiceSession
             $this->log('warning', 'Could not stop recording cleanly: ' . $e->getMessage());
         }
 
+        // An answer that was being spoken is cut off, so the queue no longer waits for it. Before the player is
+        // stopped: its own promise for the sentence may be rejected then, which is no failure.
+        $this->left->resolve(null);
+        // The sentence that was being spoken is cut off, and the ones waiting behind it are never spoken.
+        $this->player->stop();
+
         if ($this->vc->isReady()) {
             $this->vc->close();
         }
 
         // The voice client's decoders are closed, so the copies they made of what everyone said are complete, and can go.
         self::deleteDecoderFiles($this->ssrcs);
-
-        // An answer that was being spoken is cut off, so the queue no longer waits for it.
-        $this->left->resolve(null);
 
         $ms = $this->msSince($this->startedAt);
         $this->log('info', 'Voice session stopped', ['ms' => $ms, 'speakers' => count($this->speakers), ...$this->counts]);
@@ -1142,7 +1175,7 @@ final class VoiceSession
 
         return $this->synthesize(self::OKAY, $path)
             // It holds nothing of anyone's memory, so only the call ending, or them opting out, stops it.
-            ->then(fn () => ! $this->stopped && ! isset($this->optedOut[$userId]) ? race([$this->vc->playFile($path), $this->left->promise()]) : null)
+            ->then(fn () => ! $this->stopped && ! isset($this->optedOut[$userId]) ? race([$this->player->play($path), $this->left->promise()]) : null)
             ->catch(fn (Throwable $e) => $this->log('warning', 'Could not say okay: ' . $e->getMessage(), ['user' => $userId]));
     }
 
@@ -1222,7 +1255,7 @@ final class VoiceSession
             $before = $spoken;
 
             // A sentence is synthesized as soon as Piper is free, while the ones before it are spoken. It is
-            // spoken once they are over: the voice client refuses to play a file while it is playing another.
+            // spoken once they are over: one file at a time, in order.
             // Once the call stops, they opt out or talk over the answer, the sentences still waiting for Piper are no longer synthesized either.
             $synthesized = $synthesized->then(fn () => $this->stillAnswering($userId, $depends, $basis, $among) ? $this->synthesize($sentence, $oggPath)->catch($unspoken) : null);
             $spoken = $synthesized->finally(fn () => $before)->then(function () use ($unspoken, $userId, $depends, $basis, $among, $oggPath, $endedAt) {
@@ -1230,14 +1263,17 @@ final class VoiceSession
                     return null;
                 }
 
+                $started = null;
+
                 if ($this->speaking === null) {
                     $this->speaking = ['user' => $userId, 'since' => microtime(true), 'heard' => 0, 'heardAt' => 0.0, 'interrupted' => false, 'cut' => new Deferred()];
-                    $this->log('info', 'Started speaking', ['user' => $userId, 'ms' => $this->msSince($endedAt)]);
+                    // Logged when the first packet of the answer is sent: what someone in the call waits for, less the silence that ended their sentence.
+                    $started = fn () => $this->log('info', 'Started speaking', ['user' => $userId, 'ms' => $this->msSince($endedAt)]);
                 }
 
-                // The voice client never says the sentence finished when it is closed while speaking it, and
-                // rarely does when it is stopped, as it is when they talk over the answer: see hear().
-                return race([$this->vc->playFile($oggPath)->catch($unspoken), $this->left->promise(), $this->speaking['cut']->promise()]);
+                // The player may say nothing more about a sentence once it is stopped, as the voice library
+                // doesn't when it is stopped or closed while speaking one: see hear().
+                return race([$this->player->play($oggPath, $started)->catch($unspoken), $this->left->promise(), $this->speaking['cut']->promise()]);
             });
         });
 
@@ -1247,8 +1283,10 @@ final class VoiceSession
         // Claude writes: nothing is spoken until the answer is whole.
         // Telling what was looked up hands nothing off, so it is spoken while it is written.
         $full = $lookedUp === null && $this->lookups->full();
+        // Where the time to a slow answer went: logged once the first piece of the answer is there.
+        $started = fn (array $timing) => $this->log('info', 'Claude started answering', ['user' => $userId, ...$timing, 'held' => $full]);
 
-        return $this->ask($userId, $this->prompt($userId, $name, $group, $sharers, $basis !== null, $lookedUp['text'] ?? null), $full ? static fn () => null : $handOff->push(...))->then(
+        return $this->ask($userId, $this->prompt($userId, $name, $group, $sharers, $basis !== null, $lookedUp['text'] ?? null), $full ? static fn () => null : $handOff->push(...), $started)->then(
             function (string $answer) use ($sentences, $handOff, $full, $lookedUp, $forgotten, &$spoken, $userId, $sharers, $depends, $basis, $among, $name, $question, $endedAt, $asking, $people) {
                 $this->log('info', 'Claude answered', ['user' => $userId, 'ms' => $this->msSince($asking), 'characters' => mb_strlen($answer)]);
                 $handOff->flush();
@@ -1350,15 +1388,10 @@ final class VoiceSession
 
         $this->speaking['interrupted'] = true;
         $this->log('info', 'Interrupted', ['user' => $userId, 'ms' => $this->msSince($this->speaking['since'])]);
-        // First, as the voice client's own promise for the sentence may be rejected when it is stopped,
+        // First, as the player's own promise for the sentence may be rejected when it is stopped,
         // which is no failure.
         $this->speaking['cut']->resolve(null);
-
-        try {
-            $this->vc->stop();
-        } catch (Throwable) {
-            // Nothing was playing: the bot was between two sentences.
-        }
+        $this->player->stop();
     }
 
     /**
@@ -1400,18 +1433,23 @@ final class VoiceSession
      * one is started for the question, which takes longer. Either way, another one then waits for the next question.
      *
      * @param callable(string $text): void $onText Called with each piece of the answer while Claude is writing it.
+     * @param (callable(array{ms: int, init_ms: ?int, retries: int, rate_limits: int} $timing): void)|null $onStarted
+     *        Called once, before the first piece, with how long Claude took to start answering.
      * @return PromiseInterface<string> Claude's answer.
      */
-    private function ask(string $userId, string $prompt, callable $onText): PromiseInterface
+    private function ask(string $userId, string $prompt, callable $onText, ?callable $onStarted = null): PromiseInterface
     {
         $waiting = $this->waitingClaude;
         $this->waitingClaude = null;
+        // How long the process that gets the question had been waiting for one, or null when none was: one
+        // that only just started may still be starting, which the time to the first word then includes.
+        $this->log('info', 'Asked Claude', ['user' => $userId, 'waited_ms' => $waiting?->waitedMs()]);
 
         if ($waiting === null) {
             $this->log('warning', 'No Claude Code process was waiting for the question', ['user' => $userId]);
-            $answer = $this->claude->ask($prompt, onText: $onText, thinks: false);
+            $answer = $this->claude->ask($prompt, onText: $onText, thinks: false, onStarted: $onStarted);
         } else {
-            $answer = $waiting->ask($prompt, $onText)->catch(function (Throwable $e) use ($waiting, $userId, $prompt, $onText) {
+            $answer = $waiting->ask($prompt, $onText, $onStarted)->catch(function (Throwable $e) use ($waiting, $userId, $prompt, $onText, $onStarted) {
                 // Part of the answer was spoken, or Claude said why there is none: asking again would not help.
                 if ($waiting->answered()) {
                     throw $e;
@@ -1419,7 +1457,7 @@ final class VoiceSession
 
                 $this->log('warning', 'The waiting Claude Code process did not answer: ' . $e->getMessage(), ['user' => $userId]);
 
-                return $this->claude->ask($prompt, onText: $onText, thinks: false);
+                return $this->claude->ask($prompt, onText: $onText, thinks: false, onStarted: $onStarted);
             });
         }
 
@@ -1657,8 +1695,8 @@ final class VoiceSession
         $oggPath = sprintf('%s/claude-%d.ogg', $this->directory, ++$this->files);
 
         return $this->synthesize($sentence, $oggPath)->then(
-            // The voice client never says the sentence finished when it is closed while speaking it.
-            fn () => $this->stillTalkingTo($userId) ? race([$this->vc->playFile($oggPath), $this->left->promise()]) : null,
+            // The player may say nothing more about the sentence once the call is closed while it is spoken.
+            fn () => $this->stillTalkingTo($userId) ? race([$this->player->play($oggPath), $this->left->promise()]) : null,
         )->catch(fn (Throwable $e) => throw new FailedReply(FailedReply::SPEECH, $e));
     }
 
