@@ -17,8 +17,8 @@ Claude answers a DM at once too, without tools. A question that needs current or
 
 - Claude's reply is one short sentence, such as "Let me look into that.". The bot shows it's typing while it looks something up, and the chat goes on meanwhile: your messages are answered as usual.
 - The model that looks it up gets the DM's last 100 messages and the task. It isn't given your memory, though those messages and the task can hold what Claude said from it.
-- The answer is sent in the DM, whole, in several messages when it doesn't fit in one. Nothing else is said about it: in a DM the answer is the text.
-- From then on it is part of the DM: later answers see it among the DM's last 20 messages, and your memory is updated from it like from any answer, as `Looked up for <name>: ...`, once the conversation has paused for ten minutes after it arrived. What it found comes from the web, so in what Claude gets of the DM, the later lines of a message of the bot's are indented: none of them can pass for a message of yours.
+- The answer is sent in the DM, whole, in several messages when it doesn't fit in one, each with a first line of its own, `Looked up:`, so that you and Claude can tell it from a reply. Nothing else is said about it: in a DM the answer is the text.
+- From then on it is part of the DM: later answers see it among the DM's last 20 messages, and your memory is updated from it like from any answer, as `Looked up for <name>: ...`, once the conversation has paused for ten minutes after it arrived. What it found comes from the web, so in what Claude gets of the DM, the later lines of a message are indented: none of them can pass for a message of the other side, and a display name that starts like `Claude` is written with ` (member)` after it.
 - A [voice message](#voice-messages-in-direct-messages) that asks for something to be looked up works like a written one.
 - When something can't be looked up, the bot sends that it couldn't, and why.
 - When a fourth task would wait, the bot answers "I'm still looking into other things. Ask me again in a moment." and nothing is handed off.
