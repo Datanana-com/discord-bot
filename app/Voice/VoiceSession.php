@@ -412,6 +412,8 @@ final class VoiceSession
         $session->wait();
         // Piper loads its voice now, and keeps running: the first sentence of an answer doesn't wait for that.
         $session->speech->start("{$directory}/piper");
+        // So does whisper: until its server has loaded the model, whisper-cli transcribes.
+        $session->transcriber->server?->acquire($session->log(...));
         $session->log('info', 'Voice session started', ['channel' => $vc->channel->id, 'directory' => $directory]);
         $session->track(Usage::CALL_STARTED, ['channel' => $vc->channel->id]);
 
@@ -676,6 +678,9 @@ final class VoiceSession
                 $this->allLookedUp->then(function () {
                     unset(self::$unfinished[$this->id]);
                 });
+
+                // Everything said is transcribed by now. The whisper server ends with the last call, and the call is over once it has.
+                return $this->transcriber->server?->release();
             });
     }
 
@@ -852,7 +857,7 @@ final class VoiceSession
         unset($this->clips[$wavPath]);
         $transcribing = microtime(true);
 
-        return $this->transcriber->transcribe($wavPath)
+        return $this->transcriber->transcribe($wavPath, log: $this->log(...))
             ->finally(fn () => unlink($wavPath))
             ->then(function (string $text) use ($userId, $endedAt, $transcribing, $people) {
                 $this->log('info', 'Transcribed', ['user' => $userId, 'ms' => $this->msSince($transcribing), 'characters' => mb_strlen($text)]);

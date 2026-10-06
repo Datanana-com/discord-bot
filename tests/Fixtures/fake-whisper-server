@@ -1,0 +1,128 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+// Stands in for whisper.cpp's whisper-server: listens on --port, answers GET /health, and answers POST /inference with a
+// transcript with annotations, one request at a time like the real one.
+//
+//   FAKE_WHISPER_SERVER_LOG          Gets, appended, its process ID, the arguments it was started with, and a line for each /inference request.
+//   FAKE_WHISPER_SERVER_LOAD         Seconds it takes to load its model, before it listens.
+//   FAKE_WHISPER_SERVER_HEALTH_DELAY Seconds it takes to say that it is healthy.
+//   FAKE_WHISPER_SERVER_STATUS       The HTTP status it answers requests with; anything but 200 is an error without a transcript.
+//   FAKE_WHISPER_SERVER_DIE_AT       The request, counted from 1, that it dies on instead of answering it.
+//   FAKE_WHISPER_SERVER_BODY         What it answers requests with instead of a transcript, as it is.
+//   FAKE_WHISPER_OUTPUT              What it hears, as for fake-whisper.
+//   FAKE_WHISPER_HOLD                While this file exists, it doesn't answer a request, for 10 seconds at most.
+//   FAKE_WHISPER_DELAY               Seconds it takes to answer a request.
+//
+// A test may set these variables after it started: it reads them again from the file FAKE_ENV, when there is one, with each request.
+
+$setting = static function (string $name): string|false {
+    $file = getenv('FAKE_ENV');
+
+    if ($file !== false && is_file($file)) {
+        foreach (file($file, FILE_IGNORE_NEW_LINES) as $line) {
+            if (preg_match('/^' . $name . "='(.*)'$/s", $line, $found) === 1) {
+                return str_replace("'\\''", "'", $found[1]);
+            }
+        }
+    }
+
+    return getenv($name);
+};
+
+$arguments = array_slice($argv, 1);
+$log = getenv('FAKE_WHISPER_SERVER_LOG') ?: '/dev/null';
+$note = static fn (string $line) => file_put_contents($log, $line . "\n", FILE_APPEND);
+
+$note('pid=' . getmypid());
+
+foreach ($arguments as $argument) {
+    $note("arg={$argument}");
+}
+
+$port = (int) ($arguments[(int) array_search('--port', $arguments, true) + 1] ?? 0);
+usleep((int) ((float) getenv('FAKE_WHISPER_SERVER_LOAD') * 1_000_000));
+$server = stream_socket_server("tcp://127.0.0.1:{$port}", $code, $message);
+
+if ($server === false) {
+    fwrite(STDERR, "cannot listen on {$port}: {$message}\n");
+    exit(1);
+}
+
+$requests = 0;
+
+while (($connection = stream_socket_accept($server, -1)) !== false) {
+    $raw = '';
+
+    while (! str_contains($raw, "\r\n\r\n") && ($chunk = fread($connection, 65536)) !== '' && $chunk !== false) {
+        $raw .= $chunk;
+    }
+
+    [$head, $body] = explode("\r\n\r\n", $raw, 2) + [1 => ''];
+    preg_match('/^(\w+) (\S+)/', $head, $line);
+    $length = (int) (preg_match('/^content-length:\s*(\d+)/mi', $head, $found) === 1 ? $found[1] : 0);
+
+    while (strlen($body) < $length && ($chunk = fread($connection, 65536)) !== '' && $chunk !== false) {
+        $body .= $chunk;
+    }
+
+    $answer = static function (int $status, string $type, string $content) use ($connection): void {
+        @fwrite($connection, "HTTP/1.1 {$status} Fake\r\nContent-Type: {$type}\r\nContent-Length: " . strlen($content) . "\r\nConnection: close\r\n\r\n{$content}");
+        fclose($connection);
+    };
+
+    if (($line[1] ?? '') === 'GET' && ($line[2] ?? '') === '/health') {
+        usleep((int) ((float) $setting('FAKE_WHISPER_SERVER_HEALTH_DELAY') * 1_000_000));
+        $answer(200, 'application/json', '{"status":"ok"}');
+
+        continue;
+    }
+
+    // What the request holds, by the name of its field: multipart/form-data, as whisper.cpp reads it.
+    $fields = [];
+    preg_match('/boundary=(\S+)/i', $head, $boundary);
+
+    foreach (explode('--' . ($boundary[1] ?? '-'), $body) as $part) {
+        if (preg_match('/^\r\nContent-Disposition: form-data; name="([^"]+)"(?:; filename="([^"]*)")?\r\n(?:[^\r\n]+\r\n)*\r\n(.*)\r\n$/s', $part, $field) === 1) {
+            $fields[$field[1]] = ['filename' => $field[2] ?? null, 'content' => $field[3]];
+        }
+    }
+
+    $requests++;
+    $note(sprintf(
+        'request language=%s prompt=%s format=%s filename=%s bytes=%d',
+        $fields['language']['content'] ?? '-',
+        $fields['prompt']['content'] ?? '-',
+        $fields['response_format']['content'] ?? '-',
+        $fields['file']['filename'] ?? '-',
+        strlen($fields['file']['content'] ?? ''),
+    ));
+
+    $held = 200;
+
+    while (file_exists((string) $setting('FAKE_WHISPER_HOLD')) && $held-- > 0) {
+        usleep(50_000);
+    }
+
+    usleep((int) ((float) $setting('FAKE_WHISPER_DELAY') * 1_000_000));
+
+    if ($requests === (int) $setting('FAKE_WHISPER_SERVER_DIE_AT')) {
+        fclose($connection);
+        exit(1);
+    }
+
+    $status = (int) ($setting('FAKE_WHISPER_SERVER_STATUS') ?: 200);
+
+    if (! isset($fields['file'])) {
+        $answer(400, 'text/plain', 'no file field');
+    } elseif ($status !== 200) {
+        $answer($status, 'text/plain', 'error');
+    } elseif ($setting('FAKE_WHISPER_SERVER_BODY') !== false) {
+        $answer(200, 'application/json', (string) $setting('FAKE_WHISPER_SERVER_BODY'));
+    } else {
+        $output = $setting('FAKE_WHISPER_OUTPUT');
+        $answer(200, 'application/json', json_encode(['text' => sprintf(" [BLANK_AUDIO]\n %s\n", $output === false ? 'Hey Claude, (coughs) what time is it?' : $output)]));
+    }
+}
