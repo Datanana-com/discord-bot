@@ -53,6 +53,30 @@ final class VoicePlayerTest extends VoiceTestCase
         $this->assertLogsNeverMention('quarter past four');
     }
 
+    public function testOkayAndTheBotsOwnSentencesGoThroughThePlayerToo(): void
+    {
+        $this->setEnv(['VOICE_PLAYER' => 'bot']);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        // The stop phrase: "Okay." can't be played from these tests' files either, which is logged, and nothing
+        // goes to the library.
+        $this->ask($vc, '555', 'Hey Claude, what time is it?');
+        $this->waitUntil(fn () => count($this->sent) === 2, 'the channel to be told the answer could not be spoken');
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => 'Stop, Claude.']);
+        $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => preg_grep('/^Could not say okay: /', $this->loggedProblems()) !== [], 'okay to fail');
+
+        // Nor can "Sorry, something went wrong.", which the bot says on its own when whisper fails.
+        $this->setProcessEnv(['FAKE_WHISPER_EXIT' => '1']);
+        $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => preg_grep('/^Could not say sorry: /', $this->loggedProblems()) !== [], 'sorry to fail');
+
+        $this->assertSame([], $this->played, 'Nothing was handed to the library.');
+        $problems = implode("\n", $this->loggedProblems());
+        $this->assertSame(3, preg_match_all('/Could not play .*claude-\d+\.ogg: Not an Ogg Opus file/', $problems), 'The answer, okay, and sorry.');
+        $this->assertLogsNeverMention('quarter past four');
+    }
+
     /**
      * @return iterable<string, array{string, list<string>}>
      */

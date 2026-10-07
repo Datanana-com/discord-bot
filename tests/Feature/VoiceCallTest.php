@@ -60,13 +60,16 @@ final class VoiceCallTest extends VoiceTestCase
     /** @var list<string> Packets the bot sent to the media server. */
     private array $sentPackets = [];
 
-    /** @var list<float> When each of them arrived. */
+    /** @var list<float> When each of them arrived, by the clock that only goes forward: the wall clock steps on some machines. */
     private array $packetTimes = [];
+
+    /** When the first of them arrived, by the wall clock, which is what the log's times are in. */
+    private ?float $firstPacketAt = null;
 
     /** @var list<array<string, mixed>> Payloads the bot sent to the voice gateway. */
     private array $gatewayPayloads = [];
 
-    /** @var list<float> When each of them was sent. */
+    /** @var list<float> When each of them was sent, by the same clock as {@see $packetTimes}. */
     private array $payloadTimes = [];
 
     protected function setUp(): void
@@ -87,7 +90,8 @@ final class VoiceCallTest extends VoiceTestCase
         $this->mediaServer = new Socket(Loop::get(), $server);
         $this->mediaServer->on('message', function (string $packet) {
             $this->sentPackets[] = $packet;
-            $this->packetTimes[] = microtime(true);
+            $this->packetTimes[] = hrtime(true) / 1e9;
+            $this->firstPacketAt ??= microtime(true);
         });
     }
 
@@ -144,7 +148,7 @@ final class VoiceCallTest extends VoiceTestCase
         // "Started speaking" was logged when that packet went out, not the head start earlier, when the file was handed over.
         $started = array_values(array_filter($this->logs->getRecords(), fn ($record) => $record->message === 'Started speaking'));
         $this->assertCount(1, $started);
-        $this->assertEqualsWithDelta($this->packetTimes[0], (float) $started[0]->datetime->format('U.u'), 0.02);
+        $this->assertEqualsWithDelta($this->firstPacketAt, (float) $started[0]->datetime->format('U.u'), 0.02);
 
         $this->assertSame([], $this->loggedProblems());
     }
@@ -179,7 +183,32 @@ final class VoiceCallTest extends VoiceTestCase
         // The packets came 20 ms apart, the second sentence's right after the first one's: no half second between them.
         $gaps = array_map(fn (int $i) => $this->packetTimes[$i] - $this->packetTimes[$i - 1], range(1, count($this->packetTimes) - 1));
         $this->assertLessThan(0.3, max($gaps), 'The longest gap between two packets.');
+        // And each held 20 ms: two seconds of them, the encoder's priming, and five frames of silence. The packets go
+        // to Discord as ffmpeg wrote them, so a file of longer frames would be sent too fast, and sound like it.
+        $this->assertEqualsWithDelta(107, count($this->sentPackets), 4, 'Packets for two seconds of 20 ms frames.');
 
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testStopsSendingWhenTheCallEndsInTheMiddleOfASentence(): void
+    {
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is a quarter past four. ', 'Time for a cup of tea.')]);
+        $session = VoiceSession::start($vc = $this->connectedVoiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->announceSpeaker($vc, self::ALICE_SSRC, '555');
+        $this->sendAudio($this->opusFrames(440), from: self::ALICE_SSRC, to: $this->udp->getLocalAddress());
+        $this->waitUntil(fn () => count($this->sentPackets) >= 5, 'the bot to start speaking', timeout: 20.0);
+
+        // The call stops in the middle of the first sentence, as with /stop: the player is stopped before the
+        // voice client is closed, and the second sentence is never given to it.
+        await($session->stop());
+        await($this->after(0.1));
+        $sent = count($this->sentPackets);
+        await($this->after(0.3));
+
+        $this->assertSame($sent, count($this->sentPackets), 'Nothing more was sent once the call had stopped.');
+        $this->assertSame([VoiceClient::MICROPHONE, VoiceClient::NOT_SPEAKING], array_column(array_column($this->gatewayPayloads, 'd'), 'speaking'));
+        $this->assertLessThan(0.95, $this->seconds($this->decodeSentAudio()), 'It did not finish its first sentence.');
         $this->assertSame([], $this->loggedProblems());
     }
 
@@ -292,7 +321,7 @@ final class VoiceCallTest extends VoiceTestCase
         $socket = static::getStubBuilder(WebSocket::class)->disableOriginalConstructor()->onlyMethods(['send'])->getStub();
         $socket->method('send')->willReturnCallback(function (string $payload): void {
             $this->gatewayPayloads[] = json_decode($payload, true);
-            $this->payloadTimes[] = microtime(true);
+            $this->payloadTimes[] = hrtime(true) / 1e9;
         });
         $this->setProperty($ws, WS::class, 'socket', $socket);
 

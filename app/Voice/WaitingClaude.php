@@ -22,7 +22,7 @@ final class WaitingClaude
 
     private readonly Program $program;
 
-    /** When it was started. */
+    /** When it was started, by the clock that only goes forward: the wall clock steps on some machines. */
     private readonly float $startedAt;
 
     /** What it answers, once it was asked. */
@@ -34,7 +34,7 @@ final class WaitingClaude
      */
     public function __construct(array $command, string $directory, array $env)
     {
-        $this->startedAt = microtime(true);
+        $this->startedAt = hrtime(true) / 1e9;
         $this->program = Shell::open($command, fn (string $line) => $this->answer?->read($line), cwd: $directory, env: $env);
     }
 
@@ -64,7 +64,7 @@ final class WaitingClaude
      */
     public function waitedMs(): int
     {
-        return (int) round((microtime(true) - $this->startedAt) * 1000);
+        return (int) round((hrtime(true) / 1e9 - $this->startedAt) * 1000);
     }
 
     /**

@@ -9,6 +9,7 @@ use Discord\Voice\Rtp\UDP;
 use Discord\Voice\VoiceClient;
 use PHPUnit\Framework\TestCase;
 use React\Promise\PromiseInterface;
+use ReflectionProperty;
 use RuntimeException;
 use Tests\Fixtures\ManualTimers;
 use Tests\Ogg;
@@ -238,6 +239,30 @@ final class OggPlayerTest extends TestCase
         $this->assertSame(5, $this->silence());
         $this->assertSame([VoiceClient::MICROPHONE, VoiceClient::NOT_SPEAKING], array_column($this->speaking, 1), 'The bot stopped speaking once.');
         $this->assertSame([], $this->loop->pending());
+    }
+
+    public function testStopFromTheFirstPacketsCallbackEndsTheStream(): void
+    {
+        $player = $this->player();
+        // Like a call that stopped from the "Started speaking" callback would.
+        $player->play($this->file('a1', 'a2'), fn () => $player->stop());
+        $this->tick();
+
+        $this->assertSame(['a1'], $this->audio());
+        $this->assertSame(5, $this->silence());
+        $this->assertSame([VoiceClient::MICROPHONE, VoiceClient::NOT_SPEAKING], array_column($this->speaking, 1), 'The bot stopped speaking once.');
+        $this->assertSame([], $this->loop->pending(), 'No packet is due any more.');
+    }
+
+    public function testPacesWithTheClockThatOnlyGoesForwardByDefault(): void
+    {
+        $player = new OggPlayer($this->vc, $this->loop);
+        $clock = (new ReflectionProperty(OggPlayer::class, 'clock'))->getValue($player);
+
+        // hrtime() counts from an arbitrary moment, such as the machine starting, not from 1970 like the wall
+        // clock, which steps on some machines.
+        $this->assertEqualsWithDelta(hrtime(true) / 1e9, $clock(), 0.05);
+        $this->assertGreaterThan(1e8, abs(microtime(true) - $clock()), 'Not the wall clock.');
     }
 
     public function testAPacketLateAfterAStallIsSentAtOnceAndThePaceStartsOverFromIt(): void

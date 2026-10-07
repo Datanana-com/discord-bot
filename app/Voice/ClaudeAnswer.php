@@ -20,7 +20,7 @@ final class ClaudeAnswer
     /** Whether text of the answer was handed over while Claude was writing it. */
     private bool $streamed = false;
 
-    /** When the prompt was given: what the times of {@see timing()} count from. */
+    /** When the prompt was given, by the clock that only goes forward (the wall clock steps on some machines): what the times of {@see timing()} count from. */
     private readonly float $askedAt;
 
     /** When Claude Code said it had finished starting (its `init` event), when it did. */
@@ -29,7 +29,7 @@ final class ClaudeAnswer
     /** How often Claude Code said it was trying a request again. */
     private int $retries = 0;
 
-    /** How often Claude Code said something about a rate limit. */
+    /** How often Claude Code said a rate limit was near or reached. It reports on the limits with every answer, and that all is well isn't counted. */
     private int $rateLimits = 0;
 
     /**
@@ -40,7 +40,7 @@ final class ClaudeAnswer
      */
     public function __construct(private readonly ?Closure $onText, private readonly ?Closure $onStarted = null)
     {
-        $this->askedAt = microtime(true);
+        $this->askedAt = hrtime(true) / 1e9;
     }
 
     /**
@@ -55,10 +55,10 @@ final class ClaudeAnswer
         if ($type === 'result') {
             $this->result = $event;
         } elseif ($type === 'system' && ($event['subtype'] ?? null) === 'init') {
-            $this->initAt ??= microtime(true);
+            $this->initAt ??= hrtime(true) / 1e9;
         } elseif ($type === 'system' && ($event['subtype'] ?? null) === 'api_retry') {
             $this->retries++;
-        } elseif ($type === 'rate_limit_event') {
+        } elseif ($type === 'rate_limit_event' && ($event['rate_limit_info']['status'] ?? 'allowed') !== 'allowed') {
             $this->rateLimits++;
         } elseif ($this->onText !== null && $type === 'stream_event' && ($event['event']['delta']['type'] ?? null) === 'text_delta') {
             $this->handOver($event['event']['delta']['text']);
@@ -76,14 +76,14 @@ final class ClaudeAnswer
     /**
      * How long Claude took to start answering, counted from the prompt: to now (`ms`), to Claude Code saying it
      * had finished starting (`init_ms`, null when it never said so), and how often it tried a request again or
-     * was told about a rate limit meanwhile. Numbers only: nothing of the answer.
+     * said a rate limit was near or reached meanwhile. Numbers only: nothing of the answer.
      *
      * @return array{ms: int, init_ms: ?int, retries: int, rate_limits: int}
      */
     public function timing(): array
     {
         return [
-            'ms' => (int) round((microtime(true) - $this->askedAt) * 1000),
+            'ms' => (int) round((hrtime(true) / 1e9 - $this->askedAt) * 1000),
             'init_ms' => $this->initAt === null ? null : (int) round(($this->initAt - $this->askedAt) * 1000),
             'retries' => $this->retries,
             'rate_limits' => $this->rateLimits,

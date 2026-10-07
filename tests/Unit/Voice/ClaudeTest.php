@@ -660,7 +660,27 @@ final class ClaudeTest extends TestCase
         $this->assertGreaterThanOrEqual(0, $timing['ms']);
         $this->assertIsInt($timing['init_ms']);
         $this->assertLessThanOrEqual($timing['ms'], $timing['init_ms'], 'Claude Code had finished starting before it wrote.');
-        $this->assertSame([0, 1], [$timing['retries'], $timing['rate_limits']]);
+        // The rate limit event of a healthy answer says "allowed": no limit was near.
+        $this->assertSame([0, 0], [$timing['retries'], $timing['rate_limits']]);
+    }
+
+    public function testCountsOnlyTheRateLimitsThatWereNearOrReached(): void
+    {
+        putenv('FAKE_CLAUDE_OUTPUT=' . implode("\n", [
+            '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}',
+            '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning"}}',
+            '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}',
+            '{"type":"rate_limit_event"}',
+            '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi."}}}',
+            '{"type":"result","is_error":false,"result":"Hi."}',
+        ]));
+        $timing = null;
+
+        await($this->claude()->ask('Hello', onText: $this->collect(...), onStarted: function (array $told) use (&$timing) {
+            $timing = $told;
+        }));
+
+        $this->assertSame(2, $timing['rate_limits'], 'A warning and a rejection count; "allowed", and an event that says nothing, do not.');
     }
 
     public function testCountsTheRequestsTriedAgainAndKnowsWhenClaudeCodeNeverSaidItHadStarted(): void

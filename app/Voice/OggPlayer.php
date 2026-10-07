@@ -60,7 +60,7 @@ final class OggPlayer implements Player
 
     private ?TimerInterface $timer = null;
 
-    /** Counts the stops: a timer from before the last one does nothing. */
+    /** Counts the stops: what a tick calls out to (the waiter of a file that is over, the first packet's callback) may stop the player, and the tick checks this before it goes on. */
     private int $generation = 0;
 
     private readonly Closure $clock;
@@ -194,6 +194,11 @@ final class OggPlayer implements Player
 
         if ($this->current['sent'] === 1 && $this->current['onStart'] !== null) {
             ($this->current['onStart'])();
+
+            // Whoever was told may have stopped the player: then there is nothing more to send.
+            if ($generation !== $this->generation) {
+                return;
+            }
         }
 
         $this->schedule();
@@ -212,12 +217,8 @@ final class OggPlayer implements Player
             $this->next = $now + self::FRAME;
         }
 
-        $generation = $this->generation;
-        $this->timer = $this->loop->addTimer(max(0.0, $this->next - $now), function () use ($generation) {
-            if ($generation === $this->generation) {
-                $this->tick();
-            }
-        });
+        // A stop cancels this timer, so it never fires for a stream that is over.
+        $this->timer = $this->loop->addTimer(max(0.0, $this->next - $now), $this->tick(...));
         $this->next += self::FRAME;
     }
 
