@@ -68,6 +68,32 @@ The bot sends the audio of its sentences to Discord itself: once Piper's file is
 
 The silence at the start and at the end of each sentence is taken off when its file is converted, whatever the voice. Piper's files begin with up to 80 ms of it and end with up to 200 ms; the answer starts about 40 ms sooner, and the silence between the last sound of a sentence and the first of the next is about 90 ms (the 50 ms kept at the end, the 20 ms the stream takes between files, and the 20 ms kept at the start), where it was 200 ms or more. Only sound quieter than -60 dB counts as silence, which is below the soft start of an "s", an "h" or an "f", so no first sound is lost; 20 ms of it are kept before the first sound and 50 ms after the last. Pauses inside a sentence are left as they are, and a sentence of nothing but silence is kept as 40 ms of it, so that it is still played. With `VOICE_PLAYER=library` the pause between two sentences is still the half second the library waits.
 
+## Speaking with Kokoro instead of Piper
+
+[Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) (82 million parameters, run with PyTorch) has voices its makers grade above Piper's, and on a graphics card it speaks a sentence about as fast as Piper's `en_US-lessac-medium`: measured on an RTX 3080, between nothing and 70 ms faster over the first sentences of 32 real answers. The bot doesn't know Kokoro: `kokoro/kokoro_serve.py` in this repository answers the way Piper does (one sentence on a line in, a WAV file and a `Wrote` line out, for a whole call), and `PIPER_BINARY` points at it.
+
+Install it from this repository's folder:
+
+```bash
+bash kokoro/install.sh                 # af_heart, the voice the bot was made for
+bash kokoro/install.sh af_bella bf_emma # and these as well (see the model's `voices` folder for the names)
+```
+
+It needs `python3` with `venv` (Ubuntu: `python3-venv`), about 7 GB of disk (6.2 GB installed: the PyTorch libraries are most of it, and 3.3 GB are downloaded; with `PIP_NO_CACHE_DIR=1` pip's own cache doesn't grow by 3 GB more), the internet for that one run, and **a graphics card driver 580 or newer**: the PyTorch it installs is built for CUDA 13, and under WSL the driver is the one of Windows. With an older driver, install the same PyTorch built for CUDA 12.6 in the `venv` instead of the `torch` and `nvidia-*` lines of `kokoro/requirements.txt`: `kokoro/venv/bin/pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cu126` (not tried). It takes about 170 seconds, writes only into `kokoro/` (`venv`, `hf` for the model's files, `voices`: all three are in `.gitignore`, and removing them removes it) and checks the model's files against the ones that were measured (`kokoro/model.sha256`). After that it needs no internet.
+
+Then, in `.env`:
+
+```
+PIPER_BINARY=/home/<you>/discord-bot/kokoro/kokoro
+PIPER_MODEL=/home/<you>/discord-bot/kokoro/voices/af_heart.onnx
+```
+
+`install.sh` ends by printing these two lines for where it is. The files in `kokoro/voices` are empty: the bot lists the `.onnx` files next to `PIPER_MODEL` as the voices a server can choose with `/settings voice:`, and refuses to start a call when `PIPER_MODEL` isn't a file, so each Kokoro voice is a name there, and the program only reads the name (`af_heart.onnx` is the voice `af_heart`). Voices starting with `b` are British, the others American.
+
+To try it without the bot: `echo "Hello there." | kokoro/kokoro --model kokoro/voices/af_heart.onnx --output-dir /tmp/kokoro` writes `/tmp/kokoro/1.wav`. Its first line on stderr, `DEVICE cuda (<the card>)` or `DEVICE cpu`, says where it runs; without a card it runs on the processor, without a word of warning from PyTorch, and takes 2 to 6 seconds for a sentence.
+
+Kokoro's code and weights are under the Apache 2.0 licence. Its model card says it was trained in part on audio made by other, closed text-to-speech systems. For a word it doesn't know it falls back to eSpeak NG, which is under the GPL: the `espeakng-loader` Python package that `requirements.txt` installs holds that library.
+
 ## Known limitations
 
 - The bot starts on its answer about two seconds after a short question, as measured on a 10-core desktop CPU (i9-10900K) with whisper `base`, `WHISPER_LANGUAGE=en`, `WHISPER_THREADS=8`, `CLAUDE_MODEL=haiku` and the `en_US-lessac-medium` voice: 0.6 to 0.65 s of silence before the question counts as over, about 0.7 s of transcription (about 0.2 s with the whisper server, on a GPU), about 0.5 s until Claude's first words, and 0.1 to 0.25 s for Piper to speak the first sentence. With `WHISPER_LANGUAGE=auto`, transcription takes a second or two longer, and a bigger whisper model or a slower CPU adds to it as well. The first packet of the answer follows about 40 ms after its first sentence is ready; with `VOICE_PLAYER=library` it is half a second, which is also the pause between two sentences.
