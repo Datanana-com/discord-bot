@@ -58,6 +58,18 @@ final class VoiceStreamingTest extends VoiceTestCase
         $this->assertSame('555', $started['user']);
         $this->assertGreaterThanOrEqual($this->logged('Transcribed')[0]['ms'], $started['ms'], 'It includes the transcription.');
 
+        // So is where the time to the answer went: which process was asked, and when Claude started writing.
+        $asked = $this->logged('Asked Claude')[0];
+        $this->assertSame(['guild', 'session', 'user', 'waited_ms'], array_keys($asked));
+        $this->assertSame('555', $asked['user']);
+        $this->assertIsInt($asked['waited_ms'], 'The process that waited for the question was asked.');
+        $this->assertGreaterThanOrEqual(0, $asked['waited_ms']);
+        $answering = $this->logged('Claude started answering')[0];
+        $this->assertSame(['guild', 'session', 'user', 'ms', 'init_ms', 'retries', 'rate_limits', 'held'], array_keys($answering));
+        $this->assertSame(['555', null, 0, 0, false], [$answering['user'], $answering['init_ms'], $answering['retries'], $answering['rate_limits'], $answering['held']]);
+        $this->assertLessThanOrEqual($started['ms'], $answering['ms'], 'Claude started writing before the bot started speaking.');
+        $this->assertLogsNeverMention('quarter past four');
+
         // The "answered" statistic still measures until the answer is posted.
         $this->assertSame(1, $this->usage()['answers']);
         $this->assertGreaterThan($started['ms'], $this->usage()['answer_ms']);

@@ -84,6 +84,28 @@ final class ListeningPortTest extends TestCase
         }
     }
 
+    public function testDoesNotTakeASocketTheProcessInheritedForOneOfItsOwn(): void
+    {
+        // A program the bot starts has what the bot had open, this socket included: it listens on it no more than
+        // the bot's whisper server listens on the bot's connection to Discord.
+        $mine = stream_socket_server('tcp://127.0.0.1:0');
+        $quiet = Shell::open(['sleep', '30']);
+
+        try {
+            $this->assertNull(ListeningPort::of($quiet->pid()));
+            $this->assertSame((int) substr((string) strrchr((string) stream_socket_get_name($mine, false), ':'), 1), ListeningPort::of(getmypid()), 'It is still the bot\'s own.');
+        } finally {
+            $quiet->stop();
+
+            try {
+                await($quiet->done());
+            } catch (Throwable) {
+            }
+
+            fclose($mine);
+        }
+    }
+
     public function testSaysNothingOfAProcessThatIsNotThere(): void
     {
         $this->assertNull(ListeningPort::of(0));

@@ -143,8 +143,9 @@ Piper speaks the question, "Hey Claude, tell me in two short sentences why peopl
 | waiting for silence | From the end of the question to the bot taking it as over. |
 | whisper | Transcribing the question. Compared. |
 | Claude, the whole answer | From asking Claude to its whole answer. Compared. |
-| from the utterance to the first sentence spoken | `Started speaking` in the log. |
+| from the utterance to the first sentence spoken | `Started speaking` in the log: the first packet of the answer, with the bot's own player (`VOICE_PLAYER=bot`, the default), whose packets the bench's voice client collects instead of sending. |
 | from the end of the question to the first sentence spoken | What someone in the call waits for. Compared. |
+| longest gap between two packets of the answer | Only shown, and only with the bot's own player: 20 ms when the second sentence was ready before the first was over, more when it waited for Piper. |
 | the call's summary, once | Only shown. |
 
 For each step it shows the fastest and the median of the 5 questions. The fastest is what is compared with the baseline: whatever else the machine and the network are doing only ever adds time, so it says most about the bot. In three runs of the same code on a busy machine the fastest times were within 10% of each other, and the medians within 25%. A compared step fails when it is more than 25% and more than 200 ms over the baseline, so the bench catches what makes the bot clearly slower, not a few milliseconds.

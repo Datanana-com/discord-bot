@@ -358,7 +358,7 @@ arg=A voice call with the assistant Claude.
         // Each step is logged with the call's server and session, so one call can be followed in the log.
         $steps = array_filter($this->logs->getRecords(), fn ($record) => ($record->context['session'] ?? null) === $session->id);
         $this->assertSame(
-            ['Voice session started', 'Recording a speaker', 'Utterance ended', 'Transcribed', 'Conversation opened', 'Claude answered', 'Started speaking', 'Voice session stopped', 'Summarized the call'],
+            ['Voice session started', 'Recording a speaker', 'Utterance ended', 'Transcribed', 'Conversation opened', 'Asked Claude', 'Claude started answering', 'Claude answered', 'Started speaking', 'Voice session stopped', 'Summarized the call'],
             array_values(array_map(fn ($record) => $record->message, $steps)),
         );
         $this->assertSame(self::GUILD_ID, $this->logged('Voice session started')[0]['guild']);
