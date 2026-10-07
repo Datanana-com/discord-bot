@@ -11,6 +11,7 @@ use App\CommandAbstract;
 use App\Voice\VoiceSession;
 use Discord\Builders\MessageBuilder;
 use Discord\Parts\Interactions\Interaction;
+use React\Promise\PromiseInterface;
 
 final class ForgetCommand extends CommandAbstract
 {
@@ -18,7 +19,7 @@ final class ForgetCommand extends CommandAbstract
 
     public array $options = MemoryGroup::OPTIONS;
 
-    public function handle(Interaction $interaction): void
+    public function handle(Interaction $interaction): ?PromiseInterface
     {
         $userId = (string) $interaction->user->id;
         $others = MemoryGroup::others($interaction);
@@ -33,7 +34,7 @@ final class ForgetCommand extends CommandAbstract
 
         $who = $others === [] ? 'you' : 'you and ' . MemoryGroup::names($others, $interaction, $this->discord);
 
-        $interaction->respondWithMessage(
+        return $interaction->respondWithMessage(
             MessageBuilder::new()->setContent(
                 Memory::fromEnv()->forget($people)
                     ? "Done: I forgot what I remembered about {$who}."

@@ -8,14 +8,15 @@ use App\Analytics\Usage;
 use App\CommandAbstract;
 use Discord\Builders\MessageBuilder;
 use Discord\Parts\Interactions\Interaction;
+use React\Promise\PromiseInterface;
 
 final class StatsCommand extends CommandAbstract
 {
     public string $description = 'Shows how this server has used the bot.';
 
-    public function handle(Interaction $interaction): void
+    public function handle(Interaction $interaction): ?PromiseInterface
     {
-        $interaction->respondWithMessage(MessageBuilder::new()->setContent($this->report($interaction->guild_id)), ephemeral: true);
+        return $interaction->respondWithMessage(MessageBuilder::new()->setContent($this->report($interaction->guild_id)), ephemeral: true);
     }
 
     private function report(?string $guildId): string

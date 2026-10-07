@@ -41,7 +41,7 @@ They are registered when `BOT_SLASH_COMMANDS` is set.
 
 ## Voice calls with Claude
 
-`/record` joins your voice channel, records it, and lets everyone in it talk to Claude. The call ends with `/stop`, when someone says "disconnect Claude", or when someone disconnects the bot.
+`/record` joins your voice channel, records it, and lets everyone in it talk to Claude. The call ends with `/stop`, when someone says "disconnect Claude", when someone disconnects the bot, or when the bot is stopped.
 
 ```mermaid
 flowchart TD
@@ -64,6 +64,7 @@ flowchart TD
 - **Interrupting.** The bot stops speaking when the person it is answering starts talking.
 - **Leaving by voice.** Anyone in the call can say "disconnect Claude": the bot says "Okay.", then stops recording and leaves, as `/stop` does. "Disconnect" alone doesn't count.
 - **Summary.** When the call ends, Claude summarizes its whole transcript in the text channel where `/record` was used.
+- **When something fails.** What can't be transcribed, answered or spoken is said in the text channel, and the call hears "Sorry, something went wrong.", once for each thing that fails. The call goes on.
 
 A conversation belongs to one person:
 
@@ -184,7 +185,7 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
     git clone https://github.com/ggml-org/whisper.cpp ~/whisper.cpp
     cd ~/whisper.cpp
     cmake -B build -DCMAKE_BUILD_TYPE=Release
-    cmake --build build -j --config Release --target whisper-cli
+    cmake --build build -j --config Release --target whisper-cli whisper-server
     sh ./models/download-ggml-model.sh base
     ```
 
@@ -212,6 +213,14 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
     composer serve
     ```
 
+## Stopping the bot, and when something fails
+
+- **Ctrl+C, or `kill`,** stops the bot the way `/stop` stops a call: it leaves every voice channel at once, ends the meetings made with `/meet`, and ends by itself once every call is summarized and its memories are updated. Ctrl+C a second time ends it without waiting for that.
+- **An error doesn't take the bot down.** What fails is logged with what called what, never with what was said, and the bot goes on. A slash command that failed tells whoever used it. Only when errors keep coming, ten within ten seconds, does the bot tell its calls, leave them and end, with exit code 1.
+- **Nothing starts the bot again** once it has ended. Run it under a loop, or as a systemd service, that looks at its exit code: 0 when you stopped it.
+
+More in [docs/stopping-and-errors.md](docs/stopping-and-errors.md): what is waited for, the exit codes, and a systemd unit.
+
 ## Configuration
 
 Set these in `.env`. The notes and measurements behind each one are in [docs/configuration.md](docs/configuration.md).
@@ -226,7 +235,9 @@ Set these in `.env`. The notes and measurements behind each one are in [docs/con
 | `VOICE_STOP_PHRASE` | `stop <wake word>` | What closes the conversation of whoever says it. |
 | `VOICE_LEAVE_PHRASE` | `disconnect <wake word>` | What ends the call when anyone in it says it. |
 | `VOICE_PAUSE_SECONDS` | `0.6` | How long someone has to be silent for what they said to be over. |
+| `VOICE_PLAYER` | `bot` | Who sends the bot's speech to Discord: the bot itself (`bot`), as soon as each sentence is ready, or the voice library (`library`), which waits half a second before every sentence. |
 | `WHISPER_BINARY` | `whisper-cli` | Path to whisper.cpp's `whisper-cli`. |
+| `WHISPER_SERVER_BINARY` | `whisper-server` next to `WHISPER_BINARY`, if it is there | Path to whisper.cpp's `whisper-server`, which a call keeps running with the model loaded: with a GPU, a short question is transcribed in about 0.1 to 0.3 s instead of the 0.5 to 0.9 s that starting `whisper-cli` takes. It has no password, so leave it empty on a machine shared with people you don't trust. |
 | `WHISPER_MODEL` | | Path to the whisper model, e.g. `~/whisper.cpp/models/ggml-base.bin`. |
 | `WHISPER_LANGUAGE` | `auto` | Language spoken in the call, e.g. `en` or `pt`. `auto` detects it, which takes a second or two longer: set it when one language is spoken. |
 | `WHISPER_THREADS` | | How many threads whisper uses. Empty leaves it to whisper, which takes 4. |
@@ -260,29 +271,33 @@ Every log message, and more queries, in [docs/logs-and-statistics.md](docs/logs-
 
 ## Known limitations
 
-- The bot starts on its answer about two seconds after a short question, as measured on a 10-core desktop CPU with whisper `base`, `WHISPER_LANGUAGE=en`, 8 threads and `CLAUDE_MODEL=haiku`. With the default `auto` language it takes a second or two longer.
+- The bot starts on its answer about two seconds after a short question, as measured on a 10-core desktop CPU with whisper `base`, `WHISPER_LANGUAGE=en`, 8 threads and `CLAUDE_MODEL=haiku`; the whisper server, with a GPU, takes about half a second off that, and the bot sending its speech itself (`VOICE_PLAYER=bot`) another half second. With the default `auto` language it takes a second or two longer.
 - Only the person the bot is answering can interrupt it.
 - Speech recognition sometimes mishears the wake word ("cloud" for "Claude"). The default wake word already has "Claud", which whisper also writes for it. List the spellings whisper writes for your voice in `VOICE_WAKE_WORD` or `/settings`.
 - The stop phrase and the leave phrase wait their turn behind what was said before them: a sentence is only known once it is transcribed, and sentences are handled one at a time.
 - The voice library keeps every decoded audio frame in memory until `/stop`, roughly 12 MB per speaker per minute of speech. For very long calls, `/stop` and `/record` again now and then.
 - Discord lets a bot be in one voice channel per server, and doesn't let bots join the calls of direct messages: use `/meet` for a private call.
-- The bot only remembers its meetings while it runs. When it stops during a meeting made with `/meet`, the meeting's channel stays: delete it by hand.
+- The bot only remembers its meetings while it runs. Stopped with Ctrl+C or a signal, it ends them and deletes their channels. When it ends another way during a meeting made with `/meet`, the meeting's channel stays: delete it by hand.
+- A bot that ends without being stopped (out of memory, `kill -9`, the machine going down) can't leave its calls: it stays in the voice channel until Discord notices, and the calls aren't summarized.
 
 The whole list is in [docs/voice-calls.md](docs/voice-calls.md#known-limitations).
 
 ## Development
 
 - **Events.** A class in `app/Events` named after a Discord event, such as `MessageCreate`, and extending `App\EventAbstract` handles that event. Its functions run one after the other, until one returns `true`.
-- **Slash commands.** A class in `app/Commands/Global` named `<Name>Command` and extending `App\CommandAbstract` is registered as `/<name>`. Global commands Discord has that the bot has no class for are named in a warning when it starts, and only removed when `BOT_REMOVE_OLD_COMMANDS` is set.
+- **Slash commands.** A class in `app/Commands/Global` named `<Name>Command` and extending `App\CommandAbstract` is registered as `/<name>`. Global commands Discord has that the bot has no class for are named in a warning when it starts, and only removed when `BOT_REMOVE_OLD_COMMANDS` is set. A command that throws, or whose promise is rejected, tells whoever used it that it failed, and is logged with its name.
 
 ```bash
 composer test                          # unit and feature tests
 composer test -- --testsuite Unit      # or Feature
 composer test:coverage                 # needs pcov or Xdebug
+composer bench                         # times a question with the real whisper.cpp, Claude Code and Piper
 composer pint                          # fixes the code style
 ```
 
 The feature tests replace whisper.cpp, Claude Code, Piper and, for voice messages, ffmpeg with the scripts in `tests/Fixtures`, so they need no models, Claude login or Discord connection. `VoiceCallTest` uses the real ffmpeg and libopus, and is skipped without them. Examples, and how the tests work, in [docs/development.md](docs/development.md).
+
+The tests can't tell whether the bot got slower: `composer bench` asks it a spoken question with the real programs of your machine and fails when the answer comes clearly later than it did on `master`. Run it before merging something that could slow the bot down: see [the benchmark](docs/development.md#benchmark).
 
 ### Live voice test
 

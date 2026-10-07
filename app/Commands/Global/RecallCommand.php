@@ -10,6 +10,7 @@ use App\Voice\Claude;
 use Discord\Builders\MessageBuilder;
 use Discord\Parts\Application\Command\Option;
 use Discord\Parts\Interactions\Interaction;
+use React\Promise\PromiseInterface;
 use RuntimeException;
 use Throwable;
 
@@ -53,7 +54,7 @@ final class RecallCommand extends CommandAbstract
         ],
     ];
 
-    public function handle(Interaction $interaction): void
+    public function handle(Interaction $interaction): ?PromiseInterface
     {
         $guildId = $interaction->guild_id;
         $question = trim((string) $interaction->data?->options?->get('name', 'question')?->value);
@@ -67,9 +68,7 @@ final class RecallCommand extends CommandAbstract
         };
 
         if ($problem !== null) {
-            $interaction->respondWithMessage(MessageBuilder::new()->setContent($problem), ephemeral: true);
-
-            return;
+            return $interaction->respondWithMessage(MessageBuilder::new()->setContent($problem), ephemeral: true);
         }
 
         // Picking someone from Discord's list of members puts <@their id> in the question, while the
@@ -84,7 +83,7 @@ final class RecallCommand extends CommandAbstract
 
         // Claude takes longer than the 3 seconds Discord waits for a response. Only whoever asked
         // sees the answer, as the calls may hold things not everyone in the channel heard.
-        $interaction->acknowledgeWithResponse(ephemeral: true)
+        return $interaction->acknowledgeWithResponse(ephemeral: true)
             ->then(fn () => Claude::fromEnv((new GuildSettings($this->log))->for($guildId)['model'])->ask($prompt, self::SYSTEM_PROMPT))
             ->then(function (string $answer) use ($guildId, $calls, $leftOut, $asking) {
                 if ($answer === '') {

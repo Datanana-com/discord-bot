@@ -782,6 +782,8 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->waitUntil(fn () => count($this->played) === $spoken + 2, 'both of its sentences');
         $this->assertSame(self::BUSY, implode(' ', array_map(file_get_contents(...), array_slice($this->played, $spoken))), 'Not what Claude wrote before the line.');
         $this->assertStringEndsWith('] Claude: ' . self::BUSY . "\n", $this->transcript($session));
+        // Which the log says: that answer was held back until it was whole, unlike the four before it.
+        $this->assertSame([false, false, false, false, true], array_column($this->logged('Claude started answering'), 'held'));
 
         // Meanwhile, an answer that hands nothing off is still given as it is.
         $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is a quarter past four.')]);
@@ -1340,6 +1342,26 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->assertCount(2, $this->played);
         $this->assertCount(3, $this->claudeCalls(), 'Claude was not asked to tell her.');
         $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testPostsThatASentenceOfItsOwnCouldNotBeSpoken(): void
+    {
+        // Piper fails on the sentence that says so.
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT_LOOKUP' => self::claudeResult('Usage limit reached', isError: true), 'FAKE_PIPER_FAILS_ON' => 'look that up']);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 1, 'the lookup to start');
+
+        touch($this->go);
+        $this->waitUntil(fn () => count($this->sent) === 3, 'both failures to be posted');
+
+        // Like a sentence of an answer: the channel is told, and the call isn't told that it wasn't.
+        $this->assertSame("Sorry, I couldn't say that out loud. The bot's logs say why.", $this->sent[2]);
+        $this->assertCount(1, $this->played);
+        $failure = array_values(preg_grep('/^Voice reply failed: /', $this->loggedProblems()));
+        $this->assertCount(1, $failure);
+        $this->assertSame('speech', $this->logged($failure[0])[0]['step']);
+        $this->assertSame(1, $this->usage()['failures']);
     }
 
     public function testPostsAndSaysThatSomethingCouldNotBeLookedUp(): void

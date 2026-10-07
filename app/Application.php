@@ -5,20 +5,45 @@ declare(strict_types=1);
 namespace App;
 
 use Closure;
+use Throwable;
 use App\Logs\Logger;
 use Discord\Discord;
 use ReflectionClass;
+use App\Logs\Failures;
+use App\Voice\Meeting;
 use App\Voice\Retention;
+use BadMethodCallException;
+use React\EventLoop\Loop;
 use App\Voice\VoiceSession;
+use App\Support\Shell;
 use Illuminate\Support\Str;
+use App\Support\GuardedLoop;
 use Psr\Log\LoggerInterface;
 use Discord\WebSockets\Event;
+use React\Promise\PromiseInterface;
+use Discord\Builders\MessageBuilder;
 use App\Exceptions\EventNotFoundException;
 use Discord\Parts\Application\Command\Command;
 use Discord\Parts\Interactions\Interaction;
 
+use function React\Promise\all;
+
 final class Application
 {
+    /** The signals the bot is stopped with: Ctrl+C in its terminal, and what `kill` and a service manager send. */
+    private const array SIGNALS = [2 => 'SIGINT', 15 => 'SIGTERM'];
+
+    /**
+     * This many exceptions caught in the event loop within {@see FLOOD_SECONDS} are no longer something
+     * that failed once: whatever throws them does it every time it runs, and the bot stops.
+     */
+    private const int FLOOD = 10;
+
+    private const float FLOOD_SECONDS = 10.0;
+
+    /** Seconds the event loop still runs once the bot has closed its connection to Discord: what it wrote there is only sent while the loop runs. */
+    private const float LAST_WORDS = 0.5;
+
     /**
      * @var \Discord\Discord
      */
@@ -38,6 +63,22 @@ final class Application
      */
     private array $allowedEvents = [];
 
+    /** The event loop the bot runs on, which catches what its callbacks throw. */
+    private GuardedLoop $loop;
+
+    /** @var list<float> When the last exceptions were caught in the event loop. */
+    private array $caughtAt = [];
+
+    /** Whether the bot is stopping over too many of them. */
+    private bool $flooded = false;
+
+    private bool $stopping = false;
+
+    private bool $closed = false;
+
+    /** What the process ends with. */
+    private int $exitCode = 0;
+
     /**
      * Initializes the Application
      *
@@ -47,6 +88,8 @@ final class Application
     {
         // Only create the default logger when none is given: it opens a log file.
         $options['logger'] ??= new Logger();
+        // What a callback of the event loop throws is caught there: thrown on, it would end the bot, still in its calls.
+        $this->loop = $options['loop'] = new GuardedLoop($options['loop'] ?? Loop::get(), $this->caught(...));
         $this->discord = new Discord($options);
         $this->log = $this->discord->getLogger();
 
@@ -73,8 +116,9 @@ final class Application
                 try {
                     $this->prepareCommandClasses();
                 } catch (\Throwable $th) {
-                    $discord->getLogger()->error('Error while preparing command classes: ' . $th->getMessage());
-                    $discord->getLogger()->error('Error while preparing command classes: ' . $th->getTraceAsString());
+                    $discord->getLogger()->error('Error while preparing command classes: ' . $th->getMessage(), Failures::context($th));
+                    // Not 0: the bot didn't just stop.
+                    $this->exitCode = 1;
                     $this->discord->close();
                 }
 
@@ -83,11 +127,116 @@ final class Application
     }
 
     /**
-     * Starts the ReactPHP event loop.
+     * Starts the ReactPHP event loop, and stops the bot when the process is told to end.
+     *
+     * @return int What the process ends with: 0, or 1 when the bot stopped over errors.
      */
-    public function run(): void
+    public function run(): int
     {
-        $this->discord->run();
+        // Also for what uses the static Loop, like the programs the bot runs.
+        Loop::set($this->loop);
+        // Once the loop is between two callbacks. ReactPHP has PHP handle a signal the moment it arrives, in the
+        // middle of whatever is running: a call that is handing on the audio it was just sent would be stopped
+        // underneath itself.
+        $stop = function (int $signal): void {
+            $this->loop->futureTick(fn () => $this->stop('received ' . self::SIGNALS[$signal]));
+        };
+
+        try {
+            foreach (array_keys(self::SIGNALS) as $signal) {
+                $this->loop->addSignal($signal, $stop);
+            }
+        } catch (BadMethodCallException) {
+            // The event loop can only be told about signals with the pcntl extension.
+            $this->log->warning('The pcntl extension is not loaded: stopped with Ctrl+C, the bot ends without leaving its calls, and the programs it runs go on without it.');
+        }
+
+        try {
+            $this->discord->run();
+        } finally {
+            foreach (array_keys(self::SIGNALS) as $signal) {
+                $this->loop->removeSignal($signal, $stop);
+            }
+
+            // What is still running ends with the bot, like a summary it no longer waited for: in a session of
+            // their own, the programs would go on without it.
+            Shell::stopAll();
+        }
+
+        return $this->exitCode;
+    }
+
+    /**
+     * Stops the bot. Every call is stopped as /stop does it, so the bot leaves its voice channels at once,
+     * and the meetings /meet made are ended, which deletes their channels. The bot then goes on until every
+     * call is summarized and remembered, however long that takes, and ends.
+     *
+     * Told to stop again, it no longer waits for that.
+     *
+     * @param string $reason Why, for the log.
+     * @param int $exitCode What the process ends with. Not 0 when the bot stops over errors: the text
+     *                      channel of each call is then told that it had to leave.
+     */
+    public function stop(string $reason, int $exitCode = 0): void
+    {
+        $this->exitCode = max($this->exitCode, $exitCode);
+
+        if ($this->stopping) {
+            $this->log->warning('Stopping now, without waiting for the calls', ['reason' => $reason]);
+            $this->close();
+
+            return;
+        }
+
+        $this->stopping = true;
+        // None that would start while the ones there are are summarized: nothing would stop it.
+        VoiceSession::refuseNewCalls();
+        $calls = VoiceSession::unfinished();
+        $this->log->info('Stopping the bot', ['reason' => $reason, 'calls' => count($calls)]);
+
+        // Neither rejects.
+        all([
+            ...array_map(fn (VoiceSession $call) => $exitCode === 0 ? $call->stop() : $call->abandon(), $calls),
+            Meeting::endAll(),
+        ])->then($this->close(...));
+    }
+
+    /**
+     * Closes the connection to Discord, and ends the event loop.
+     */
+    private function close(): void
+    {
+        if ($this->closed) {
+            return;
+        }
+
+        $this->closed = true;
+        // A normal close, after which Discord shows the bot as offline, and no longer in any voice channel.
+        // The loop is not stopped with it: the close is only sent while the loop runs.
+        $this->discord->close(false);
+        $this->loop->addTimer(self::LAST_WORDS, fn () => $this->loop->stop());
+    }
+
+    /**
+     * What a callback of the event loop threw is logged, and the bot goes on. Unless it keeps happening:
+     * the bot then leaves its calls and stops, and whatever runs the bot can start it again.
+     */
+    private function caught(Throwable $e): void
+    {
+        // Each one has been logged often enough by now.
+        if ($this->flooded) {
+            return;
+        }
+
+        $this->log->error('Something failed in the event loop: ' . $e->getMessage(), Failures::context($e));
+        $now = microtime(true);
+        $this->caughtAt = [...array_filter($this->caughtAt, fn (float $at) => $now - $at < self::FLOOD_SECONDS), $now];
+
+        if (count($this->caughtAt) >= self::FLOOD) {
+            $this->flooded = true;
+            $this->log->critical('Too much is failing in the event loop: leaving every call and stopping', ['failures' => count($this->caughtAt), 'seconds' => self::FLOOD_SECONDS]);
+            $this->stop('too many errors', 1);
+        }
     }
 
     /**
@@ -158,7 +307,7 @@ final class Application
          */
         $this->discord->on(
             $eventName,
-            function ($event, Discord $discord) use ($eventClass, $childMethodsToRun) {
+            function ($event, Discord $discord) use ($eventName, $eventClass, $childMethodsToRun) {
                 $eventHandlerClass = new $eventClass($event, $discord, $childMethodsToRun);
                 $logger = $discord->getLogger();
 
@@ -172,9 +321,8 @@ final class Application
                     // Handles all of the functions within the event's class
                     $logger->debug('Executing the event handler..');
                     $eventHandlerClass->handle();
-                } catch (\Exception $e) {
-                    $logger->error('Error while handling event: ' . $e->getMessage());
-                    $logger->error('Trace' . $e->getTraceAsString());
+                } catch (Throwable $e) {
+                    $logger->error('Error while handling event: ' . $e->getMessage(), ['event' => $eventName, ...Failures::context($e)]);
                     return false;
                 } finally {
                     // Executes the event's methods after the event handler
@@ -251,7 +399,16 @@ final class Application
                     'channel' => $interaction->channel_id,
                     'user' => $interaction->user?->id,
                 ]);
-                $commandClass->handle($interaction);
+
+                try {
+                    $working = $commandClass->handle($interaction);
+                } catch (Throwable $e) {
+                    $this->commandFailed($commandName, $interaction, $e);
+
+                    return;
+                }
+
+                $working?->catch(fn (Throwable $e) => $this->commandFailed($commandName, $interaction, $e));
             });
         }
 
@@ -278,6 +435,39 @@ final class Application
             },
             fn (\Throwable $e) => $this->log->error('Could not fetch the registered commands: ' . $e->getMessage()),
         );
+    }
+
+    /**
+     * Logs that a command failed, and tells whoever used it: Discord would otherwise tell them that the
+     * application did not respond, or leave what the command had replied so far. Only they see it, unless
+     * the command had already answered in the channel, as /record and /meet do: that answer is changed.
+     *
+     * They aren't told what failed: an error nobody expected can hold paths, and other things nobody in a
+     * server needs.
+     */
+    private function commandFailed(string $commandName, Interaction $interaction, Throwable $e): void
+    {
+        $this->log->error("/{$commandName} failed: {$e->getMessage()}", [
+            'guild' => $interaction->guild_id,
+            'channel' => $interaction->channel_id,
+            'user' => $interaction->user?->id,
+            ...Failures::context($e),
+        ]);
+        $reply = MessageBuilder::new()->setContent("Something went wrong with /{$commandName}. The bot's logs say what.");
+
+        $this->tell($interaction, $reply)->catch(
+            fn (Throwable $e) => $this->log->warning("Could not tell that /{$commandName} failed: {$e->getMessage()}", ['guild' => $interaction->guild_id]),
+        );
+    }
+
+    /**
+     * Replies to a command, or changes what it replied when it already has: Discord takes one reply.
+     */
+    private function tell(Interaction $interaction, MessageBuilder $reply): PromiseInterface
+    {
+        return $interaction->isResponded()
+            ? $interaction->updateOriginalResponse($reply)
+            : $interaction->respondWithMessage($reply, ephemeral: true);
     }
 
     /**

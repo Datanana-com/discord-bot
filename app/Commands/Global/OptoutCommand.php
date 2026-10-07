@@ -9,6 +9,7 @@ use App\Privacy\OptOuts;
 use App\Voice\VoiceSession;
 use Discord\Builders\MessageBuilder;
 use Discord\Parts\Interactions\Interaction;
+use React\Promise\PromiseInterface;
 use Throwable;
 
 final class OptoutCommand extends CommandAbstract
@@ -23,7 +24,7 @@ final class OptoutCommand extends CommandAbstract
 
     public string $description = 'Stops the bot from recording, transcribing or answering you, in every server.';
 
-    public function handle(Interaction $interaction): void
+    public function handle(Interaction $interaction): ?PromiseInterface
     {
         $userId = (string) $interaction->user->id;
 
@@ -37,6 +38,6 @@ final class OptoutCommand extends CommandAbstract
             $reply = self::NOT_SAVED;
         }
 
-        $interaction->respondWithMessage(MessageBuilder::new()->setContent($reply), ephemeral: true);
+        return $interaction->respondWithMessage(MessageBuilder::new()->setContent($reply), ephemeral: true);
     }
 }

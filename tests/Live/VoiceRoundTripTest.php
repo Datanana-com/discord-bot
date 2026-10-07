@@ -183,6 +183,11 @@ final class VoiceRoundTripTest extends TestCase
         $this->assertSame(2, $firstSentences, 'Each sentence was synthesized on its own.');
         $this->assertSame(1, $firstSpeech, 'The bot started speaking the answer.');
 
+        // The call's whisper server, built next to whisper-cli, loaded its model and did not fail: whisper-cli transcribes without a word
+        // when there is none, or it isn't ready, and nothing else here would tell.
+        $this->assertContains('Whisper server ready', $logged, 'The call started its whisper server.');
+        $this->assertEmpty(preg_grep('/^The whisper server/', $logged), 'The whisper server did not fail.');
+
         // The question was answered by the Claude Code process that waited for it, and spoken by the Piper the call
         // started with, the real one: neither had to be started for it.
         $this->assertEmpty(
@@ -211,6 +216,10 @@ final class VoiceRoundTripTest extends TestCase
         $this->assertCount(1, $speaker['recordings'], 'Only the bot spoke to the speaker.');
         $heard = await(Transcriber::fromEnv()->transcribe($speaker['recordings'][0]));
         $this->assertMatchesRegularExpression('/quarter.+meeting/is', $heard, "The speaker heard both sentences, in order: {$heard}");
+        // From the first word: the bot sends the first packet of an answer 40 ms after it says it speaks, and nothing of the
+        // start may be lost on the way. Piper's file begins with about 80 ms of near-silence before "It", so this bounds
+        // what was lost at about 80 ms, not at the 40 ms.
+        $this->assertMatchesRegularExpression('/^\W*(it is|it\'s) a quarter/i', $heard, "The speaker heard the answer from its first word: {$heard}");
     }
 
     /**
