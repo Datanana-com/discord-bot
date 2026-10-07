@@ -26,7 +26,7 @@ User-facing behaviour is documented in `README.md` and `docs/*.md`. Do not resta
 ```bash
 composer test                          # Unit + Feature (needs Linux: WSL on this machine)
 composer test:coverage -- --fail-on-skipped   # what CI runs
-composer test -- --testsuite Unit      # or Feature; Live and Bench are opt-in; Real exists only on PR #26
+composer test -- --testsuite Unit      # or Feature; Live, Bench and Real (`composer check:lookups`) are opt-in
 composer pint                          # fix style; `composer pint -- --test` to check
 composer serve                         # run the bot (needs .env, PHP 8.5 with ffi)
 ```
