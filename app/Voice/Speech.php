@@ -130,7 +130,8 @@ final class Speech
      * Piper writes WAV files, but the voice library plays files through ffmpeg with
      * -fflags +nobuffer, which drops whatever ffmpeg reads while probing the file: all of
      * a short Piper WAV, yet only the first 20 ms of an Ogg Opus file. So Piper's WAV is
-     * converted.
+     * converted. With VOICE_PLAYER=bot the file's Opus packets go to Discord as they are,
+     * one every 20 ms, so each must hold 20 ms: libopus's default frame duration.
      *
      * @return PromiseInterface<string> The path of the written file. Rejects when there is nothing to say in the
      *                                  text, when Piper ends before it spoke it, or takes too long, and when its
@@ -160,6 +161,7 @@ final class Speech
             ->finally(fn () => Loop::cancelTimer($timer))
             // Out of Piper's folder, which is emptied when Piper ends.
             ->then(fn (string $wavPath) => rename($wavPath, $piperPath))
+            // Frames of 20 ms, libopus's default: see above. VoiceCallTest counts the packets of an answer.
             ->then(fn () => Shell::run([$this->ffmpeg, '-loglevel', 'error', '-y', '-i', $piperPath, '-c:a', 'libopus', $oggPath]))
             ->finally(fn () => is_file($piperPath) && unlink($piperPath))
             ->then(fn () => $oggPath);

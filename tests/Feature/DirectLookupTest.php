@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Assistant\DirectChat;
+use Discord\Parts\Channel\Message;
+use React\Promise\Deferred;
+use ReflectionProperty;
 use RuntimeException;
 use Tests\Fixtures\FakeCdn;
 
@@ -107,7 +110,7 @@ final class DirectLookupTest extends VoiceTestCase
         $this->assertCount(2, $this->claudeCalls(), 'Claude is not asked again: in a DM the answer is the text.');
 
         // Logged with who asked, the models and lengths: never the task, the chat or the answer.
-        $this->assertSame([['user' => '555', 'model' => 'sonnet', 'advisor' => 'opus', 'characters' => mb_strlen(self::TASK)]], $this->logged('Looking something up'));
+        $this->assertSame([['user' => '555', 'model' => 'sonnet', 'advisor' => null, 'characters' => mb_strlen(self::TASK)]], $this->logged('Looking something up'));
         $lookedUp = $this->logged('Looked something up');
         $this->assertCount(1, $lookedUp);
         $this->assertSame(['user', 'ms', 'characters'], array_keys($lookedUp[0]));
@@ -260,18 +263,86 @@ final class DirectLookupTest extends VoiceTestCase
         );
     }
 
-    public function testDoesNotRememberWhatWasLookedUpForSomethingThePersonAskedToForget(): void
+    public function testStopsLookingSomethingUpWhenThePersonUsesForget(): void
     {
         $this->chat(self::QUESTION);
-        $this->waitUntil(fn () => count($this->claudeCalls()) === 2, 'the lookup to start');
+        // A second task of theirs waits for the first.
+        $this->chat(self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1, 'the lookup to start');
+        $pid = $this->lookups()[0]['pid'];
+        $this->assertTrue(posix_kill($pid, 0), 'Claude Code is searching.');
+        $this->assertContains(8.0, $this->timers->pending(), 'The bot shows it is typing.');
+
+        // Both were handed off from what the memory said: the search is stopped, and the one that waits never starts.
+        DirectChat::forget('555');
+
+        $this->waitUntil(fn () => ! posix_kill($pid, 0), 'Claude Code to be stopped');
+        $this->runFor(0.4);
+        $this->assertSame([self::LOOKING, self::LOOKING], $this->sent, 'Nothing that was found is sent.');
+        $this->assertCount(1, $this->lookups());
+        $this->assertSame([], $this->logged('Looked something up'));
+        $this->assertCount(2, $this->logged('Dropped what was handed off to be looked up'));
+        $this->assertSame([], $this->timers->pending(), 'The bot stops showing it is typing, and no memory update is waiting.');
+        $this->assertSame([], $this->loggedProblems());
+        $this->assertFileDoesNotExist($this->go, 'Neither was let go on.');
+
+        // What they ask afterwards is looked up like before.
+        $this->chat(self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 2, 'the next lookup to start');
+        touch($this->go);
+        $this->waitUntil(fn () => count($this->sent) === 4, 'what was looked up');
+        $this->assertSame(self::SENT, $this->sent[3]);
+    }
+
+    public function testStopsATaskWhoseChatIsBeingFetchedWhenThePersonUsesForget(): void
+    {
+        $this->lookupHistoryHeld = new Deferred();
+        $this->chat(self::QUESTION);
+        $this->waitUntil(fn () => count($this->historyOptions) === 2, 'the lookup to ask for the chat');
+        $this->assertContains(8.0, $this->timers->pending(), 'The bot shows it is typing.');
 
         DirectChat::forget('555');
+
+        // It is over at once for the person, and Claude is never asked once the chat is there.
+        $this->assertNotContains(8.0, $this->timers->pending(), 'The bot stops showing it is typing.');
+        $this->lookupHistoryHeld->resolve(null);
+        $this->runFor(0.4);
+        $this->assertSame([], $this->lookups());
+        $this->assertSame([self::LOOKING], $this->sent);
+        $this->assertCount(1, $this->logged('Dropped what was handed off to be looked up'));
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testKeepsNoTrackOfATaskOnceItIsOver(): void
+    {
+        $this->chat(self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1, 'the lookup to start');
+        $chat = (new ReflectionProperty(DirectChat::class, 'chats'))->getValue()['555'];
+        $lookingUp = new ReflectionProperty(DirectChat::class, 'lookingUp');
+        $this->assertCount(1, $lookingUp->getValue($chat));
+
         touch($this->go);
         $this->waitUntil(fn () => count($this->sent) === 2, 'what was looked up');
 
-        // Still sent: they asked for it. Not remembered: it answers what they said before /forget.
-        $this->assertSame(self::SENT, $this->sent[1]);
-        $this->assertSame([], $this->timers->pending(), 'No memory update is waiting.');
+        $this->assertSame([], $lookingUp->getValue($chat));
+    }
+
+    public function testDropsWhatWasHandedOffWhileThePersonUsedForgetBeforeTheAnswerWasSent(): void
+    {
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => $this->claudeSays(self::LOOKING . "\nLOOK UP: " . self::TASK)]);
+        $arrived = new Deferred();
+        $this->sending = $arrived->promise();
+
+        $this->write(self::QUESTION);
+        $this->waitUntil(fn () => $this->sent === [self::LOOKING], 'the answer to be sent');
+        DirectChat::forget('555');
+        $arrived->resolve(null);
+        $this->runFor(0.4);
+
+        // The answer was sent: the task, made of what the memory said, never started.
+        $this->assertSame([], $this->lookups());
+        $this->assertSame([self::LOOKING], $this->sent);
+        $this->assertCount(1, $this->logged('Dropped what was handed off to be looked up'));
     }
 
     public function testLooksUpOneTaskAtATimeAndRefusesAFourthThatWouldWait(): void
@@ -445,8 +516,45 @@ final class DirectLookupTest extends VoiceTestCase
         $this->assertSame($found, implode("\n", array_map(fn (string $part) => substr($part, strlen("Looked up:\n")), array_slice($this->sent, 1))));
     }
 
+    public function testSendsWhatWasLookedUpWithoutLinkPreviews(): void
+    {
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT_LOOKUP' => $this->claudeSays('See https://www.php.net/releases/8.5/ and https://github.com/php/php-src.')]);
+
+        $this->chat(self::QUESTION);
+        touch($this->go);
+        $this->waitUntil(fn () => count($this->sent) === 2, 'what was looked up');
+
+        // Its links come from the web: Discord shows a preview of each, unless the message says not to.
+        $this->assertSame([0, Message::FLAG_SUPPRESS_EMBEDS], $this->sentFlags);
+    }
+
+    public function testConsultsTheAdvisorOnlyForATaskClaudeHandedOffAsHard(): void
+    {
+        $this->chat(self::QUESTION);
+        touch($this->go);
+        $this->waitUntil(fn () => count($this->sent) === 2, 'what was looked up');
+
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => $this->claudeSays(self::LOOKING . "\nLOOK UP: [hard] " . self::TASK)]);
+        $this->chat(self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 2, 'the second lookup to start');
+        touch($this->go);
+        $this->waitUntil(fn () => count($this->sent) === 4, 'what was looked up');
+
+        [$simple, $hard] = $this->lookups();
+        $this->assertStringNotContainsString('--advisor', $simple['arguments']);
+        $this->assertStringNotContainsStringIgnoringCase('advisor', $simple['system']);
+        $this->assertStringContainsString("arg=--advisor\narg=opus\n", $hard['arguments']);
+        $this->assertStringContainsString('You must consult it once before you answer, with what you found so far', $hard['system']);
+        // The mark is part of the line that is never said, and the task is the rest of it.
+        $this->assertSame([self::LOOKING, self::SENT, self::LOOKING, self::SENT], $this->sent);
+        $this->assertStringEndsWith("\n\nThe task:\n\n" . self::TASK, $hard['prompt']);
+        $this->assertSame([['user' => '555', 'model' => 'sonnet', 'advisor' => null, 'characters' => mb_strlen(self::TASK)], ['user' => '555', 'model' => 'sonnet', 'advisor' => 'opus', 'characters' => mb_strlen(self::TASK)]], $this->logged('Looking something up'));
+        // Claude is told how to say it, and when.
+        $this->assertStringContainsString('write [hard] right after LOOK UP:', $this->claudeCalls()[0]['system']);
+    }
+
     /**
-     * @return list<array{prompt: string, system: string}> The times Claude Code was run to look something up.
+     * @return list<array{prompt: string, system: string, arguments: string, pid: int}> The times Claude Code was run to look something up.
      */
     private function lookups(): array
     {

@@ -243,11 +243,13 @@ arg=A voice call with the assistant Claude.
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
 
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
-        $this->waitUntil(fn () => $this->sent !== [], 'a message in the channel');
+        $this->waitUntil(fn () => $this->played !== [], 'the call to be told');
 
+        // Why is only posted: whoever is in the call hears that it failed, in a sentence that is always the same.
         $this->assertSame(["Sorry, I couldn't get an answer from Claude. (Claude Code: Not logged in · Please run /login)"], $this->sent);
-        $this->assertSame([], $this->played);
+        $this->assertSame(['Sorry, something went wrong.'], array_map(file_get_contents(...), $this->played));
         $this->assertStringContainsString('] Alice: Hey Claude, what time is it?', $this->transcript($session));
+        $this->assertStringContainsString('] Claude: Sorry, something went wrong.', $this->transcript($session));
         $this->assertSame(['Voice reply failed: Claude Code: Not logged in · Please run /login'], $this->loggedProblems());
         $this->assertSame('555', $this->logged('Voice reply failed: Claude Code: Not logged in · Please run /login')[0]['user']);
         $this->assertSame([1, 0], [$this->usage()['failures'], $this->usage()['answers']]);
@@ -356,7 +358,7 @@ arg=A voice call with the assistant Claude.
         // Each step is logged with the call's server and session, so one call can be followed in the log.
         $steps = array_filter($this->logs->getRecords(), fn ($record) => ($record->context['session'] ?? null) === $session->id);
         $this->assertSame(
-            ['Voice session started', 'Recording a speaker', 'Utterance ended', 'Transcribed', 'Conversation opened', 'Claude answered', 'Started speaking', 'Voice session stopped', 'Summarized the call'],
+            ['Voice session started', 'Recording a speaker', 'Utterance ended', 'Transcribed', 'Conversation opened', 'Asked Claude', 'Claude started answering', 'Claude answered', 'Started speaking', 'Voice session stopped', 'Summarized the call'],
             array_values(array_map(fn ($record) => $record->message, $steps)),
         );
         $this->assertSame(self::GUILD_ID, $this->logged('Voice session started')[0]['guild']);

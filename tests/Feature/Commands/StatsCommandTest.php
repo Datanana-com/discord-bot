@@ -17,6 +17,8 @@ final class StatsCommandTest extends CommandTestCase
         $usage->record(Usage::UTTERANCE, self::GUILD_ID, ['user' => '555', 'duration_ms' => 65000]);
         $usage->record(Usage::UTTERANCE, self::GUILD_ID, ['user' => '666', 'duration_ms' => 4000]);
         $usage->record(Usage::ANSWERED, self::GUILD_ID, ['user' => '555', 'duration_ms' => 6200]);
+        $usage->record(Usage::LOOKED_UP, self::GUILD_ID, ['user' => '555']);
+        $usage->record(Usage::LOOKED_UP, self::GUILD_ID, ['user' => '666']);
         $usage->record(Usage::FAILED, self::GUILD_ID, ['user' => '666']);
         $usage->record(Usage::CALL_ENDED, self::GUILD_ID, ['duration_ms' => 3725000]);
 
@@ -28,7 +30,7 @@ final class StatsCommandTest extends CommandTestCase
         $this->assertMatchesRegularExpression('/^\*\*Usage in this server\*\* since <t:(\d+):D>$/', $title);
         $this->assertEqualsWithDelta(time(), (int) preg_replace('/\D/', '', $title), 60, 'Since the first event, shown in each reader\'s time zone.');
         $this->assertSame(
-            "Calls recorded: 1 (1 h 2 min)\nSpeech: 2 utterances from 2 people (1 min)\nQuestions answered: 1, in 6.2 s on average\nFailures: 1",
+            "Calls recorded: 1 (1 h 2 min)\nSpeech: 2 utterances from 2 people (1 min)\nQuestions answered: 1, in 6.2 s on average\nLooked up: 2\nFailures: 1",
             $report,
         );
     }
@@ -42,7 +44,7 @@ final class StatsCommandTest extends CommandTestCase
         (new StatsCommand($this->discord))->handle($this->interaction(null));
 
         $this->assertStringEndsWith(
-            "Calls recorded: 1 (45 s)\nSpeech: 0 utterances from 0 people (0 s)\nQuestions answered: 0\nFailures: 0",
+            "Calls recorded: 1 (45 s)\nSpeech: 0 utterances from 0 people (0 s)\nQuestions answered: 0\nLooked up: 0\nFailures: 0",
             $this->responses[0]['content'],
         );
     }

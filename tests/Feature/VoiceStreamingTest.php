@@ -58,6 +58,18 @@ final class VoiceStreamingTest extends VoiceTestCase
         $this->assertSame('555', $started['user']);
         $this->assertGreaterThanOrEqual($this->logged('Transcribed')[0]['ms'], $started['ms'], 'It includes the transcription.');
 
+        // So is where the time to the answer went: which process was asked, and when Claude started writing.
+        $asked = $this->logged('Asked Claude')[0];
+        $this->assertSame(['guild', 'session', 'user', 'waited_ms'], array_keys($asked));
+        $this->assertSame('555', $asked['user']);
+        $this->assertIsInt($asked['waited_ms'], 'The process that waited for the question was asked.');
+        $this->assertGreaterThanOrEqual(0, $asked['waited_ms']);
+        $answering = $this->logged('Claude started answering')[0];
+        $this->assertSame(['guild', 'session', 'user', 'ms', 'init_ms', 'retries', 'rate_limits', 'held'], array_keys($answering));
+        $this->assertSame(['555', null, 0, 0, false], [$answering['user'], $answering['init_ms'], $answering['retries'], $answering['rate_limits'], $answering['held']]);
+        $this->assertLessThanOrEqual($started['ms'], $answering['ms'], 'Claude started writing before the bot started speaking.');
+        $this->assertLogsNeverMention('quarter past four');
+
         // The "answered" statistic still measures until the answer is posted.
         $this->assertSame(1, $this->usage()['answers']);
         $this->assertGreaterThan($started['ms'], $this->usage()['answer_ms']);
@@ -217,8 +229,10 @@ final class VoiceStreamingTest extends VoiceTestCase
 
         $this->assertSame(['Voice reply failed: Claude Code: API Error: Connection error.'], $this->loggedProblems());
         $this->assertSame([1, 0], [$this->usage()['failures'], $this->usage()['answers']]);
-        $this->assertCount(1, $this->played, 'The sentence Claude had started is not spoken.');
-        $this->assertStringNotContainsString('Claude:', $this->transcript($session));
+        // The sentence Claude had started is not spoken: the call is told that it failed.
+        $this->waitUntil(fn () => count($this->played) === 2, 'the call to be told');
+        $this->assertSame('Sorry, something went wrong.', file_get_contents($this->played[1]));
+        $this->assertStringNotContainsString('quarter past four', $this->transcript($session), 'An answer that failed is not in the transcript.');
     }
 
     public function testCountsAFailureWhenASentenceCannotBeSpoken(): void
@@ -243,8 +257,8 @@ final class VoiceStreamingTest extends VoiceTestCase
         $this->assertStringEndsWith('fake-piper exited with code 1: The voice model could not be loaded.', $this->loggedProblems()[0]);
         $this->assertSame(["{$session->directory}/claude-2.ogg"], $this->played, 'Nothing is spoken after the sentence that is missing.');
 
-        // The answer itself was posted, and both are counted.
-        $this->assertSame([self::QUESTION . "\n" . self::ANSWER], $this->sent);
+        // The answer itself was posted, then that it couldn't be spoken, and both are counted.
+        $this->assertSame([self::QUESTION . "\n" . self::ANSWER, "Sorry, I couldn't say that out loud. The bot's logs say why."], $this->sent);
         $this->assertSame([1, 1], [$this->usage()['failures'], $this->usage()['answers']]);
     }
 }

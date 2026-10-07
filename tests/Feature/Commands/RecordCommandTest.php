@@ -381,6 +381,33 @@ final class RecordCommandTest extends CommandTestCase
         $this->assertRefused('The voice `pt_BR-faber-medium` is no longer installed. Choose another one with /settings.');
     }
 
+    public function testRefusesWhileTheBotIsStopping(): void
+    {
+        // It waits for its calls to be summarized, however long: nothing would stop a call that starts meanwhile.
+        VoiceSession::refuseNewCalls();
+
+        $this->record($this->interaction($this->voiceChannel()));
+
+        $this->assertRefused('I am being stopped right now, so I can\'t record. Try again once I am back.');
+    }
+
+    public function testLeavesTheChannelItWasJoiningWhenTheBotIsStoppedMeanwhile(): void
+    {
+        $channel = $this->voiceChannel();
+        $joining = new Deferred();
+        $this->joinsWith($joining->promise());
+        $this->record($this->interaction($channel));
+
+        VoiceSession::refuseNewCalls();
+        // It expects to be closed exactly once.
+        $joining->resolve($this->voiceClient($channel, connected: true));
+
+        $this->assertSame(['I am being stopped right now, so I can\'t record. Try again once I am back.'], $this->updates);
+        $this->assertNull(VoiceSession::forGuild(self::GUILD_ID));
+        $this->assertSame([], $this->logged('Voice session started'));
+        $this->assertFalse(VoiceSession::isStarting(self::GUILD_ID));
+    }
+
     private function record(object $interaction): void
     {
         (new RecordCommand($this->discord))->handle($interaction);

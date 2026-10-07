@@ -37,6 +37,7 @@ final class UsageTest extends TestCase
         $this->usage->record(Usage::UTTERANCE, '100', ['user' => 'alice', 'session' => 'b', 'duration_ms' => 3000]);
         $this->usage->record(Usage::ANSWERED, '100', ['user' => 'alice', 'session' => 'b', 'duration_ms' => 7000]);
         $this->usage->record(Usage::UTTERANCE, '100', ['user' => 'alice', 'session' => 'b', 'duration_ms' => 1000]);
+        $this->usage->record(Usage::LOOKED_UP, '100', ['user' => 'alice', 'session' => 'b']);
         $this->usage->record(Usage::FAILED, '100', ['user' => 'alice', 'session' => 'b']);
         $this->usage->record(Usage::CALL_ENDED, '100', ['session' => 'b', 'duration_ms' => 30000]);
         // Another server's call doesn't count.
@@ -54,6 +55,7 @@ final class UsageTest extends TestCase
             'speech_ms' => 7500,
             'answers' => 2,
             'answer_ms' => 5500,
+            'lookups' => 1,
             'failures' => 1,
         ], $summary);
         $this->assertSame([], $this->logs->getRecords());
@@ -62,7 +64,7 @@ final class UsageTest extends TestCase
     public function testAServerWithoutUsageHasNothingToShow(): void
     {
         $this->assertSame(
-            ['since' => null, 'calls' => 0, 'call_ms' => 0, 'speakers' => 0, 'utterances' => 0, 'speech_ms' => 0, 'answers' => 0, 'answer_ms' => null, 'failures' => 0],
+            ['since' => null, 'calls' => 0, 'call_ms' => 0, 'speakers' => 0, 'utterances' => 0, 'speech_ms' => 0, 'answers' => 0, 'answer_ms' => null, 'lookups' => 0, 'failures' => 0],
             $this->usage->summary('100'),
         );
     }
