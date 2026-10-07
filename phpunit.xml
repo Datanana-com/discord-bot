@@ -18,6 +18,10 @@
         <testsuite name="Live">
             <directory>tests/Live</directory>
         </testsuite>
+        <!-- Runs the real Claude Code on your subscription: not run by default, see `composer check:lookups`. -->
+        <testsuite name="Real">
+            <directory>tests/Real</directory>
+        </testsuite>
         <!-- Times the real whisper.cpp, Claude Code and Piper of this machine: not run by default, see "Benchmark" in README.md. -->
         <testsuite name="Bench">
             <directory>tests/Bench</directory>

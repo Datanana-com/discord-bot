@@ -25,6 +25,7 @@ use Tests\UsesStatsDatabase;
 use Throwable;
 
 use function React\Async\await;
+use function React\Async\delay;
 use function React\Promise\race;
 
 /**
@@ -39,11 +40,17 @@ final class VoiceRoundTripTest extends TestCase
 {
     use UsesStatsDatabase;
 
+    /** What Claude's stand-in hands off in the second question, and what the lookup finds. */
+    private const string LOOKING = 'Let me look into that.';
+
+    private const string FOUND = 'The next meeting is at six.';
+
     private const array REQUIRED_ENV = [
         'DISCORD_TEST_BOT_TOKEN',
         'DISCORD_TEST_SPEAKER_TOKEN',
         'DISCORD_TEST_VOICE_CHANNEL_ID',
         'LIVE_TEST_QUESTION',
+        'FAKE_ENV',
     ];
 
     public function testAnswersAQuestionAskedInAVoiceCall(): void
@@ -115,7 +122,29 @@ final class VoiceRoundTripTest extends TestCase
             );
             $result = "{$speakerRecordings}/result.json";
             $speaker = is_file($result) ? json_decode(file_get_contents($result), true) : null;
+
+            // What the first question made, before the second one adds to it.
+            $firstSentences = count(glob("{$session->directory}/claude-*.ogg"));
+            $firstSpeech = count(array_filter($logs->getRecords(), fn ($record) => $record->message === 'Started speaking'));
+
+            // The same question again, which Claude's stand-in now hands off to be looked up, as Claude does when
+            // it can't answer at once: through the real call, the lookup runs and what it finds is posted and told.
+            // The Claude Code process that waits for a question was started before, so it reads its answer again
+            // from this file; the process that looks something up is started now, with this environment.
+            file_put_contents(getenv('FAKE_ENV'), 'FAKE_CLAUDE_OUTPUT=' . escapeshellarg(self::handOff()) . "\n");
+            putenv('FAKE_CLAUDE_OUTPUT_LOOKUP=' . json_encode(['type' => 'result', 'is_error' => false, 'result' => self::FOUND]));
+            $second = "{$session->directory}/speaker-2";
+            mkdir($second, 0755, true);
+            $this->within(150, Shell::run([PHP_BINARY, __DIR__ . '/speaker.php', getenv('LIVE_TEST_QUESTION'), $second], timeout: 140), 'the speaker to ask its second question');
+            $transcriptPath = "{$session->directory}/transcript.txt";
+            $this->waitUntil(
+                fn () => str_contains((string) @file_get_contents($transcriptPath), 'Looked up for') && substr_count((string) @file_get_contents($transcriptPath), 'Claude: ' . self::LOOKING) >= 2,
+                60,
+                'what was looked up to be told',
+            );
         } finally {
+            putenv('FAKE_CLAUDE_OUTPUT_LOOKUP');
+
             try {
                 if (isset($session)) {
                     $logger->info('The bot received', $received ?? []);
@@ -151,8 +180,8 @@ final class VoiceRoundTripTest extends TestCase
         // It answered, in the text chat and out loud: one sentence after the other, each from its own file.
         $this->assertStringContainsString('Claude: It is a quarter past four. The meeting starts at five.', $transcript);
         $this->assertEmpty(preg_grep('/^(Voice reply failed|Could not post)/', $logged), 'Answering did not fail.');
-        $this->assertCount(2, glob("{$session->directory}/claude-*.ogg"), 'Each sentence was synthesized on its own.');
-        $this->assertCount(1, array_keys($logged, 'Started speaking', true), 'The bot started speaking the answer.');
+        $this->assertSame(2, $firstSentences, 'Each sentence was synthesized on its own.');
+        $this->assertSame(1, $firstSpeech, 'The bot started speaking the answer.');
 
         // The call's whisper server, built next to whisper-cli, loaded its model and did not fail: whisper-cli transcribes without a word
         // when there is none, or it isn't ready, and nothing else here would tell.
@@ -171,9 +200,15 @@ final class VoiceRoundTripTest extends TestCase
         $this->assertStringEqualsFile("{$session->directory}/summary.md", "It is a quarter past four. The meeting starts at five.\n");
         $this->assertEmpty(preg_grep('/^Could not summarize/', $logged), 'Summarizing did not fail.');
 
-        // The call and its answer were counted for /stats.
+        // What was handed off was looked up in the background, through the real call, and what it found was posted and told.
+        $this->assertMatchesRegularExpression('/Looked up for .+: ' . preg_quote(self::FOUND, '/') . '/', $transcript);
+        $this->assertCount(1, array_keys($logged, 'Looking something up', true), 'Telling what was found hands nothing off again.');
+        $this->assertCount(1, array_keys($logged, 'Looked something up', true));
+        $this->assertEmpty(preg_grep('/^Could not look something up/', $logged), 'Looking something up did not fail.');
+
+        // The call, its two answers (a question that is handed off counts once) and the lookup were counted for /stats.
         $usage = (new Usage($logger))->summary((string) $voiceClient->channel->guild_id);
-        $this->assertSame([1, 1, 0], [$usage['calls'], $usage['answers'], $usage['failures']], 'Usage: ' . json_encode($usage));
+        $this->assertSame([1, 2, 1, 0], [$usage['calls'], $usage['answers'], $usage['lookups'], $usage['failures']], 'Usage: ' . json_encode($usage));
 
         // The speaker heard the spoken answer, and whisper understands it too.
         $this->assertIsArray($speaker, 'The speaker reported what it heard.');
@@ -185,6 +220,39 @@ final class VoiceRoundTripTest extends TestCase
         // start may be lost on the way. Piper's file begins with about 80 ms of near-silence before "It", so this bounds
         // what was lost at about 80 ms, not at the 40 ms.
         $this->assertMatchesRegularExpression('/^\W*(it is|it\'s) a quarter/i', $heard, "The speaker heard the answer from its first word: {$heard}");
+    }
+
+    /**
+     * What Claude's stand-in prints for an answer that hands a question off to be looked up.
+     */
+    private static function handOff(): string
+    {
+        $text = fn (string $text) => json_encode(['type' => 'stream_event', 'event' => ['type' => 'content_block_delta', 'delta' => ['type' => 'text_delta', 'text' => $text]]]);
+        $task = 'When is the next meeting?';
+
+        return implode("\n", [
+            $text(self::LOOKING . "\n"),
+            $text("LOOK UP: {$task}"),
+            json_encode(['type' => 'result', 'is_error' => false, 'result' => self::LOOKING . "\nLOOK UP: {$task}"]),
+        ]);
+    }
+
+    /**
+     * Waits until something is true, checked a few times a second, failing after the timeout.
+     *
+     * @param callable(): bool $condition
+     */
+    private function waitUntil(callable $condition, float $seconds, string $what): void
+    {
+        $deadline = microtime(true) + $seconds;
+
+        while (! $condition()) {
+            if (microtime(true) > $deadline) {
+                throw new RuntimeException("Timed out after {$seconds}s waiting for {$what}.");
+            }
+
+            delay(0.25);
+        }
     }
 
     protected function tearDown(): void

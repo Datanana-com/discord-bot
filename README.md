@@ -99,9 +99,10 @@ sequenceDiagram
     C-->>U: In a call, also told in a few spoken sentences
 ```
 
-- The model that looks things up (`CLAUDE_LOOKUP_MODEL`, `sonnet` by default) can search the web and do nothing else. For a hard task it can consult an advisor (`CLAUDE_LOOKUP_ADVISOR`, `opus` by default).
+- The model that looks things up (`CLAUDE_LOOKUP_MODEL`, `sonnet` by default) can search the web and do nothing else. For a task Claude hands off as hard (`LOOK UP: [hard] ...`) it must consult an advisor (`CLAUDE_LOOKUP_ADVISOR`, `opus` by default); any other task is looked up without one.
 - It gets the task Claude wrote and the call's transcript, or the DM's last 100 messages. It is never given the memories the bot keeps of people.
-- One task is looked up at a time, and up to 3 more wait their turn.
+- One task is looked up at a time in each call and each chat, up to 3 more wait their turn, and no more than `CLAUDE_LOOKUP_AT_ONCE` (2 by default) are looked up at once in all of them together.
+- A lookup nobody wants any more (whoever asked opted out, or a memory it was made from was taken back or erased with `/forget`) is stopped, not left to finish. Someone joining who it was not made for only drops what waits for its turn or is found, if they are still there then.
 
 > [!IMPORTANT]
 > Once something is looked up, what was said in the call, or written in the DM, is given to a model that searches the web, so its search queries can hold parts of it, including what Claude said there from a memory.
@@ -244,7 +245,8 @@ Set these in `.env`. The notes and measurements behind each one are in [docs/con
 | `CLAUDE_BINARY` | `claude` | Path to the Claude Code CLI. |
 | `CLAUDE_MODEL` | `haiku` | `haiku` answers fastest; `sonnet` or `opus` answer better, but slower. |
 | `CLAUDE_LOOKUP_MODEL` | `sonnet` | The model that looks things up in the background. |
-| `CLAUDE_LOOKUP_ADVISOR` | `opus` | The model it can consult. Leave it empty for no advisor. |
+| `CLAUDE_LOOKUP_ADVISOR` | `opus` | The model it must consult for a hard task. Leave it empty for no advisor. |
+| `CLAUDE_LOOKUP_AT_ONCE` | `2` | How many tasks are looked up at once, in all calls and chats together. |
 | `PIPER_BINARY` | `piper` | Path to Piper. |
 | `PIPER_MODEL` | | Path to the Piper voice, e.g. `~/piper/voices/en_US-lessac-medium.onnx`. |
 | `FFMPEG_BINARY` | `ffmpeg` | Path to ffmpeg, which converts Piper's speech for Discord, and the voice messages sent in DMs for whisper.cpp. |

@@ -1,6 +1,6 @@
 # Open work
 
-Snapshot of 2026-10-07 12:15 Lisbon (master at ec45a5b). Nine PRs are open. Run `gh pr list --state open` and `git fetch` before trusting anything below; master moved four to six times a day this week.
+Snapshot of 2026-10-07 12:15 Lisbon (master at ec45a5b). Eight PRs are open. Run `gh pr list --state open` and `git fetch` before trusting anything below; master moved four to six times a day this week.
 
 ## The PR workflow in this repo
 
@@ -8,38 +8,35 @@ Snapshot of 2026-10-07 12:15 Lisbon (master at ec45a5b). Nine PRs are open. Run 
 - The agent working it ticks boxes as they are done, writes decisions and measured numbers into the description, and merges `master` into the branch whenever it moves (never rebase or force-push). Editing the body from a Windows script doubles `\r`: read, strip `\r`, pass bytes.
 - Drafts get no CI. Before `gh pr ready`: the CI command green locally, `pint --test` clean, a mutation run over the changed lines, the bench on the voice path (`composer bench`, on an idle machine, fastest of five against the master baseline), `gh workflow run live-voice.yml --ref <branch>`.
 - Finish order that has survived: local run green → `git fetch` and `git rev-list --left-right --count origin/master...origin/<branch>` as its own step → `gh pr ready` → wait for the runs `ready_for_review` created → read `Lines: 100.00%` and that the `live` job ran (a draft push leaves a skipped run for the same SHA next to the real one: pick the run `ready_for_review` created) → check master again (it moves while CI runs) → tick the last box → merge with `gh pr merge N --merge`. Sky does not want to be the step between a green PR and master; open questions go in a "Left for Sky to decide" section of the description.
-- Issues are turned off; follow-up lists live in PRs (#26 is one).
+- Issues are turned off; follow-up lists live in PRs (#26 was one).
 
 ## Open PRs
 
-Nine are open, all against `master`. Only #26 has code; #35 to #42 are briefs (one empty "Start ..." commit each, no files).
+Eight are open, all against `master`. None has code yet: #35 to #42 are briefs (one empty "Start ..." commit each, no files).
 
 | PR | Branch | State | Holds |
 |---|---|---|---|
-| #26 | `fix/background-lookups-follow-up` | ready, 10 commits, 32 files, **DIRTY**: `git merge-tree` against master gives 5 conflicting files, `app/Voice/VoiceSession.php` (3 hunks: the `inTurn(... handleUtterance(...))` call at the end of `queueUtterance()` (:945), the `handleUtterance()` signature (:1038; #26 has `array $forgotten`, master has `float $seconds`), and the `->catch(FailedReply::WHISPER)` / `->then(function (string $text) use (...))` of the transcribe chain inside `handleUtterance()`), `composer.json`, `phpunit.xml` (both add a suite on the same lines: master `Bench`, #26 `Real`: keep both), `docs/development.md`, `tests/Feature/VoiceTestCase.php`. Merge base is 906c3c6, so it has #28 but none of #25, #31, #34. CI was green before master moved | Lookup follow-ups, all decided by Sky and built: `LOOK UP: [hard] task` marks hard tasks (advisor only then, `Claude::withoutAdvisor()` otherwise); `LookupSlots` global cap `CLAUDE_LOOKUP_AT_ONCE` (default 2); lookups cancellable (`Stopped looking something up`); `/forget` drops lookups and takes what it drops out of `transcript.txt` (`dropUnwantedLookups()`); joining a call stops nothing; lookup posts suppress embeds; `Usage::LOOKED_UP` and `/stats` "Looked up: N"; suite `Real` (`composer check:lookups`, `tests/Real/LookupSetupTest.php`, real Claude Code); live test asks a second, handed-off question (`FAKE_ENV` in CI). Its bench against master: +2 to +3%, inside the 10% noise. The conflicts are semantic: `answer()` gained `Player` calls and `ask()`'s timing callback in #34, `inTurn()` (:972) is wrapped by #31's failure handling (`->catch` into `apologize()`, :1003) and `handleUtterance()`'s transcribe chain gained `FailedReply::WHISPER` (`guarded()`, :920, wraps only the `pcm` handler and the silence timer, so it is not in the conflict), and `VoiceTestCase` gained `VOICE_PLAYER=library` and `voiceClient(sendsPackets:)`. After merging master: full suite, `composer check:lookups` again, and `composer bench` (the lookup change touches how Claude Code is started). |
 | #35 | `feature/stop-phrase-at-once` | draft brief, no code | Transcribe a sentence when it ends, not when its turn comes; the stop phrase closes the conversation at once (cuts the spoken answer, never speaks one Claude is still writing, drops waiting sentences; "Okay." once); something new from the same person drops what the bot was going to say to them. Decisions for Sky in part 3 (sound vs words as "something new", whether the dropped answer is still posted, whether Claude is stopped, the cut answer in the next prompt). Pinned to 689e1ca. Depends on #25 (satisfied: the whisper server is on master), #31 (satisfied: merged; its `inTurn()` failure `->catch` and `apologize()` sit in the same methods), #34 (satisfied: `Player::stop()` and the first-packet log line exist). #30's leave phrase is on master and must be heard at once in the same place as the stop phrase. |
 | #36 | `fix/statistics-off-the-answer-path` | draft brief, no code | Each `Usage::record()` (SQLite, journal `delete`, synchronous `FULL`) blocks the loop 3.5 ms median, 70 ms worst, once per utterance before whisper and while speaking. Recommended: hold a call's rows and write them in one transaction when nobody waits; not WAL+NORMAL (same file holds opt-outs). Pinned to 689e1ca. Depends on nothing; #31 is merged, so its flush at shutdown has to meet `Application::stop()`/`close()` (draining summaries before exit). |
 | #37 | `feature/early-whisper` | draft brief, no code | Start whisper at 0.3 s of silence, drop the text if more packets come, use it at 0.6 s (same bytes, same text). Saves up to 300 ms of whisper time (233 ms average from one call's log). **Claude is not asked early: decided.** Part 1 first: a log line per sentence with the longest gap inside it, so Sky's calls say how often the early text is thrown away. Pinned to 906c3c6. Needs #25's server (satisfied: on master); build on #35 (still open); #34's log lines (`Asked Claude`, `Claude started answering`) are on master. Part 4: the GPU drops its clock after 5 s idle (+100 to 250 ms); Sky to try NVIDIA "Prefer maximum performance" first. The brief still says "on `feature/bench`" for the whisper server and `WhisperServer.php`: it is on master. |
 | #38 | `feature/kokoro-voice` | draft brief, no code | Kokoro (82M, PyTorch, CUDA) voice `af_heart`, picked by Sky on 2026-10-06, trimmed silence accepted. Part 2 = the four measurement PRs below. Part 3 recommended: Kokoro behind a Piper-compatible wrapper (`kokoro_torch_serve.py`, WSL `~/bench-latency/round2/tts-engines/`; do not delete that folder) so `PIPER_BINARY` points at it; `/settings voice:` listing and fallback to decide. Pinned to 906c3c6. Part 3 waited for #34 (now merged; `Speech.php` is unchanged there, the bot sends the Opus packets itself). #25's bench is on master. |
 | #39 to #42 | `chore/kokoro-check-{install,startup,with-whisper,card-full}` | draft briefs, measurements only, pinned to 906c3c6 | Install from nothing in `~/kokoro` with pinned versions and offline model files; start-up time and a sentence that arrives while loading; Kokoro and whisper on the same card at once (the whisper server is on master now); the card full and no card at all (#42 fills the card on purpose: ask Sky for a time slot). Results go into #38's description. |
 
-Merged into master, newest first: #34 own Ogg player (merge ec45a5b; it had merged master and #25 in), #25 `composer bench` with #33 the warm whisper server (merge 50b5f9e; #33 was merged into `feature/bench` first, as f2fc8bf), #31 failures said aloud and a clean exit (merge fb59d33), #28 lookups privacy and injection (906c3c6), #29 README split into `docs/`, #30 leave phrase (`disconnect <wake word>`), #32 remove old slash commands (`BOT_REMOVE_OLD_COMMANDS`), #27 wake word on a fresh install (`claude, claud` default, `WHISPER_PROMPT`).
+Merged into master, newest first: #26 background lookups follow-up (hard tasks, `LookupSlots` cap, stoppable lookups, `/forget` takes lines out of the transcript, no link previews, `composer check:lookups`), #34 own Ogg player (merge ec45a5b; it had merged master and #25 in), #25 `composer bench` with #33 the warm whisper server (merge 50b5f9e; #33 was merged into `feature/bench` first, as f2fc8bf), #31 failures said aloud and a clean exit (merge fb59d33), #28 lookups privacy and injection (906c3c6), #29 README split into `docs/`, #30 leave phrase (`disconnect <wake word>`), #32 remove old slash commands (`BOT_REMOVE_OLD_COMMANDS`), #27 wake word on a fresh install (`claude, claud` default, `WHISPER_PROMPT`).
 
 The briefs pin their "Where in the code" to the master of their day: #35 and #36 to 689e1ca, #37 to #42 to 906c3c6 (`git merge-base origin/master origin/<branch>`). Master has moved since: #31 (`guarded()`, `apologize()`, `abandon()`, `FailedReply::WHISPER` in `handleUtterance()`), #34 (`player()`, `Asked Claude`, `Claude started answering`, `Started speaking` at the first packet) and #25/#33 (`$seconds` in `handleUtterance()`, the server) reshaped `VoiceSession`: re-read the methods before trusting a brief's description of them.
 
 ## Collision map
 
-`app/Voice/VoiceSession.php` is touched by #26 and will be by every brief.
+`app/Voice/VoiceSession.php` will be touched by every brief.
 
-- #26: `answer()` (:1216), `lookUp()`, `lookedUp()`, `post()`, `optOut()`/`forget()`/`leave()`, `handleUtterance()` signature, new `dropUnwantedLookups()`.
 - #35 and #37: `handleUtterance()` (:1038), `inTurn()` (:972), `UtteranceSplitter`; #35 also `hear()` (:1371) and `sayOkay()`; #36: `track()` (:1927) and `Usage`; #38: `Speech`, `synthesize()`.
 
-Conflicts (`git merge-tree --write-tree`): #26 with master, the 5 files above. The briefs have no code yet, so there is nothing to merge against; #35 and #37 are the pair that must be built in order.
+Conflicts (`git merge-tree --write-tree`): the briefs have no code yet, so there is nothing to merge against; #35 and #37 are the pair that must be built in order. #26 is merged: `VoiceSession` now has `$lookingUp`, `dropUnwantedLookups()`, `removeFromTranscript()` and `handleUtterance(..., float $seconds, array $forgotten)`, so a brief that adds a parameter or a turn there merges against that.
 
 ## Suggested merge order
 
-1. **#26**, the only code PR: merge master in (5 files, semantic in `VoiceSession.php`), rerun the CI command, `composer check:lookups` and `composer bench`, then merge once CI is green on the head.
-2. Briefs, each merging the new master first: **#36**, then **#35**, **#37** on #35, **#38** part 3 (after #34, already in), the check PRs #39 to #42 as measurements.
+1. Briefs, each merging the new master first: **#36**, then **#35**, **#37** on #35, **#38** part 3 (after #34, already in), the check PRs #39 to #42 as measurements.
 
 Whichever of two overlapping PRs merges second merges master in first and re-runs the full suite before pushing: a clean `git merge` has still broken the class (two branches each added a `$waiting` property).
 
@@ -53,7 +50,6 @@ Whichever of two overlapping PRs merges second merges master in first and re-run
 - #37: 0.3 s constant vs a variable; the NVIDIA power setting.
 - #38: how a server picks a Kokoro voice; fallback to Piper when Kokoro fails.
 - #42: a time slot when nothing else uses the card.
-- #26: none holds the merge; the spoken telling of an already posted lookup is only gated on the call and the opt-out.
 
 ## Measured, do not retry (from the latency study, 2026-10-06)
 

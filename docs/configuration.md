@@ -22,7 +22,8 @@
 | `CLAUDE_BINARY` | `claude` | Path to the Claude Code CLI. |
 | `CLAUDE_MODEL` | `haiku` | `haiku` answers fastest; `sonnet` or `opus` answer better, but slower. |
 | `CLAUDE_LOOKUP_MODEL` | `sonnet` | The model that looks things up in the background, with web search as its only tool: see [Looking things up](lookups.md#looking-things-up). |
-| `CLAUDE_LOOKUP_ADVISOR` | `opus` | The model the one that looks things up can consult (Claude Code's `--advisor`). Leave it empty for no advisor: lookups are then faster and use less of your subscription. |
+| `CLAUDE_LOOKUP_ADVISOR` | `opus` | The model the one that looks things up must consult (Claude Code's `--advisor`) for a task Claude handed off as hard; any other task is looked up without one. Leave it empty for no advisor: lookups are then faster and use less of your subscription. |
+| `CLAUDE_LOOKUP_AT_ONCE` | `2` | How many tasks are looked up at once, in all calls and chats together; the others wait for a free slot. A number below 1, or one that isn't a number, is the default. |
 | `PIPER_BINARY` | `piper` | Path to Piper. |
 | `PIPER_MODEL` | | Path to the Piper voice, e.g. `~/piper/voices/en_US-lessac-medium.onnx`. The other voices in its folder can be chosen with `/settings`. |
 | `FFMPEG_BINARY` | `ffmpeg` | Path to ffmpeg, which converts Piper's speech for Discord, and the voice messages sent in DMs for whisper.cpp. The voice library always uses the `ffmpeg` on your `PATH`. |

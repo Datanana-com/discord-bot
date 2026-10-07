@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Analytics\Usage;
+use App\Assistant\LookupSlots;
 use App\Assistant\Memory;
 use App\Voice\VoiceSession;
 use Discord\Builders\MessageBuilder;
@@ -92,6 +93,9 @@ abstract class VoiceTestCase extends TestCase
     /** @var list<string> Messages posted in the voice channel's text chat. */
     protected array $sent = [];
 
+    /** @var list<int> The flags of each message in {@see $sent}: Discord's message flags, like the one that shows no link previews. */
+    protected array $sentFlags = [];
+
     /** @var list<string> Files played into the call. */
     protected array $played = [];
 
@@ -143,6 +147,8 @@ abstract class VoiceTestCase extends TestCase
         $this->claudeHold = "{$this->recordings}/claude.hold";
         $this->whisperHold = "{$this->recordings}/whisper.hold";
         $this->memories = "{$this->recordings}/memories";
+        // Every call and chat shares the slots lookups are started in: a test never starts with another one's taken.
+        LookupSlots::reset();
         $this->voiceStates = new \ArrayObject();
 
         $this->setEnv([
@@ -198,6 +204,7 @@ abstract class VoiceTestCase extends TestCase
         await(all(array_map(fn (VoiceSession $session) => $session->stop(), VoiceSession::unfinished())));
         // A call a test left starting, as when the bot never got to join, is not starting in the next test.
         (new ReflectionProperty(VoiceSession::class, 'starting'))->setValue(null, []);
+        LookupSlots::reset();
         // Nor is a bot that was stopped in one test still stopping in the next.
         (new ReflectionProperty(VoiceSession::class, 'refusing'))->setValue(null, false);
 
@@ -284,6 +291,7 @@ abstract class VoiceTestCase extends TestCase
             // Messages repeat what people said and what Claude answered, so they must never ping anyone.
             $this->assertSame(['parse' => []], $message->jsonSerialize()['allowed_mentions'] ?? null, 'Mentions are disabled.');
             $this->sent[] = $message->getContent();
+            $this->sentFlags[] = $message->getFlags();
 
             return $this->sendError === null ? $this->sending ?? resolve(null) : reject($this->sendError);
         });

@@ -125,6 +125,8 @@ To see the code coverage, install a coverage driver (`sudo apt install php8.5-pc
 composer test:coverage
 ```
 
+The lookup depends on things only the real Claude Code shows, and Claude Code doesn't update itself here, so the tests with a stand-in can't notice when an update changes them. `composer check:lookups` (the `Real` suite, by hand, not in CI) starts the lookup's real command, once for a hard task and once for another, and checks what Claude Code prints: its web search is its only tool, no MCP server or hook of the user the bot runs as is there, the advisor's model ran for the hard task and not for the other. It uses your Claude subscription (about 0.3 USD and two minutes), and reads `CLAUDE_BINARY`, `CLAUDE_LOOKUP_MODEL` and `CLAUDE_LOOKUP_ADVISOR` from the shell, not from `.env`.
+
 The code style is [Laravel Pint](https://laravel.com/docs/pint) with the rules of `pint.json`. `composer pint` fixes the files; `composer pint -- --test` only lists what it would change. The same check runs in GitHub Actions (the `pint` job of `tests.yml`, next to the tests), so a pull request with a style issue fails there instead of the issue reaching `master`.
 
 ## Benchmark
@@ -162,7 +164,7 @@ It also shows the settings it ran with, and which of them differ from the baseli
 
 `tests/Live` asks the bot a question in a real Discord voice call. A second bot plays the spoken question "Hey Claude, what time is it?" and records the answer.
 
-Everything except Claude is real: Discord with its end-to-end encryption, whisper.cpp (the `whisper-server` the call starts, built next to `whisper-cli`) and Piper. Claude is replaced by a fixed answer of two sentences, written one after the other like Claude Code does, so no Claude subscription is used. Like in any call, the stand-in is already running and waiting when the question comes, and one Piper process, the real one, speaks both sentences; the test fails when either had to be started for the answer. It runs in GitHub Actions (`.github/workflows/live-voice.yml`) every night, on demand, and on pull requests that change the bot once they're no longer drafts. Every run keeps its recordings as an artifact you can download and listen to.
+Everything except Claude is real: Discord with its end-to-end encryption, whisper.cpp (the `whisper-server` the call starts, built next to `whisper-cli`) and Piper. Claude is replaced by a fixed answer of two sentences, written one after the other like Claude Code does, so no Claude subscription is used. Like in any call, the stand-in is already running and waiting when the question comes, and one Piper process, the real one, speaks both sentences; the test fails when either had to be started for the answer. The same question is then asked a second time, and the stand-in hands it off, as Claude does for what it can't answer at once: the test checks that it is looked up through the real call (by the stand-in again), and what it found is posted, told and counted for `/stats`. The stand-in's answer for it is written to the file in `FAKE_ENV`, which the process that waits for a question reads once its question is there. It runs in GitHub Actions (`.github/workflows/live-voice.yml`) every night, on demand, and on pull requests that change the bot once they're no longer drafts. Every run keeps its recordings as an artifact you can download and listen to.
 
 It needs its own private Discord server:
 

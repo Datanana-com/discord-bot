@@ -206,6 +206,9 @@ final class VoiceSession
     /** Resolved once everything handed off so far is looked up, and posted. It never rejects. */
     private PromiseInterface $allLookedUp;
 
+    /** @var array<int, array{PromiseInterface<string|null>, callable(): bool}> The tasks not over, by object ID, with whether they are still wanted. */
+    private array $lookingUp = [];
+
     /** @var array<string, ?TimerInterface> Who has a conversation open, by user ID, with the timer that closes it once they are quiet. */
     private array $conversations = [];
 
@@ -541,6 +544,9 @@ final class VoiceSession
                 unlink($clip);
                 unset($session->clips[$clip]);
             }
+
+            // What is looked up for them is no longer wanted: nobody is left searching for it.
+            $session->dropUnwantedLookups();
         }
     }
 
@@ -562,6 +568,7 @@ final class VoiceSession
         // for it from an answer made with that memory is dropped, like in a call that is going on.
         foreach (self::$unfinished as $session) {
             unset($session->shared[$userId]);
+            $session->dropUnwantedLookups();
         }
 
         return $stopped;
@@ -591,8 +598,13 @@ final class VoiceSession
         $key = implode('-', Memory::people($people));
 
         foreach (self::$unfinished as $session) {
+            // What would have been remembered is also taken out of the transcript, which what is looked up,
+            // what is answered, the summary and /recall are made from.
+            $session->removeFromTranscript($session->said[$key] ?? []);
             unset($session->said[$key]);
             $session->forgotten[$key] = ($session->forgotten[$key] ?? 0) + 1;
+            // A task made of that memory may hold what they asked to forget: it is no longer looked up.
+            $session->dropUnwantedLookups();
         }
     }
 
@@ -955,12 +967,14 @@ final class VoiceSession
         $endedAt = microtime(true);
         // Who was there when it was said, not when it is transcribed: they may have come or gone by then.
         $people = $this->group($userId);
+        // How often each memory was forgotten when it was said: see unlessForgotten().
+        $forgotten = $this->forgotten;
         $ms = (int) round($seconds * 1000);
         $this->counts['utterances']++;
         $this->log('info', 'Utterance ended', ['user' => $userId, 'ms' => $ms]);
         $this->track(Usage::UTTERANCE, ['user' => $userId, 'duration_ms' => $ms]);
 
-        $this->inTurn($userId, fn () => $this->handleUtterance($userId, $wavPath, $endedAt, $people, $seconds));
+        $this->inTurn($userId, fn () => $this->handleUtterance($userId, $wavPath, $endedAt, $people, $seconds, $forgotten));
     }
 
     /**
@@ -1034,8 +1048,9 @@ final class VoiceSession
      * @param float $endedAt When the utterance ended, to time the answer from.
      * @param list<string>|null $people Who was in the call then: see {@see group()}.
      * @param float $seconds How long it is: whisper has longer to transcribe a longer one.
+     * @param array<string, int> $forgotten How often each memory had been forgotten when it was said.
      */
-    private function handleUtterance(string $userId, string $wavPath, float $endedAt, ?array $people, float $seconds): PromiseInterface
+    private function handleUtterance(string $userId, string $wavPath, float $endedAt, ?array $people, float $seconds, array $forgotten): PromiseInterface
     {
         // They opted out while this waited for its turn, and it was deleted then.
         if (! isset($this->clips[$wavPath])) {
@@ -1048,7 +1063,7 @@ final class VoiceSession
         return $this->transcriber->transcribe($wavPath, $seconds, $this->log(...))
             ->finally(fn () => unlink($wavPath))
             ->catch(fn (Throwable $e) => throw new FailedReply(FailedReply::WHISPER, $e))
-            ->then(function (string $text) use ($userId, $endedAt, $transcribing, $people) {
+            ->then(function (string $text) use ($userId, $endedAt, $transcribing, $people, $forgotten) {
                 $this->log('info', 'Transcribed', ['user' => $userId, 'ms' => $this->msSince($transcribing), 'characters' => mb_strlen($text)]);
 
                 // Nothing was said, or they opted out while it was transcribed.
@@ -1059,7 +1074,7 @@ final class VoiceSession
                 // Someone else in the call may have opted out since it was said, while it waited for its turn.
                 $people = $this->unlessOptedOut($people);
                 $name = $this->nameOf($userId);
-                $this->remember(Lookups::personLine($name, $text), $people);
+                $this->remember(Lookups::personLine($name, $text), $this->unlessForgotten($people, $forgotten));
 
                 if ($this->stopped) {
                     $this->log('debug', 'Not answering', ['user' => $userId, 'reason' => 'the session stopped']);
@@ -1089,7 +1104,7 @@ final class VoiceSession
                     $this->openConversation($userId);
                 }
 
-                return $this->answer($userId, $name, $text, $endedAt, $people);
+                return $this->answer($userId, $name, $text, $endedAt, $people, forgotten: $forgotten);
             });
     }
 
@@ -1211,13 +1226,16 @@ final class VoiceSession
      * @param array{text: string, depends: list<string>, basis: string|null, among: list<string>|null}|null $lookedUp
      *        What was looked up for them, when that is what Claude tells them, instead of replying to what they said,
      *        and what the answer that handed it off was made from: see {@see lookUp()}.
+     * @param array<string, int>|null $forgotten How often each memory had been forgotten when they said it, when that
+     *                                           is known: otherwise it is taken now.
      * @return PromiseInterface<mixed> Resolves once the answer is posted and the bot has stopped speaking.
      */
-    private function answer(string $userId, string $name, string $question, float $endedAt, ?array $people, ?array $lookedUp = null): PromiseInterface
+    private function answer(string $userId, string $name, string $question, float $endedAt, ?array $people, ?array $lookedUp = null, ?array $forgotten = null): PromiseInterface
     {
         $asking = microtime(true);
-        // How often each memory was forgotten before Claude is asked with them: see unlessForgotten().
-        $forgotten = $this->forgotten;
+        // How often each memory was forgotten before what they said was said, or else before Claude is asked
+        // with them: see unlessForgotten().
+        $forgotten ??= $this->forgotten;
         // Who is in the call is taken again: someone may have joined or left while the question waited for its
         // turn and was transcribed, and a group's memory is only brought up among exactly its people.
         $group = $this->group($userId) === $people ? $people : null;
@@ -1292,7 +1310,7 @@ final class VoiceSession
                 $handOff->flush();
                 [$written] = HandOff::split($answer);
                 // What was looked up is only told: telling it hands nothing off again.
-                [$answer, $task] = $lookedUp === null ? $this->lookups->handOff($answer) : [$written, null];
+                [$answer, $task, $hard] = $lookedUp === null ? $this->lookups->handOff($answer) : [$written, null, false];
 
                 // Not spoken yet: it was held back, or it isn't what Claude wrote.
                 if ($full || $answer !== $written) {
@@ -1333,13 +1351,31 @@ final class VoiceSession
                 // The answer may quote a memory that isn't the one it would be remembered in: the asker's own, in a
                 // call with others, or one that was shared. So it only counts for someone alone with the bot.
                 $alone = count($people ?? []) === 1 && $sharers === [] ? $people : null;
-                $this->remember(Lookups::botLine($answer), $alone);
+                $this->remember(Lookups::botLine($answer), $this->unlessForgotten($alone, $forgotten));
                 $this->post("> **{$name}:** {$question}\n{$answer}");
-                $this->counts['answers']++;
-                $this->track(Usage::ANSWERED, ['user' => $userId, 'duration_ms' => $this->msSince($endedAt)]);
+
+                // Telling what was looked up is the end of that question, which already counted as answered
+                // when Claude handed it off: see lookedUp(), which counts the lookup.
+                if ($lookedUp === null) {
+                    $this->counts['answers']++;
+                    $this->track(Usage::ANSWERED, ['user' => $userId, 'duration_ms' => $this->msSince($endedAt)]);
+                }
 
                 if ($task !== null) {
-                    $this->lookUp($task, $userId, $name, $question, $depends, $basis, $among, $alone, $forgotten);
+                    $this->lookUp(
+                        $task,
+                        $hard,
+                        $userId,
+                        $name,
+                        $question,
+                        $depends,
+                        $basis,
+                        $among,
+                        $alone,
+                        $forgotten,
+                        // The memories the task may be made of: the asker's own when it was let in, the group's, and the shared ones.
+                        [...($basis !== null ? [$userId] : []), ...($among !== null ? [implode('-', $among)] : []), ...$sharers],
+                    );
                 }
 
                 return $spoken;
@@ -1573,17 +1609,23 @@ final class VoiceSession
      *
      * The task is made of what they said, and of the memories their answer was made from. So it is
      * no longer looked up, and what was looked up is dropped, not posted, spoken or added to the
-     * transcript, once they opt out, one of those memories is taken back, or someone joins the call
-     * who the answer was not made for: see {@see stillAlone()} and {@see stillAmong()}.
+     * transcript, once they opt out, one of those memories is taken back or forgotten, or someone
+     * is in the call when it is found who the answer was not made for: see {@see stillAlone()} and
+     * {@see stillAmong()}. Someone who joins and leaves again changes nothing.
+     * One that is being looked up is stopped when they opt out or a memory is taken back or forgotten, not
+     * only left to finish for nobody: see {@see dropUnwantedLookups()}. It is not stopped when someone joins,
+     * nor when the call is: what it finds is still posted then.
      *
+     * @param bool $hard Whether Claude handed it off as hard.
      * @param string $question What they said, which the answer is posted under.
      * @param list<string> $sharers Whose shared memories the answer that handed it off was made from.
      * @param string|null $basis What let the asker's personal memory into that answer: see {@see personalMemoryBasis()}.
      * @param list<string>|null $among Whose group memory that answer was made from, when it was from one.
      * @param list<string>|null $alone The asker, when what Claude answered them is remembered: see {@see answer()}.
      * @param array<string, int> $forgotten How often each memory had been forgotten when Claude was asked.
+     * @param list<string> $memories The keys of the memories the task may be made of, in $forgotten.
      */
-    private function lookUp(string $task, string $userId, string $name, string $question, array $sharers, ?string $basis, ?array $among, ?array $alone, array $forgotten): void
+    private function lookUp(string $task, bool $hard, string $userId, string $name, string $question, array $sharers, ?string $basis, ?array $among, ?array $alone, array $forgotten, array $memories): void
     {
         // Whether everyone in the call is still someone that answer was made for.
         $amongThem = fn (): bool => $this->stillAlone($userId, $basis) && $this->stillAmong($userId, $among);
@@ -1594,18 +1636,37 @@ final class VoiceSession
         $this->left->promise()->then(function () use (&$whenItStopped, $amongThem) {
             $whenItStopped = $amongThem();
         });
-        $wanted = function () use (&$whenItStopped, $userId, $sharers, $amongThem): bool {
+        // What can't be undone: someone who joined and leaves again changes nothing, but these do.
+        $stillWanted = function () use ($userId, $sharers, $memories, $forgotten): bool {
             return ! isset($this->optedOut[$userId]) && $this->stillSharing($sharers)
-                && ($this->stopped ? $whenItStopped : $amongThem());
+                // One of them was forgotten since: the task may hold what they asked to forget.
+                && array_filter($memories, fn (string $key) => ($this->forgotten[$key] ?? 0) !== ($forgotten[$key] ?? 0)) === [];
+        };
+        // Whether it is wanted when it starts and when it is found: who is in the call then counts too.
+        // Not an arrow function: $whenItStopped is only set once the call stops.
+        $wanted = function () use (&$whenItStopped, $stillWanted, $amongThem): bool {
+            return $stillWanted() && ($this->stopped ? $whenItStopped : $amongThem());
         };
 
-        $lookedUp = $this->lookups->lookUp(
+        $lookup = $this->lookups->lookUp(
             $task,
             $userId,
             'Transcript of the voice call so far',
             // Read once it is the task's turn, from its file: $this->transcript only holds its last lines.
-            fn () => $wanted() ? trim(file_get_contents("{$this->directory}/transcript.txt")) : null,
-        )->then(
+            // The file is gone when /forget took everything out of it.
+            function () use ($wanted): ?string {
+                $path = "{$this->directory}/transcript.txt";
+
+                return $wanted() ? (is_file($path) ? trim(file_get_contents($path)) : '') : null;
+            },
+            $hard,
+        );
+        // Kept to stop it, for as long as it isn't over.
+        $this->lookingUp[spl_object_id($lookup)] = [$lookup, $stillWanted];
+        // Something may have made it unwanted while Claude was writing what handed it off.
+        $this->dropUnwantedLookups();
+
+        $lookedUp = $lookup->then(
             function (?string $answer) use ($wanted, $alone, $forgotten, $userId, $name, $question, $sharers, $basis, $among) {
                 if ($answer !== null && $wanted()) {
                     return $this->lookedUp($answer, $userId, $name, $question, $alone, $forgotten, ['depends' => $sharers, 'basis' => $basis, 'among' => $among], $wanted);
@@ -1614,10 +1675,26 @@ final class VoiceSession
                 $this->log('debug', 'Dropped what was handed off to be looked up', ['user' => $userId]);
             },
             fn (Throwable $e) => $wanted() ? $this->notLookedUp($e->getMessage(), $userId, $name, $question) : null,
-        );
+        )->finally(function () use ($lookup) {
+            unset($this->lookingUp[spl_object_id($lookup)]);
+        });
 
         $before = $this->allLookedUp;
         $this->allLookedUp = $lookedUp->then(fn () => $before);
+    }
+
+    /**
+     * Stops the tasks that are no longer wanted for good, whether they wait for their turn or Claude Code is
+     * searching: whoever asked opted out, a memory was taken back or forgotten. Not the ones someone joined for:
+     * they may leave again, so those are only checked when a task starts and when it is found. See {@see lookUp()}.
+     */
+    private function dropUnwantedLookups(): void
+    {
+        foreach ($this->lookingUp as [$lookup, $wanted]) {
+            if (! $wanted()) {
+                $lookup->cancel();
+            }
+        }
     }
 
     /**
@@ -1634,13 +1711,14 @@ final class VoiceSession
     private function lookedUp(string $answer, string $userId, string $name, string $question, ?array $alone, array $forgotten, array $madeFrom, callable $wanted): PromiseInterface
     {
         $found = microtime(true);
+        $this->track(Usage::LOOKED_UP, ['user' => $userId]);
         // Remembered like what Claude answered them: only for someone who is still alone with the bot when it
         // arrives, as it may hold what was said in the call meanwhile, or what a memory of someone else said,
         // and not once their memory was forgotten since they asked.
         $alone = $alone !== null && $this->group($userId) === $alone && $this->sharers($userId) === [] ? $this->unlessForgotten($alone, $forgotten) : null;
         $this->remember(Lookups::line($name, $answer), $alone);
 
-        return $this->post("> **{$name}:** {$question}\n{$answer}")->then(function () use ($answer, $userId, $name, $question, $alone, $forgotten, $found, $madeFrom, $wanted) {
+        return $this->post("> **{$name}:** {$question}\n{$answer}", suppressEmbeds: true)->then(function () use ($answer, $userId, $name, $question, $alone, $forgotten, $found, $madeFrom, $wanted) {
             // It waits its turn like an utterance does, so it never talks over an answer. By then, someone may
             // have joined, or taken a memory back: what was looked up is told only when it is still wanted.
             // Claude says again what was looked up, so that isn't remembered either when this isn't.
@@ -1775,6 +1853,46 @@ final class VoiceSession
     }
 
     /**
+     * Takes lines out of the transcript, the file and what Claude is given of it, as when someone used /forget.
+     * The file is deleted when nothing is left of it: there is no transcript when nobody said anything.
+     *
+     * @param list<string> $lines As they were written to transcript.txt, with their time, one entry each.
+     */
+    private function removeFromTranscript(array $lines): void
+    {
+        if ($lines === []) {
+            return;
+        }
+
+        $path = "{$this->directory}/transcript.txt";
+
+        if (is_file($path)) {
+            $written = file_get_contents($path);
+
+            foreach ($lines as $line) {
+                $at = strpos($written, $line . PHP_EOL);
+
+                if ($at !== false) {
+                    $written = substr_replace($written, '', $at, strlen($line . PHP_EOL));
+                }
+            }
+
+            $written === '' ? unlink($path) : file_put_contents($path, $written);
+        }
+
+        foreach ($lines as $line) {
+            // Without the time that was added when it was written.
+            $index = array_search(preg_replace('/^\[\d\d:\d\d:\d\d\] /', '', $line), $this->transcript, true);
+
+            if ($index !== false) {
+                unset($this->transcript[$index]);
+            }
+        }
+
+        $this->transcript = array_values($this->transcript);
+    }
+
+    /**
      * Adds a line to the transcript, and to what the memory of the people who were there is updated from.
      *
      * @param list<string>|null $people Who was in the call: see {@see group()}.
@@ -1890,9 +2008,11 @@ final class VoiceSession
     /**
      * Posts in the text channel, split into several messages when it doesn't fit in one.
      *
+     * @param bool $suppressEmbeds Whether Discord shows no preview of the links in it: what was looked up has
+     *                             links from the web, and a preview of each would fill the channel.
      * @return PromiseInterface<mixed> Resolves once every message is posted, or couldn't be. It never rejects.
      */
-    private function post(string $content): PromiseInterface
+    private function post(string $content, bool $suppressEmbeds = false): PromiseInterface
     {
         // One message after the other, so they arrive in order.
         return array_reduce(
@@ -1900,6 +2020,7 @@ final class VoiceSession
             fn (PromiseInterface $posted, string $part) => $posted->then(fn () => $this->textChannel->sendMessage(
                 MessageBuilder::new()
                     ->setContent($part)
+                    ->setSuppressEmbedsFlag($suppressEmbeds)
                     // Transcribed speech and Claude's answers must never ping anyone.
                     ->setAllowedMentions(['parse' => []]),
             )->catch(function (Throwable $e) {
