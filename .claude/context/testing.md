@@ -1,0 +1,116 @@
+# Testing
+
+How the suite is built and the traps it has. `docs/development.md` says what the tests cover; this file says how to write and run one.
+
+## Suites and commands
+
+- `phpunit.xml`: default suites `Unit,Feature`; `Live` (real Discord, run by `.github/workflows/live-voice.yml`) and `Bench` (real programs, see below) are opt-in. `failOnDeprecation`, `failOnNotice` and `failOnWarning` are on: the warning flag is what lets `EventLoopCheck` fail the run.
+- `tests.yml` runs on pushes to `master` and on non-draft PRs that touch `**.php`, `tests/**`, `composer.json`, `composer.lock`, `phpunit.xml`, `pint.json` or the workflow itself.
+- CI command: `composer test:coverage -- --fail-on-skipped` (pcov). Coverage is printed as text; read `Lines: 100.00%` from the log, nothing enforces it. `--fail-on-skipped` is there because `VoiceCallTest` skips without ffmpeg and libopus.
+- `composer pint -- --test` is the second CI job. Both skip draft PRs.
+- Suite `Bench` (`tests/Bench/VoiceBenchTest.php`, on master since PR #25): `composer bench` times a spoken question five times with the real whisper.cpp (server when there is one), Claude Code and Piper and fails when whisper, Claude or the total is over the baseline by 25% and 200 ms; `composer bench:baseline` (`BENCH_SAVE=1`) saves the baseline instead. It needs the bot's `.env` (`BENCH_ENV_FILE` for another; skips without one, and when `VoiceSession::missingSetup()` says the bot is not set up), reads only its `WHISPER_`, `CLAUDE_`, `PIPER_`, `FFMPEG_` and `VOICE_` settings (no `TOKEN|KEY|SECRET|PASSWORD`), runs with `VOICE_PLAYER=bot` through `voiceClient(sendsPackets: true)`. Baseline: `~/.cache/discord-bot-bench.json` (`BENCH_BASELINE` for another). Steps and the protocol: `docs/development.md#benchmark`.
+- Suite `Real` exists only on `fix/background-lookups-follow-up` (PR #26): `composer check:lookups`, real Claude Code. Neither `Bench` nor `Real` runs by default or in CI.
+- The suite takes about 6 minutes; Composer's 300 s script limit is disabled for `test` and `test:coverage`. Locally run with `COMPOSER_PROCESS_TIMEOUT=0` when in doubt.
+
+## Running from this Windows checkout
+
+The tests need Linux (`posix_kill`, `rm -rf`, `sh` fixtures, the voice library's FFI). PHP on Windows is 8.4 and there is no `vendor/`. Sky runs them in WSL `Ubuntu-24.04` with a PHP 8.5 whose missing extensions (`pdo_sqlite`, `sqlite3`, `pcov`) are loaded through an ini directory, by rsyncing the checkout into `~/discord-bot-prN` with CR stripped (`~/bin/dbot-prN <command>`). Full setup, mutation runner and the bench protocol are in Sky's private Claude memory (`discord-bot-wsl-test-runner`, `discord-bot-bench-before-merge`). From the Bash tool call WSL as `wsl.exe -d Ubuntu-24.04 -e bash -l <<'EOF' ... EOF`. Write patch and mutation scripts with the Write tool, never inside a heredoc: backslashes and `\n` get mangled.
+
+## Fixtures (`tests/Fixtures`) and their variables
+
+Shell-script stand-ins. A test steers them with `setProcessEnv()` (which also rewrites `<recordings>/fake.env`, read through `FAKE_ENV` by the long-running ones) and with flag files.
+
+**`fake-claude`** (also stands in for the lookup and memory models)
+- `FAKE_CLAUDE_OUTPUT`: stdout lines; build with `FakesClaudeOutput::claudeStream(...$pieces)`, `claudeText()`, `claudeResult($text, $isError)`.
+- `FAKE_CLAUDE_OUTPUT_MEMORY`: used when the system prompt starts `You keep a Discord bot's memory`; waits while `FAKE_CLAUDE_HOLD` exists (max 10 s).
+- `FAKE_CLAUDE_OUTPUT_LOOKUP`: used when it starts `You look things up`; with `FAKE_CLAUDE_LOOKUP_GO` set, blocks until that file exists, then deletes it (one `touch` releases one lookup).
+- `FAKE_CLAUDE_LOG` (last call), `FAKE_CLAUDE_CALLS` (all calls, parsed by `claudeCalls()`): lines `pid= cwd= api_key= thinking= nonessential_traffic= autoupdater= arg=... stdin=<prompt>`.
+- `FAKE_CLAUDE_PAUSE` (whole seconds after the first line, until `FAKE_CLAUDE_RESUME` exists), `FAKE_CLAUDE_DELAY`, `FAKE_CLAUDE_EXIT`.
+- Waiting mode (`--input-format` present): `FAKE_CLAUDE_WAITING` (PID file), `FAKE_CLAUDE_WAITING_LEAVES`, `FAKE_CLAUDE_WAITING_FAILS`, `FAKE_CLAUDE_WAITING_GREETS`.
+
+**`fake-whisper`**: `FAKE_WHISPER_OUTPUT` (default `Hey Claude, (coughs) what time is it?`; an empty string is honoured), `FAKE_WHISPER_LOG`, `FAKE_WHISPER_HOLD` (file, max 10 s), `FAKE_WHISPER_DELAY`, `FAKE_WHISPER_EXIT`. Always prints ` [BLANK_AUDIO]` first.
+
+**`fake-piper`** (long-running): `FAKE_PIPER_LOG`, `FAKE_PIPER_RUNNING` (PID file, read by `pipers()`), `FAKE_PIPER_DELAY`, `FAKE_PIPER_WARNS_ON`, `FAKE_PIPER_FAILS_ON` (exits 1 with `The voice model could not be loaded.`). Each line becomes `<dir>/<pid>-<n>.wav` whose **content is the text**, so `file_get_contents($this->played[0])` is the spoken sentence. Whitespace-only lines produce nothing.
+
+**`fake-whisper-server`** (PHP script, stands in for `whisper-server`; listens on `--port`, `GET <--request-path>/health`, `POST <--request-path>/inference`, one request at a time): `FAKE_WHISPER_SERVER_LOG` (pid, arguments, port, a line per request), `FAKE_WHISPER_SERVER_LOAD` (seconds before it listens), `FAKE_WHISPER_SERVER_HEALTH_DELAY`, `FAKE_WHISPER_SERVER_STATUS` (HTTP status; not 200 = error), `FAKE_WHISPER_SERVER_DIE_AT` (request number it dies on), `FAKE_WHISPER_SERVER_BODY` (raw answer instead of a transcript), plus `FAKE_WHISPER_OUTPUT`, `FAKE_WHISPER_HOLD`, `FAKE_WHISPER_DELAY` as for `fake-whisper`. Re-reads them through `FAKE_ENV` at each request. `VoiceTestCase` does not point `WHISPER_SERVER_BINARY` at it, and `WhisperServer::fromEnv()` finds no `whisper-server` beside `fake-whisper`, so feature tests run whisper-cli; `VoiceWhisperServerTest` sets `WHISPER_SERVER_BINARY` (and `FAKE_WHISPER_SERVER_LOG`, `FAKE_WHISPER_LOG`) to use it. The first request it logs is the server's warm-up.
+
+**`fake-piper-tone`**: a real 1 s WAV through real ffmpeg (`VoiceCallTest` only, which also sets `FFMPEG_BINARY=ffmpeg` and `VOICE_PLAYER=bot`). **`fake-ffmpeg`**: `FAKE_FFMPEG_LOG`, `FAKE_FFMPEG_BYTES`; copies input to output, so its files hold no Ogg Opus.
+
+**`GatedLoop`**: a `LoopInterface` that takes nothing until `$open = true`, then hands everything to the loop it wraps. `new Application(['loop' => $gate, ...])` is made with it so DiscordPHP never starts connecting (`ApplicationStopTest::app()`); its `run()` awaits `stop()` rather than running a second loop. **`crash.php`**: stands in for `index.php` for a bot that ends over what nothing caught (`Failures::register(new Logger())`, then fails as its first argument says, e.g. `exception`); run as a child process by `tests/Unit/Logs/FailuresTest.php`, which reads its log from the folder it runs in.
+
+**`tests/Ogg.php`** (`Ogg::opus($packets, $perPage)`, `page()`, `rawPage()`, `lacing()`) builds Ogg Opus streams byte by byte for `OggOpusTest`/`OggPlayerTest`; **`tests/Wav.php`** (`Wav::silence($seconds, $rate, $channels)`) writes a silent WAV with a correct header. Neither is a fixture script: both are autoloaded classes.
+
+**`FakeCdn`**: local HTTP server swapped into `Download::$connector` by reflection; `->requests`, `->response`; `close()` in `tearDown` or `EventLoopCheck` fails the run. **`RecordingEvent`**: static `$calls`/`$before`, reset per test. **`ManualTimers`**: a `LoopInterface` whose `elapse($seconds)` fires timers with exactly that interval (`===`) and `pending()` lists them; a test uses it by overriding `loop()` (the DM trait does that), as `MeetCommandTest`, `VoiceLookupGivenUpTest`, `VoicePauseTest`, `VoiceOpenConversationTest` and the unit `LookupsTest` and `OggPlayerTest` do (the latter also injects `clock:` to stand still); everything else runs on real time.
+
+## `VoiceTestCase` (base of every Feature test except `ApplicationTest`)
+
+Set-up makes `sys_get_temp_dir()/voice-feature-<uniqid>`, points every `*_BINARY` at a fixture through `$_ENV` (`setEnv()`: also `MEMORY_PATH`, `RECORDINGS_PATH`, `VOICE_WAKE_WORD=claude`, `CLAUDE_MODEL=haiku`, **`VOICE_PLAYER=library`**: the stub voice client plays nothing and `playFile` just collects the file, because the bot's own `OggPlayer` would send packets and `fake-ffmpeg`'s files hold no Ogg Opus; a test that wants the bot's player sets `VOICE_PLAYER=bot`: `VoiceCallTest` (real Ogg from `fake-piper-tone` over the stand-in media server), `VoicePlayerTest`, and the bench), sets the `FAKE_*` defaults with `putenv` (`setProcessEnv()`: whisper hears `Hey Claude, what time is it?` and Claude answers `It is a quarter past four.`, so **by default Claude is addressed and answers**), an in-memory stats database (`useStatsDatabase()`), a Monolog `TestHandler` (`$logs`), and a stub `Discord` (`GUILD_ID` 100; members 555 Alice, 666 Bob, 777 Carol; bot 1234 Jukebox; the bot itself 999). Tear-down awaits `stop()` on every `VoiceSession::unfinished()`, resets `$starting` and `$refusing` (set by `refuseNewCalls()`), restores env, deletes the folder. A subclass calls `parent::tearDown()` **last**; DM tests call `endDirectMessages()` before it; `VoiceLookupTest` also resets `VoiceSession::$unfinished` by reflection.
+
+State you assert on: `$sent` (texts posted), `$played` (files given to `playFile`), `$cutOff` (files cut by `stop()`), `$playing` (a promise a played file waits on; set it to hold playback), `$playSeconds` (0.0: playback finishes at once), `$playError` (when set, `playFile` rejects with it), `$packets` and `$speakingFlags` (`[microtime, packet]` and `[microtime, flag]`, filled only by `voiceClient(sendsPackets: true)`, whose `udp->sendBuffer()` and `setSpeaking()` are stubbed; for `VOICE_PLAYER=bot` with real Ogg Opus), `$sendError`, `$sending`, `$voiceStates`, `$logs`.
+
+Helpers: `voiceChannel()`, `voiceClient($channel, connected: false, findsReceiveStreams: true, sendsPackets: false)` (default: a stub whose `isReady()` is false; `connected: true`: a mock that reports ready and expects exactly one `close()`; `sendsPackets: true`: see `$packets`), `inCall(...$ids)` / `inVoice()` / `joins()` / `leaves()` (nothing is known about who is present until `inCall()`), `speak($vc, $ssrc, $userId, $seconds)` (feeds fake RTP, no real time), `speakAndWait($vc, ...$userIds)` with `transcribe()` as its release, `ask($vc, $userId, $text)`, `after($s)`, `holdMemoryUpdates()` / `releaseMemoryUpdates()`, `claudeCalls()` (`[prompt, system, thinking, arguments, waited, pid]`), `memoryUpdates()`, `waitingClaudes()`, `pipers()`, `isRunning($pid)`, `waitUntil($cond, $what, $timeout = 10.0)`, `runFor($s)` (only to prove something does not happen), `logged($message)` (context list), `loggedProblems()` (warning and above; the usual last line is `assertSame([], $this->loggedProblems())`), `assertLogsNeverMention(...$texts)`, `transcript($session)`, `untimed()`, `usage()`, `memory()`, `claudeSays()`.
+
+Skeleton of a voice test (the default fixtures: Claude is addressed and answers):
+
+```php
+$channel = $this->voiceChannel();
+$vc = $this->voiceClient($channel);
+$session = VoiceSession::start($vc, $channel, $this->discord);
+$this->inCall('555');
+$this->speak($vc, 1, '555', 1.0);
+$this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');
+$this->assertSame('It is a quarter past four.', file_get_contents($this->played[0]));
+```
+
+The not-addressed case changes what whisper hears first, proves nothing was played, then reads the log context (`logged()` returns every context key, so the first two, `guild` and `session`, are sliced off):
+
+```php
+$this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => 'What time is it?']);
+$this->speak($vc, 1, '555', 1.0);
+$this->waitUntil(fn () => $this->logged('Not answering') !== [], 'the sentence to be ignored');
+$this->assertSame([], $this->played);
+$this->assertSame(['user' => '555', 'reason' => 'Claude was not addressed'], array_slice($this->logged('Not answering')[0], 2));
+```
+
+Command test (`CommandTestCase`): `interaction(?Channel $voiceChannel, ?string $guildId = '100', string $userId = '555', array $users = [], array $nicknames = [], ?Part $channel = null, array $choices = [])` builds the interaction (`guildId: null` is a DM; use named arguments past `$userId`); assert on `$responses` (`{content, ephemeral}`), `$acknowledged`, `$updates`, `$followUps`. After `VoiceSession::start`, `waitUntil` one waiting Claude and one Piper exist before `/stop`.
+
+DM test (`use ChatsInDirectMessages`): `setUpDirectMessages()` in `setUp`; `write($content)`, `writeVoice($seconds)` (needs `FakeCdn`), `chat($text)`; assert on `$dms[userId]`, `$events` (`typing 555`, `history 555`, `sent 555`), `lastPrompt()`, `lastSystemPrompt()`, `assertClaudeWasRestricted()` (`--tools ""`, `--strict-mcp-config`, empty cwd). `$timers` is `ManualTimers`: `assertSame(1, $this->timers->elapse(600.0))` fires the memory update.
+
+Unit tests of process classes use `WaitsWithin::within($seconds, $promise, $what)`. `RunsOutOfFileDescriptors::withoutFileDescriptors()` needs `posix` and preloaded classes.
+
+## `EventLoopCheck`
+
+A PHPUnit extension (`phpunit.xml`). After the run it `settle()`s one loop tick and then reports every stream and timer still registered, naming the test that left it (`- reading stream <type> local <addr> remote <addr>, left by <test>`, `- timer once after 3600s, callback File.php:LINE`, or `closed without being removed from the loop`), clears them so PHP can exit, and fails the run with a PHPUnit warning headed `The tests left something waiting in the event loop...`. It does not register itself when the `Live` suite is included: that test calls `Loop::stop()` in its tear-down instead. Without it a suite that leaked a socket printed `OK` and hung until CI's 15 minute timeout. Needs the default `StreamSelectLoop` (no `ev`/`event`/`uv`). A test closes its servers, connections and `FakeCdn`, cancels its timers, and stops its sessions in `tearDown`. `await()` itself leaves the last settled timer or closed stream registered until the next `await()`; that is why the check settles first (`EventLoopInspector`). Never call `Loop::run()` from a test (`VoiceTestCase.php` says why). `ApplicationStopTest` runs the bot's `Application::run()` on a `GatedLoop` whose `run()` is an `await()`, so there is still one runner, and restores `Loop::set()` afterwards.
+
+## Conventions
+
+- Classes `Voice<Topic>Test`, `<Name>CommandTest`, `Direct<Topic>Test`, all `final`. Methods read as sentences: `testDoesNotAnswerThatSpellingWhenOnlyTheNameIsTheWakeWord`.
+- One behaviour per test; sections inside a test are prose comments; assertions carry a message. Texts are `private const string` on the class.
+- Logs are asserted by exact message through `logged()`; content is asserted absent with `assertLogsNeverMention()`.
+- Settings change through `setEnv()`, never by editing `.env`. Discord parts are `getStubBuilder()` stubs mocked at their `__get`/`__isset` seam.
+- A feature PR adds a hand-made mutation run over its changed lines (`{name, file, old, new, filter, timeout}` entries driven by a script in WSL); runs of 50 to 100 mutants take 10 to 30 minutes and have found gaps every review missed.
+
+## Traps
+
+- **A timer that threw is run again at once**: react/event-loop neither removes nor reschedules a timer whose callback threw, so the next `run()` calls it first. The bot wraps every loop callback in `App\Support\GuardedLoop` for that reason; a test that expects an exception to be swallowed goes through the guard (`FailuresTest`, `ApplicationStopTest`), and one that lets a throw out of a timer leaves the timer for `EventLoopCheck` to report.
+- **`stop()` resolves `$left` before it stops the player**: the sentence being spoken then counts as spoken, not failed, because the player's own promise may be rejected by the cut. A test of a call ended mid-sentence (`VoiceCallTest`, `VoiceStreamingTest`) holds the file with `$playing` and asserts on `$cutOff` and the log, not on a rejection.
+- **`Started speaking` is the first packet with `VOICE_PLAYER=bot`, the hand-over of the file with `library`**: with the default feature-test `library`, the line is logged before anything is sent, so a test of timing between flag and first packet needs `VOICE_PLAYER=bot` and `sendsPackets: true` (`$speakingFlags` before `$packets`; `OggPlayer::HEAD_START` is 40 ms, `VoiceCallTest` allows under 0.3 s on the real network path).
+- **Pace with `hrtime`, not `microtime()`**: the WSL2 wall clock steps by about 2 s every ~35 s; `OggPlayer` paces on `hrtime`, ReactPHP's timers do too. Wall-clock assertions (`ms` in log lines, the 0.6 s silence gate) can show those steps as outliers.
+- **Arrow functions copy at creation**: `waitUntil(fn () => count($found) === 3)` watches a stale array. Use `function () use (&$found)`.
+- **Static state outlives a test**: `VoiceSession::$starting`, `$unfinished`, `DirectChat::$chats`, `Download::$connector`, `RecordingEvent::$calls`, `Meeting::$meetings`, `VoiceSession::$refusing`. A new static needs a reset in `tearDown`. `MeetCommandTest::testDeletesTheChannelWhenTheCallCannotBeStopped` makes `stop()` throw, and that session stays in `VoiceSession::$unfinished` for the rest of the run (the base tear-down cannot stop it). `VoiceLookupTest` waits for `unfinished() === []`, so it resets the static by reflection in its own `tearDown`. A new test that asserts on `unfinished()` does the same, or checks for its own session only.
+- **Shared `/tmp`**: `/tmp/discord-bot-voice-messages`, `/tmp/memory-*`, `/tmp/*-<ssrc>.ogg` and `discord-bot-claude` are shared by every checkout on the machine. Compare before/after snapshots, never "empty". `DirectVoiceMessageTest` fails in a full run while another checkout runs the suite; run it again.
+- **Full runs find what filtered runs do not**: races between "answer posted" and "sentence played" only show in a full run. Run the CI command before every push.
+- **Timing under load**: a `delay(0.8)` has returned after 1.4 s with seven suites running. Assert lower bounds; guard a "not yet" assertion with the time that really passed (`VoicePauseTest::overAfter()`). `VoiceOpenConversationTest::testSomeoneElsesSentenceNeedsTheWakeWord...` is known load-flaky.
+- **Two `fake-claude` processes started in the same instant** mix their `FAKE_CLAUDE_LOG`. Start them one after the other and loop a new multi-session test ten times before trusting it.
+- **Long-running fakes keep their start environment**: only `FAKE_*` variables set through `setProcessEnv()` reach them, via `FAKE_ENV`.
+- **`claudeCalls()` parses by argument order** (`--system-prompt` followed by `--tools`): changing `Claude::command()`'s order breaks it.
+- **The fake voice client finishes `playFile` at once** (`$playSeconds` 0). "X is spoken to the end before Y" cannot fail unless the test holds the file: `$this->playing = (new Deferred())->promise()` and resolve it later.
+- **A turn that calls `stop()`**: test with `waitUntil` on `VoiceSession::unfinished()`, not `await($session->stop())`, so a deadlock fails as a timeout.
+- **`$found['k']` on a never-set key only warns** and `assertNull` passes: vacuous. Assert `arrayHasKey` first.
+- **A new fixture loses its exec bit on the Windows checkout** (`core.fileMode=false`): `git update-index --chmod=+x tests/Fixtures/<file>` and check `git ls-files -s` after the last `git add`.
+- **CI**: jobs cancelled after exactly 15 minutes with zero steps were never picked up by a runner (`gh run rerun`); the live workflow's one concurrency group cancels a pending run when a newer PR queues (re-run, not a failure); the live workflow is also "success" when its `live` job was skipped for missing secrets (check `gh run view --json jobs`).
+- **Drafts get no CI**: `tests.yml` has no `workflow_dispatch`; `live-voice.yml` has (`gh workflow run live-voice.yml --ref <branch>`). Only the live run proves a slash command's definition against real Discord (`Command <name> has been saved.` once, then `already exists.`).
+
+## The live test (`tests/Live/VoiceRoundTripTest.php`)
+
+Real Discord, real whisper.cpp (`whisper-cli` and the `whisper-server` built next to it) and Piper, the bot's own player (`VOICE_PLAYER` not set), `fake-claude` with a fixed two-sentence answer and `FAKE_CLAUDE_PAUSE=1`, `VOICE_WAKE_WORD=''`. A second bot (`speaker.php`, run through `Shell::run`, writes `result.json`, never stdout because libdave prints there) plays "Hey Claude, what time is it?" and records the answer. Asserts: the commands were saved or already existed and none removed; the transcript holds the question and `Claude: It is a quarter past four. The meeting starts at five.`; the log has `Whisper server ready` and no line starting `The whisper server`; no `Voice reply failed`, `Could not post`, `No Claude Code process was waiting`, `The waiting Claude Code process did not answer`, `Piper had stopped`; exactly two `claude-*.ogg` and one `Started speaking` (the first packet); `summary.md` equals the answer; usage `[calls, answers, failures] = [1, 1, 0]`; the speaker's recording transcribes to `/quarter.+meeting/is` and matches `/^\W*(it is|it's) a quarter/i` (the first word is not lost to the 40 ms head start; Piper's file begins with about 80 ms of silence, so this bounds the loss at about 80 ms). Nightly, on dispatch, and on non-draft PRs touching `app/`, `helpers/`, `tests/Live`, `tests/Fixtures`, `tests/*.php`, `composer.lock` or the workflow file. The workflow builds `whisper-cli` and `whisper-server` (cache key `whisper.cpp-v1.9.4-base.en-portable-server-<os>`). The job runs `vendor/bin/phpunit --testsuite Live` without `--fail-on-skipped`: the test skips itself when any of `DISCORD_TEST_BOT_TOKEN`, `DISCORD_TEST_SPEAKER_TOKEN`, `DISCORD_TEST_VOICE_CHANNEL_ID` or `LIVE_TEST_QUESTION` is empty, and the workflow's `configured` job skips the whole `live` job when the secrets are missing, so a green workflow is not proof the call happened.
