@@ -165,6 +165,7 @@ final class VoiceWholeCallTest extends VoiceTestCase
             "Transcript of the voice call so far:\n\n{$said}\n\n" . $this->asking('Bob', 'Claude, what did I miss?'),
             $this->untimed($this->claudeCalls()[0]['prompt']),
         );
+        $this->assertSame(3, $this->logged('Asked Claude')[0]['lines'], 'What was forgotten is not counted as given.');
         // The call's file holds the same.
         $this->assertSame("{$said}\nClaude: " . self::ANSWER . "\n", $this->untimed($this->transcript($session)));
     }
