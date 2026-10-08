@@ -13,8 +13,8 @@ use React\Promise\PromiseInterface;
 use RuntimeException;
 use Throwable;
 
+use function React\Promise\all;
 use function React\Promise\reject;
-use function React\Promise\resolve;
 
 /**
  * Text-to-speech through a local Piper install.
@@ -50,8 +50,17 @@ final class Speech
     /** @var list<Deferred<string>> The sentences Piper has not spoken yet, in the order it got them. Each resolves with its WAV file. */
     private array $sentences = [];
 
+    /** The ffmpeg that waits for the speech of the next sentence: see {@see Encoder}. */
+    private ?Encoder $waiting = null;
+
+    /** @var array<int, Encoder> Every ffmpeg that has not ended: the one that waits, and those that encode a sentence. */
+    private array $encoders = [];
+
+    /** Whether stop() was called: no ffmpeg is started ahead for a sentence that is not coming. */
+    private bool $stopping = false;
+
     /**
-     * @param float $timeout Seconds Piper has to speak a sentence, before it is stopped.
+     * @param float $timeout Seconds Piper has to speak a sentence, and ffmpeg to encode it, before it is stopped.
      */
     public function __construct(
         public readonly string $binary,
@@ -106,6 +115,8 @@ final class Speech
         }
 
         $this->folder = $folder;
+        $this->stopping = false;
+        $this->prepare();
         // With --output-dir, Piper keeps reading its stdin: it speaks each line into a WAV file of the folder,
         // and says on stderr when the file is complete.
         $this->piper = Shell::open([$this->binary, '--model', $this->model, '--output-dir', $folder], onErrorLine: $this->wrote(...));
@@ -124,37 +135,57 @@ final class Speech
     }
 
     /**
-     * Ends Piper, once it has spoken the sentences it already got.
+     * Whether an ffmpeg waits for the speech of the next sentence. None does once it stopped by itself: the
+     * next sentence starts one again.
+     */
+    public function isReadyToEncode(): bool
+    {
+        return $this->waiting?->isRunning() === true;
+    }
+
+    /**
+     * Ends Piper, once it has spoken the sentences it already got, and the ffmpeg that waited for the next one.
      *
-     * @return PromiseInterface<mixed> Resolves once it has ended, and its folder is gone. It never rejects.
+     * @return PromiseInterface<mixed> Resolves once Piper has ended, its folder is gone, and what it spoke is
+     *                                 encoded. It never rejects.
      */
     public function stop(): PromiseInterface
     {
+        $this->stopping = true;
+        $this->waiting?->stop();
+        $this->waiting = null;
+        // Those that encode a sentence end by themselves, also the one of a sentence Piper is still speaking.
+        $encoded = fn () => all(array_map(static fn (Encoder $encoder) => $encoder->done()->catch(static fn () => null), $this->encoders))->then(static fn () => null);
+
         if ($this->piper === null) {
-            return resolve(null);
+            return $encoded();
         }
 
         $this->piper->end(timeout: $this->timeout);
 
-        return $this->piper->done()->catch(static fn () => null);
+        return $this->piper->done()->catch(static fn () => null)->then($encoded);
     }
 
     /**
-     * Speaks the text into an Ogg Opus file. Piper is started when it isn't running, in the folder it had before.
+     * Has Piper speak the text, and an ffmpeg encode its speech as Ogg Opus. Piper is started when it isn't
+     * running, in the folder it had before.
      *
-     * Piper writes WAV files, but the voice library plays files through ffmpeg with
-     * -fflags +nobuffer, which drops whatever ffmpeg reads while probing the file: all of
-     * a short Piper WAV, yet only the first 20 ms of an Ogg Opus file. So Piper's WAV is
-     * converted. With VOICE_PLAYER=bot the file's Opus packets go to Discord as they are,
-     * one every 20 ms, so each must hold 20 ms: libopus's default frame duration.
+     * Piper is free for the next sentence as soon as it has written this one's WAV file. That file then goes to
+     * the ffmpeg that was started ahead and waits for it (see {@see Encoder}), and the sentence can be played
+     * from the first of what that ffmpeg writes: the three are told apart by the {@see Sentence} this gives back.
+     *
+     * With VOICE_PLAYER=bot the Opus packets go to Discord as they are, one every 20 ms, so each must hold
+     * 20 ms: libopus's default frame duration. The whole stream is also written to $oggPath, which is what
+     * VOICE_PLAYER=library plays: the voice library plays files through ffmpeg with -fflags +nobuffer, which
+     * drops whatever ffmpeg reads while probing the file: all of a short Piper WAV, yet only the first 20 ms of
+     * an Ogg Opus file.
      *
      * The silence at the start and the end of the speech is taken off in the same step: see TRIM.
      *
-     * @return PromiseInterface<string> The path of the written file. Rejects when there is nothing to say in the
-     *                                  text, when Piper ends before it spoke it, or takes too long, and when its
-     *                                  speech can't be converted.
+     * @return Sentence It fails when there is nothing to say in the text, when Piper ends before it spoke it, or
+     *                  takes too long, and when its speech can't be encoded.
      */
-    public function synthesize(string $text, string $oggPath): PromiseInterface
+    public function synthesize(string $text, string $oggPath): Sentence
     {
         // Piper speaks each line it reads on its own, so the text is one line. And it skips a line that holds
         // nothing but whitespace, of any script, without a word: it must never get one, or every sentence after
@@ -162,26 +193,81 @@ final class Speech
         $line = trim(preg_replace('/[\s\x{1c}-\x{1f}]+/u', ' ', mb_scrub($text)));
 
         if ($line === '') {
-            return reject(new RuntimeException('There is nothing to say in the sentence.'));
+            $nothing = new RuntimeException('There is nothing to say in the sentence.');
+            $sentence = new Sentence($oggPath, reject($nothing));
+            $sentence->fail($nothing);
+
+            return $sentence;
         }
 
-        $piperPath = "{$oggPath}.piper.wav";
         // Before Piper is started: when it can't be, it has ended at once, and this sentence with it.
         $this->sentences[] = $spoken = new Deferred();
         $this->start($this->folder);
+        // An ffmpeg that stopped by itself is started again now, while Piper speaks, and not once Piper is done.
+        $this->prepare();
         $piper = $this->piper;
         $timer = Loop::addTimer($this->timeout, fn () => $piper?->stop("timed out after {$this->timeout}s"));
 
         $piper?->write("{$line}\n");
 
-        return $spoken->promise()
+        $sentence = null;
+        $voiced = $spoken->promise()
             ->finally(fn () => Loop::cancelTimer($timer))
-            // Out of Piper's folder, which is emptied when Piper ends.
-            ->then(fn (string $wavPath) => rename($wavPath, $piperPath))
-            // Frames of 20 ms, libopus's default: see above. VoiceCallTest counts the packets of an answer.
-            ->then(fn () => Shell::run([$this->ffmpeg, '-loglevel', 'error', '-y', '-i', $piperPath, '-af', self::TRIM, '-c:a', 'libopus', $oggPath]))
-            ->finally(fn () => is_file($piperPath) && unlink($piperPath))
-            ->then(fn () => $oggPath);
+            ->then(function (string $wavPath) use (&$sentence): void {
+                // Read now, out of Piper's folder, which is emptied when Piper ends.
+                $wav = (string) file_get_contents($wavPath);
+                unlink($wavPath);
+                $this->encode($wav, $sentence);
+            });
+        $sentence = new Sentence($oggPath, $voiced);
+        $voiced->catch($sentence->fail(...));
+
+        return $sentence;
+    }
+
+    /**
+     * Starts an ffmpeg that waits for the speech of one sentence.
+     */
+    private function encoder(): Encoder
+    {
+        // It reads a WAV file from a pipe, without first probing what it is. Frames of 20 ms, libopus's default:
+        // see synthesize(). VoiceCallTest counts the packets of an answer. A page for each packet, written as
+        // soon as it is encoded: ffmpeg would otherwise hold a second of them back.
+        $encoder = new Encoder([
+            $this->ffmpeg, '-loglevel', 'error', '-probesize', '32', '-analyzeduration', '0', '-f', 'wav', '-i', 'pipe:0',
+            '-af', self::TRIM, '-c:a', 'libopus', '-page_duration', '20000', '-flush_packets', '1', '-f', 'ogg', 'pipe:1',
+        ]);
+        $id = spl_object_id($encoder);
+        $this->encoders[$id] = $encoder;
+        $ended = function () use ($id): void {
+            unset($this->encoders[$id]);
+        };
+        $encoder->done()->then($ended, $ended);
+
+        return $encoder;
+    }
+
+    /**
+     * Has an ffmpeg wait for the speech of the next sentence, unless one does, or no sentence is coming.
+     */
+    private function prepare(): void
+    {
+        if (! $this->stopping && ! $this->isReadyToEncode()) {
+            $this->waiting = $this->encoder();
+        }
+    }
+
+    /**
+     * Gives a sentence's speech to the ffmpeg that waited for it, and has the next one started.
+     */
+    private function encode(string $wav, Sentence $sentence): void
+    {
+        // None waits when it stopped by itself since the sentence was given to Piper, or when the call is
+        // ending and Piper had still been speaking this sentence.
+        $encoder = $this->isReadyToEncode() ? $this->waiting : $this->encoder();
+        $this->waiting = null;
+        $this->prepare();
+        $encoder->encode($wav, $sentence, $this->timeout);
     }
 
     /**

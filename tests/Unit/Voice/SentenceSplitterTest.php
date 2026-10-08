@@ -39,6 +39,77 @@ final class SentenceSplitterTest extends TestCase
         $this->assertSame(['It is a quarter past four.', 'Time for a cup of tea.'], $this->sentences);
     }
 
+    public function testHandsOverTheFirstWordsOfTheTextBeforeTheirSentenceIsWhole(): void
+    {
+        $splitter = $this->firstWords(5);
+
+        $splitter->push('The sky looks blue because');
+        $this->assertSame([], $this->sentences, 'The fifth word could still go on.');
+
+        // The sixth word has begun: the first five are whole, and the voice gets them while Claude writes on.
+        $splitter->push(' o');
+        $this->assertSame(['The sky looks blue because'], $this->sentences);
+
+        // The rest of the sentence is the next piece, and after it only whole sentences are handed over.
+        $splitter->push('f how sunlight scatters off the air. It');
+        $this->assertSame(['The sky looks blue because', 'of how sunlight scatters off the air.'], $this->sentences);
+
+        $splitter->push(' happens every single day above all of us');
+        $this->assertSame(['The sky looks blue because', 'of how sunlight scatters off the air.'], $this->sentences);
+
+        $splitter->flush();
+        $this->assertSame(['The sky looks blue because', 'of how sunlight scatters off the air.', 'It happens every single day above all of us'], $this->sentences);
+    }
+
+    public function testHandsOverNoFirstWordsOfATextWhoseFirstSentenceIsAlreadyWhole(): void
+    {
+        $splitter = $this->firstWords(3);
+
+        // Claude wrote faster than it was read: there is nothing to gain by cutting a sentence that is all there.
+        $splitter->push('It is rather late now, my friend. And so we should');
+        $this->assertSame(['It is rather late now, my friend.'], $this->sentences);
+
+        $splitter->push(' all go home and sleep');
+        $this->assertSame(['It is rather late now, my friend.'], $this->sentences, 'Only the start of the text is ever cut.');
+    }
+
+    /**
+     * @param list<string> $expected
+     */
+    #[DataProvider('firstWordsOfTexts')]
+    public function testFirstWords(int $words, string $text, array $expected): void
+    {
+        $splitter = $this->firstWords($words);
+        $splitter->push($text);
+        $handedOver = $this->sentences;
+        $splitter->flush();
+
+        $this->assertSame($expected, $handedOver, 'Before the text is complete.');
+        $this->assertSame($text, implode(' ', $this->sentences), 'Nothing of the text is lost or said twice.');
+    }
+
+    /**
+     * @return iterable<string, array{int, string, list<string>}>
+     */
+    public static function firstWordsOfTexts(): iterable
+    {
+        yield 'as many words as asked' => [5, 'A refrigerator moves heat from inside the box', ['A refrigerator moves heat from']];
+        yield 'not while the last of them could still go on' => [5, 'A refrigerator moves heat from', []];
+        yield 'not fewer than there are' => [5, 'A refrigerator moves heat', []];
+        yield 'more of them when they are too short to be spoken alone' => [3, 'It is a quarter past four in the', ['It is a quarter past']];
+        yield 'exactly as long as the shortest sentence' => [1, 'This is twenty longs and goes on', ['This is twenty longs']];
+        yield 'one character shorter than that goes on to the next word' => [1, 'It is nineteen long and goes on', ['It is nineteen long and']];
+        yield 'not after a number' => [5, 'You should rest for 60 seconds between two sets', ['You should rest for 60 seconds']];
+        yield 'not before a number' => [4, 'You should rest about 60 to 90 seconds between two sets', ['You should rest about 60 to 90 seconds']];
+        yield 'not inside a name' => [4, 'I would ask Dr. Jane Miller about that today', ['I would ask Dr. Jane Miller']];
+        yield 'the first word is capitalized as any first word is' => [1, 'Internationalization Matters a great deal', ['Internationalization']];
+        yield 'a capitalized word before a plain one ends the piece' => [4, 'The capital of Portugal is the city', ['The capital of Portugal']];
+        yield 'a plain word before a capitalized one ends the piece' => [4, 'We would really like Paris in the spring', ['We would really like']];
+        yield 'not into the next line' => [3, "Short line here\nand then some more words follow it", []];
+        yield 'counted in characters, not bytes' => [1, 'Ça été préparé à l’été déjà', ['Ça été préparé à l’été']];
+        yield 'none in a text without spaces' => [2, 'それは本当に良い考えだと私は心から思いますそして', []];
+    }
+
     public function testWaitsForWhatClosesWithASentenceThatTakesNoSpace(): void
     {
         $this->splitter->push('それは本当に「良い考えだと私は心から思います。');
@@ -46,6 +117,13 @@ final class SentenceSplitterTest extends TestCase
 
         $this->splitter->push('」明日');
         $this->assertSame(['それは本当に「良い考えだと私は心から思います。」'], $this->sentences);
+    }
+
+    private function firstWords(int $words): SentenceSplitter
+    {
+        return new SentenceSplitter(function (string $sentence) {
+            $this->sentences[] = $sentence;
+        }, $words);
     }
 
     /**
