@@ -1,0 +1,6 @@
+#!/bin/sh
+# Stands in for kokoro/kokoro, the program PIPER_BINARY points at to speak with Kokoro: the real kokoro_serve.py,
+# with the stand-in engine of tests/Fixtures/kokoro in the place of torch and the model, so it runs where neither is.
+here=$(dirname "$0")
+export KOKORO_ENGINE=stand_in_engine PYTHONPATH="$here/kokoro" PYTHONDONTWRITEBYTECODE=1
+exec python3 "$here/../../kokoro/kokoro_serve.py" "$@"

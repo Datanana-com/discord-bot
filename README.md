@@ -80,7 +80,7 @@ stateDiagram-v2
     Open --> [*]: the call ends
 ```
 
-More in [docs/voice-calls.md](docs/voice-calls.md): conversations, interruptions, pauses, retention, and how Claude Code and Piper are kept running during a call.
+More in [docs/voice-calls.md](docs/voice-calls.md): conversations, interruptions, pauses, retention, how Claude Code and Piper are kept running during a call, and how to speak with Kokoro instead of Piper.
 
 ## Looking things up
 
