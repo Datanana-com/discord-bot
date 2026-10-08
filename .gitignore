@@ -7,3 +7,7 @@
 /memories/*
 /.cache
 /.phpunit.result.cache
+/kokoro/venv
+/kokoro/hf
+/kokoro/voices
+/kokoro/__pycache__

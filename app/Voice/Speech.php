@@ -26,6 +26,21 @@ use function React\Promise\resolve;
  */
 final class Speech
 {
+    /**
+     * What ffmpeg does to a sentence's audio before it is encoded: it takes the silence off the start and the end.
+     * Piper's files begin with up to 80 ms of it and end with up to 200 ms, Kokoro's with about 300 ms and end
+     * with about 500 ms, and the start is time before every answer that nobody hears anything in.
+     *
+     * - Both ends are cut at -60 dB, with 20 ms of the silence kept before the first sound and 50 ms after the
+     *   last. At -45 dB the filter also took the first 40 ms of a soft "s", "h" or "f" and the last of a soft "v"
+     *   (what it cut reached -36 dB); at -60 dB nothing it cuts is above -56 dB, which no one hears.
+     * - silenceremove only trims the start (its stop_periods would also drop the pauses inside the sentence), so
+     *   the end is trimmed by reversing the audio, trimming its start, and reversing it back.
+     * - apad makes the audio at least 40 ms long: a sentence of nothing but silence, which Kokoro's wrapper
+     *   gives for a line it can't speak, would otherwise end up with no packets at all, and never "start" speaking.
+     */
+    private const string TRIM = 'silenceremove=start_periods=1:start_threshold=-60dB:start_silence=0.02,areverse,silenceremove=start_periods=1:start_threshold=-60dB:start_silence=0.05,areverse,apad=whole_dur=0.04';
+
     /** The Piper process, while it runs. */
     private ?Program $piper = null;
 
@@ -130,7 +145,10 @@ final class Speech
      * Piper writes WAV files, but the voice library plays files through ffmpeg with
      * -fflags +nobuffer, which drops whatever ffmpeg reads while probing the file: all of
      * a short Piper WAV, yet only the first 20 ms of an Ogg Opus file. So Piper's WAV is
-     * converted.
+     * converted. With VOICE_PLAYER=bot the file's Opus packets go to Discord as they are,
+     * one every 20 ms, so each must hold 20 ms: libopus's default frame duration.
+     *
+     * The silence at the start and the end of the speech is taken off in the same step: see TRIM.
      *
      * @return PromiseInterface<string> The path of the written file. Rejects when there is nothing to say in the
      *                                  text, when Piper ends before it spoke it, or takes too long, and when its
@@ -160,7 +178,8 @@ final class Speech
             ->finally(fn () => Loop::cancelTimer($timer))
             // Out of Piper's folder, which is emptied when Piper ends.
             ->then(fn (string $wavPath) => rename($wavPath, $piperPath))
-            ->then(fn () => Shell::run([$this->ffmpeg, '-loglevel', 'error', '-y', '-i', $piperPath, '-c:a', 'libopus', $oggPath]))
+            // Frames of 20 ms, libopus's default: see above. VoiceCallTest counts the packets of an answer.
+            ->then(fn () => Shell::run([$this->ffmpeg, '-loglevel', 'error', '-y', '-i', $piperPath, '-af', self::TRIM, '-c:a', 'libopus', $oggPath]))
             ->finally(fn () => is_file($piperPath) && unlink($piperPath))
             ->then(fn () => $oggPath);
     }

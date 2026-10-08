@@ -4,7 +4,8 @@ declare(strict_types=1);
 
 namespace App;
 
-use Exception;
+use Throwable;
+use App\Logs\Failures;
 use App\Exceptions\EventFunctionNotFoundException;
 use Discord\Discord;
 use Discord\Parts\Channel\Message;
@@ -114,9 +115,8 @@ abstract class EventAbstract
                     $this->log->info("Event \"{$method}\" was executed successfully.");
                     return true;
                 }
-            } catch (Exception $e) {
-                $this->log->error("Event \"{$method}\" failed with the following error: {$e->getMessage()}");
-                $this->log->error($e->getTraceAsString());
+            } catch (Throwable $e) {
+                $this->log->error("Event \"{$method}\" failed with the following error: {$e->getMessage()}", ['event' => static::class, ...Failures::context($e)]);
                 return false;
             }
         }

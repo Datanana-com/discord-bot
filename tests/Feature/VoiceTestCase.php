@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Analytics\Usage;
+use App\Assistant\LookupSlots;
 use App\Assistant\Memory;
 use App\Voice\VoiceSession;
 use Discord\Builders\MessageBuilder;
@@ -14,6 +15,7 @@ use Discord\Parts\Channel\Channel;
 use Discord\Voice\Exceptions\Channels\AudioAlreadyPlayingException;
 use Discord\Voice\Processes\OpusDecoderInterface;
 use Discord\Voice\Rtp\Packet;
+use Discord\Voice\Rtp\UDP;
 use Discord\Voice\Speaking;
 use Discord\Voice\VoiceClient;
 use Monolog\Handler\TestHandler;
@@ -91,6 +93,9 @@ abstract class VoiceTestCase extends TestCase
     /** @var list<string> Messages posted in the voice channel's text chat. */
     protected array $sent = [];
 
+    /** @var list<int> The flags of each message in {@see $sent}: Discord's message flags, like the one that shows no link previews. */
+    protected array $sentFlags = [];
+
     /** @var list<string> Files played into the call. */
     protected array $played = [];
 
@@ -100,6 +105,9 @@ abstract class VoiceTestCase extends TestCase
     /** When set, posting in the text channel fails with this error. */
     protected ?\Throwable $sendError = null;
 
+    /** When set, the voice client can't play a file, and fails with this error. */
+    protected ?\Throwable $playError = null;
+
     /** When set, a message only arrives in the text channel once this resolves. */
     protected ?PromiseInterface $sending = null;
 
@@ -108,6 +116,12 @@ abstract class VoiceTestCase extends TestCase
 
     /** How long a file played into the call takes otherwise. */
     protected float $playSeconds = 0.0;
+
+    /** @var list<array{0: float, 1: string}> When each packet was sent into the call, and the packet, by a voice client that sends packets. */
+    protected array $packets = [];
+
+    /** @var list<array{0: float, 1: int}> When such a voice client was told the bot speaks, or stopped, and which. */
+    protected array $speakingFlags = [];
 
     /** @var array<int, true> SSRCs that already sent a speaking event. */
     private array $speaking = [];
@@ -133,6 +147,8 @@ abstract class VoiceTestCase extends TestCase
         $this->claudeHold = "{$this->recordings}/claude.hold";
         $this->whisperHold = "{$this->recordings}/whisper.hold";
         $this->memories = "{$this->recordings}/memories";
+        // Every call and chat shares the slots lookups are started in: a test never starts with another one's taken.
+        LookupSlots::reset();
         $this->voiceStates = new \ArrayObject();
 
         $this->setEnv([
@@ -146,6 +162,9 @@ abstract class VoiceTestCase extends TestCase
             'PIPER_BINARY' => "{$fixtures}/fake-piper",
             'PIPER_MODEL' => "{$this->recordings}/models/voice.onnx",
             'FFMPEG_BINARY' => "{$fixtures}/fake-ffmpeg",
+            // The voice client plays nothing: the files handed to it are collected in $played. The bot's own
+            // player would send their packets, and fake-ffmpeg's files hold no Ogg Opus to send.
+            'VOICE_PLAYER' => 'library',
         ]);
         $this->setProcessEnv([
             'FAKE_ENV' => "{$this->recordings}/fake.env",
@@ -185,6 +204,9 @@ abstract class VoiceTestCase extends TestCase
         await(all(array_map(fn (VoiceSession $session) => $session->stop(), VoiceSession::unfinished())));
         // A call a test left starting, as when the bot never got to join, is not starting in the next test.
         (new ReflectionProperty(VoiceSession::class, 'starting'))->setValue(null, []);
+        LookupSlots::reset();
+        // Nor is a bot that was stopped in one test still stopping in the next.
+        (new ReflectionProperty(VoiceSession::class, 'refusing'))->setValue(null, false);
 
         foreach ($this->originalProcessEnv as $name => $value) {
             putenv($value === false ? $name : "{$name}={$value}");
@@ -269,6 +291,7 @@ abstract class VoiceTestCase extends TestCase
             // Messages repeat what people said and what Claude answered, so they must never ping anyone.
             $this->assertSame(['parse' => []], $message->jsonSerialize()['allowed_mentions'] ?? null, 'Mentions are disabled.');
             $this->sent[] = $message->getContent();
+            $this->sentFlags[] = $message->getFlags();
 
             return $this->sendError === null ? $this->sending ?? resolve(null) : reject($this->sendError);
         });
@@ -462,10 +485,13 @@ abstract class VoiceTestCase extends TestCase
      *
      * @param bool $connected            Whether it reports being connected; it then expects to be closed exactly once.
      * @param bool $findsReceiveStreams Whether getReceiveStream() finds speakers' streams.
+     * @param bool $sendsPackets        Whether the bot's own player can send packets through it: they are then collected
+     *                                  in {@see $packets}, and what it is told about speaking in {@see $speakingFlags}.
+     *                                  For a test that plays with VOICE_PLAYER=bot, and real Ogg Opus files.
      */
-    protected function voiceClient(Channel $channel, bool $connected = false, bool $findsReceiveStreams = true): VoiceClient
+    protected function voiceClient(Channel $channel, bool $connected = false, bool $findsReceiveStreams = true, bool $sendsPackets = false): VoiceClient
     {
-        $methods = ['createDecoder', 'playFile', 'stop', 'isReady', 'close', ...($findsReceiveStreams ? [] : ['getReceiveStream'])];
+        $methods = ['createDecoder', 'playFile', 'stop', 'isReady', 'close', ...($findsReceiveStreams ? [] : ['getReceiveStream']), ...($sendsPackets ? ['setSpeaking'] : [])];
 
         if ($connected) {
             $vc = $this->getMockBuilder(VoiceClient::class)->disableOriginalConstructor()->onlyMethods($methods)->getMock();
@@ -489,9 +515,32 @@ abstract class VoiceTestCase extends TestCase
             $vc->method('getReceiveStream')->willReturn(null);
         }
 
+        if ($sendsPackets) {
+            $vc->method('setSpeaking')->willReturnCallback(function (int $speaking): void {
+                $this->speakingFlags[] = [microtime(true), $speaking];
+            });
+            // Stands in for the media connection: the packets go nowhere, and are kept with when they were sent.
+            $vc->udp = new class (function (string $packet): void {
+                $this->packets[] = [microtime(true), $packet];
+            }) extends UDP {
+                public function __construct(private readonly \Closure $record)
+                {
+                }
+
+                public function sendBuffer(string $data): void
+                {
+                    ($this->record)($data);
+                }
+            };
+        }
+
         // The file being played, when one is, and what is resolved when it has been.
         $busy = $finished = null;
         $vc->method('playFile')->willReturnCallback(function (string $file) use (&$busy, &$finished): PromiseInterface {
+            if ($this->playError !== null) {
+                return reject($this->playError);
+            }
+
             // Like the voice library, which plays one file at a time.
             if ($busy !== null) {
                 return reject(new AudioAlreadyPlayingException());
