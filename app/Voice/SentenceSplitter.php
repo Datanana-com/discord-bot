@@ -37,6 +37,9 @@ final class SentenceSplitter
     /** A sentence ends where {@see END} says, or with its line. */
     private const string SENTENCE = '/^.{' . self::MIN_CHARACTERS . ',}?(?:' . self::END . '|(?=\n))/su';
 
+    /** The rest of a sentence whose first words were handed over ends there too, however short it is. */
+    private const string REST = '/^.+?(?:' . self::END . '|(?=\n))/su';
+
     /** A word and the space after it, once the next word of the same line has begun: only then is it known to be whole. */
     private const string WORD = '/\G(\S+)[^\S\n]+(?=\S)/u';
 
@@ -45,6 +48,9 @@ final class SentenceSplitter
 
     /** Whether anything was handed over yet: only the start of the text is handed over before its sentence is whole. */
     private bool $started = false;
+
+    /** Whether the first words were handed over, and the rest of their sentence was not yet. */
+    private bool $cut = false;
 
     /**
      * @param Closure(string $sentence): void $onSentence Called with each complete sentence.
@@ -62,14 +68,18 @@ final class SentenceSplitter
     {
         $this->text = ltrim($this->text . $text);
 
-        while (preg_match(self::SENTENCE, $this->text, $match) === 1) {
+        // The rest of a sentence that was cut is not joined to the next one when it is short: the voice has
+        // spoken its start, and whoever listens waits for its end.
+        while (preg_match($this->cut ? self::REST : self::SENTENCE, $this->text, $match) === 1) {
             $this->started = true;
+            $this->cut = false;
             $this->text = ltrim(substr($this->text, strlen($match[0])));
             ($this->onSentence)($match[0]);
         }
 
         if (! $this->started && $this->firstWords > 0 && ($words = $this->firstWords()) !== null) {
             $this->started = true;
+            $this->cut = true;
             $this->text = substr($this->text, strlen($words));
             ($this->onSentence)(rtrim($words));
         }
@@ -79,9 +89,10 @@ final class SentenceSplitter
      * The first words of the text, with the space after them, once there are enough of them and the text can be
      * cut after them: null until then.
      *
-     * It is not cut before {@see MIN_CHARACTERS}, like a sentence, nor inside a number ("60 to 90 seconds",
-     * "3 000") or a name ("New York", "Dr. Jane Miller"): a voice reads each piece on its own, and would read
-     * the two halves as two things. It then goes on to the next word after which it can be.
+     * It is not cut before {@see MIN_CHARACTERS}, like a sentence, nor next to a number ("60 to 90 seconds",
+     * "3 000") or between two capitalized words, as in most names ("New York", "Dr. Jane Miller"): a voice
+     * reads each piece on its own, and would read the two halves as two things. It then goes on to the next
+     * word after which it can be. A name with a small word in it ("Ludwig van Beethoven") can still be cut.
      */
     private function firstWords(): ?string
     {

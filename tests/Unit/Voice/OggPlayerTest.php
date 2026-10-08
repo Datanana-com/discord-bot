@@ -361,6 +361,20 @@ final class OggPlayerTest extends TestCase
         $this->assertSame(1, $this->silence(), 'The stream ends as after any sentence.');
     }
 
+    public function testIsReadyForASentenceFromTheFirstOfItsStream(): void
+    {
+        $sentence = $this->sentence();
+        $ready = false;
+        $this->player()->ready($sentence)->then(function () use (&$ready) {
+            $ready = true;
+        });
+        $this->assertFalse($ready);
+
+        $sentence->write(substr(Ogg::opus(['a1', 'a2'], perPage: 1), 0, -strlen(Ogg::page(['a2'], 3, Ogg::LAST))));
+
+        $this->assertTrue($ready, 'It does not wait for the encoder to end.');
+    }
+
     public function testWaitsForAPacketThatComesLaterThanItsTurnAndGoesOnWithoutABurst(): void
     {
         $player = $this->player();
@@ -497,17 +511,18 @@ final class OggPlayerTest extends TestCase
         $this->assertSame(5, $this->silence());
         $this->assertSame(VoiceClient::NOT_SPEAKING, end($this->speaking)[1]);
 
-        // The encoder goes on, for nobody.
-        $sentence->write(substr($stream, $first));
-        $sentence->end();
-        $this->assertSame(['a1'], $this->audio());
-        $this->assertSame([], $this->loop->pending());
-
-        // The next sentence waits for nothing: what comes of it while it plays is sent at its turn.
+        // The next sentence is played, and the encoder of the one that was cut goes on, for nobody: nothing of
+        // the next one is sent before its turn for that, and no second timer sends it at twice the pace.
         $next = $this->sentence();
         $next->write(substr($stream, 0, $first));
         $player->play($next);
         $this->tick();
+        $sentence->write(substr($stream, $first));
+        $sentence->end();
+        $this->assertSame(['a1', 'a1'], $this->audio());
+        $this->assertCount(1, $this->loop->pending());
+
+        // Nor is what comes of the next one itself, while it plays.
         $next->write(substr($stream, $first));
         $this->assertSame(['a1', 'a1'], $this->audio());
         $this->assertEqualsWithDelta(OggPlayer::FRAME, $this->tick(), 1e-9);

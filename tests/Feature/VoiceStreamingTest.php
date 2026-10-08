@@ -255,6 +255,28 @@ final class VoiceStreamingTest extends VoiceTestCase
         $this->assertSame([], $this->loggedProblems());
     }
 
+    public function testLooksWhetherASentenceIsStillWantedWhenTheLibraryCanStartOnIt(): void
+    {
+        // The sentence's ffmpeg has written the first of it, and takes its time over the rest.
+        touch($hold = "{$this->recordings}/ffmpeg.hold");
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is a quarter past four.'), 'FAKE_FFMPEG_HOLD' => $hold, 'FAKE_FFMPEG_STARTS' => '1']);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->sent !== [] && $this->givenToPiper() !== [], 'the answer to be posted, and its sentence to be with its ffmpeg');
+        $this->runFor(0.3);
+
+        // The voice library plays files, so it can't start yet. Alice opts out meanwhile: it never does.
+        VoiceSession::optOut('555');
+        unlink($hold);
+        $this->runFor(0.5);
+
+        $this->assertSame([], $this->played);
+        $this->assertSame([], $this->logged('Started speaking'));
+        $this->waitUntil(fn () => glob("{$session->directory}/claude-*") === [], 'the file of the sentence nobody heard to be gone');
+        VoiceSession::optIn('555');
+    }
+
     public function testSpeaksSentenceBySentenceAndSaysSoWhenTheFirstWordsAreNotANumber(): void
     {
         $this->setEnv(['VOICE_FIRST_WORDS' => 'five']);

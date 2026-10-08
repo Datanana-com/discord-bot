@@ -87,6 +87,24 @@ final class LibraryPlayerTest extends TestCase
         $this->assertSame([['It is a quarter past four.'], true, true], [$played, $started, $over]);
     }
 
+    public function testIsReadyForASentenceOnceItsFileIsWhole(): void
+    {
+        $vc = static::getStubBuilder(VoiceClient::class)->disableOriginalConstructor()->getStub();
+        $sentence = new Sentence("{$this->directory}/claude-7.ogg", resolve(null));
+        $ready = false;
+        (new LibraryPlayer($vc))->ready($sentence)->then(function () use (&$ready) {
+            $ready = true;
+        });
+
+        // Whoever plays a sentence looks whether it is still wanted when the player is ready, and not before:
+        // the library can't start on the first packets, so what is looked at then could change before it does.
+        $sentence->write('It is a quarter');
+        $this->assertFalse($ready);
+
+        $sentence->end();
+        $this->assertTrue($ready);
+    }
+
     public function testDoesNotPlayASentenceThatBecameWholeAfterItWasStopped(): void
     {
         $vc = $this->getMockBuilder(VoiceClient::class)->disableOriginalConstructor()->onlyMethods(['playFile', 'stop'])->getMock();

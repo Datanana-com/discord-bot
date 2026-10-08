@@ -17,7 +17,16 @@ use React\Promise\PromiseInterface;
 interface Player
 {
     /**
-     * @param Sentence $sentence One whose stream has started: see {@see Sentence::started()}.
+     * @return PromiseInterface<null> Resolves once the player could start on the sentence, were it given it now:
+     *                                {@see OggPlayer} from its first packet, {@see LibraryPlayer} once its file
+     *                                is whole. Rejects when the sentence failed before that. Whoever plays a
+     *                                sentence waits for this first, and only then looks whether it is still
+     *                                wanted: nothing may change between that look and the sentence being heard.
+     */
+    public function ready(Sentence $sentence): PromiseInterface;
+
+    /**
+     * @param Sentence $sentence One the player is ready for: see {@see ready()}.
      * @param (callable(): void)|null $onStart Called when the first packet of the sentence is sent: the moment
      *                                         the call starts hearing it.
      * @return PromiseInterface<null> Resolves once the whole sentence was sent. Rejects when it can't be played

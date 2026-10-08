@@ -23,11 +23,17 @@ final class LibraryPlayer implements Player
     {
     }
 
+    public function ready(Sentence $sentence): PromiseInterface
+    {
+        // The library plays files, and the sentence's is written once all of it is encoded.
+        return $sentence->whole();
+    }
+
     public function play(Sentence $sentence, ?callable $onStart = null): PromiseInterface
     {
         $stops = $this->stops;
 
-        // The library plays files, and the sentence's is written once all of it is encoded.
+        // At once for a sentence it is ready for. One that was given sooner is played when its file is there.
         return $sentence->whole()->then(function () use ($sentence, $onStart, $stops) {
             if ($stops !== $this->stops) {
                 return null;

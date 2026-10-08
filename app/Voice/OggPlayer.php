@@ -86,6 +86,11 @@ final class OggPlayer implements Player
         $this->clock = $clock === null ? static fn (): float => hrtime(true) / 1e9 : $clock(...);
     }
 
+    public function ready(Sentence $sentence): PromiseInterface
+    {
+        return $sentence->started();
+    }
+
     public function play(Sentence $sentence, ?callable $onStart = null): PromiseInterface
     {
         try {

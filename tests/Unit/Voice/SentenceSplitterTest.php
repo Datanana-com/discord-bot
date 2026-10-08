@@ -50,15 +50,48 @@ final class SentenceSplitterTest extends TestCase
         $splitter->push(' o');
         $this->assertSame(['The sky looks blue because'], $this->sentences);
 
+        // Only once: the words after them wait for their sentence.
+        $splitter->push('f how sunlight scatters off all the');
+        $this->assertSame(['The sky looks blue because'], $this->sentences);
+
         // The rest of the sentence is the next piece, and after it only whole sentences are handed over.
-        $splitter->push('f how sunlight scatters off the air. It');
-        $this->assertSame(['The sky looks blue because', 'of how sunlight scatters off the air.'], $this->sentences);
+        $splitter->push(' air. It');
+        $this->assertSame(['The sky looks blue because', 'of how sunlight scatters off all the air.'], $this->sentences);
 
         $splitter->push(' happens every single day above all of us');
-        $this->assertSame(['The sky looks blue because', 'of how sunlight scatters off the air.'], $this->sentences);
+        $this->assertSame(['The sky looks blue because', 'of how sunlight scatters off all the air.'], $this->sentences);
 
         $splitter->flush();
-        $this->assertSame(['The sky looks blue because', 'of how sunlight scatters off the air.', 'It happens every single day above all of us'], $this->sentences);
+        $this->assertSame(['The sky looks blue because', 'of how sunlight scatters off all the air.', 'It happens every single day above all of us'], $this->sentences);
+    }
+
+    public function testHandsOverTheRestOfTheCutSentenceAsSoonAsItEndsHoweverShortItIs(): void
+    {
+        $splitter = $this->firstWords(5);
+
+        $splitter->push('Yes, it is a nice day o');
+        $this->assertSame(['Yes, it is a nice day'], $this->sentences);
+
+        // A sentence this short would be joined to the next one: but the voice has said the start of this one,
+        // and whoever listens waits for its end, not for Claude to write another sentence.
+        $splitter->push('utside.');
+        $this->assertSame(['Yes, it is a nice day'], $this->sentences, 'The dot could still be one in "outside.com".');
+        $splitter->push(' Sure.');
+        $this->assertSame(['Yes, it is a nice day', 'outside.'], $this->sentences);
+
+        // After it, a very short sentence is joined to the next one as ever.
+        $splitter->push(' Tomorrow we will see more of it. And');
+        $this->assertSame(['Yes, it is a nice day', 'outside.', 'Sure. Tomorrow we will see more of it.'], $this->sentences);
+    }
+
+    public function testTheRestOfTheCutSentenceEndsWithItsLine(): void
+    {
+        $splitter = $this->firstWords(5);
+
+        $splitter->push('Yes, it is a nice day o');
+        $splitter->push("ut\nAnd so");
+
+        $this->assertSame(['Yes, it is a nice day', 'out'], $this->sentences);
     }
 
     public function testHandsOverNoFirstWordsOfATextWhoseFirstSentenceIsAlreadyWhole(): void
