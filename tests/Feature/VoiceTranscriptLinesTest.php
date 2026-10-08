@@ -40,7 +40,8 @@ final class VoiceTranscriptLinesTest extends VoiceTestCase
             $this->untimed($this->transcript($session)),
         );
         // It is what the answers are asked with, and the posts under what they said are still under their name.
-        $this->assertStringContainsString("Claude (member): " . self::QUESTION . "\nClaude: Hello.\n", $this->claudeCalls()[1]['prompt']);
+        $this->assertStringContainsString("Claude (member): " . self::QUESTION . "\nClaude: Hello.\n", $this->untimed($this->claudeCalls()[1]['prompt']));
+        $this->assertStringEndsWith("\n\nAnswer Looked up for Alice (member). What they ask is often about what was said in the call before, by anyone in it.", $this->claudeCalls()[1]['prompt']);
         $this->assertSame(['> **Claude:** ' . self::QUESTION . "\nHello.", '> **Looked up for Alice:** Hey Claude, and in Lisbon?' . "\nHello."], $this->sent);
     }
 

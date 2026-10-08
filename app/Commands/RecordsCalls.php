@@ -114,8 +114,8 @@ trait RecordsCalls
 
         return ($name === ''
             ? 'I answer everything that is said.'
-            // The first of the stop phrase's spellings, like the wake word's.
-            : "Say \"{$name}\" to talk to me, and \"" . VoiceSession::wakeWordName($session->stopPhrase) . '" when you\'re done.')
+            // Every question needs it: nothing is answered because of what someone said before.
+            : "I only answer what is said with \"{$name}\" in it: say it with every question.")
             . ($leave === '' ? '' : " Say \"{$leave}\" to make me leave.");
     }
 

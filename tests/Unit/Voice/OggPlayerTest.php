@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Unit\Voice;
 
 use App\Voice\OggPlayer;
+use App\Voice\Sentence;
 use Discord\Voice\Rtp\UDP;
 use Discord\Voice\VoiceClient;
 use PHPUnit\Framework\TestCase;
@@ -14,6 +15,8 @@ use RuntimeException;
 use Tests\Fixtures\ManualTimers;
 use Tests\Ogg;
 use Throwable;
+
+use function React\Promise\resolve;
 
 final class OggPlayerTest extends TestCase
 {
@@ -284,10 +287,12 @@ final class OggPlayerTest extends TestCase
     public function testRefusesAFileThatIsNotOggOpus(): void
     {
         $player = $this->player();
-        file_put_contents($wav = "{$this->directory}/not.ogg", 'RIFF....WAVEfmt ');
+        $wav = $this->whole('RIFF....WAVEfmt ');
 
-        $this->assertRejected($player->play($wav), "Could not play {$wav}: Not an Ogg Opus file: it does not start with the OpusHead and OpusTags headers.");
-        $this->assertRejected($player->play("{$this->directory}/missing.ogg"), "Could not read {$this->directory}/missing.ogg.");
+        $this->assertRejected($player->play($wav), "Could not play {$wav->path}: Not an Ogg Opus file: it does not start with the OpusHead and OpusTags headers.");
+        // Nor one of nothing at all.
+        $nothing = $this->whole('');
+        $this->assertRejected($player->play($nothing), "Could not play {$nothing->path}: Not an Ogg Opus file: it does not start with the OpusHead and OpusTags headers.");
         $this->assertSame([], $this->speaking, 'Nothing was played.');
         $this->assertSame([], $this->loop->pending());
     }
@@ -295,9 +300,7 @@ final class OggPlayerTest extends TestCase
     public function testPlaysWhatIsWholeOfAFileThatIsCutOff(): void
     {
         $player = $this->player();
-        file_put_contents($cut = "{$this->directory}/cut.ogg", substr(Ogg::opus(['a1', 'a2', str_repeat('a3', 100)], perPage: 1), 0, -5));
-
-        $player->play($cut);
+        $player->play($this->whole(substr(Ogg::opus(['a1', 'a2', str_repeat('a3', 100)], perPage: 1), 0, -5)));
         $this->tick();
         $this->tick();
         $this->tick();
@@ -318,6 +321,229 @@ final class OggPlayerTest extends TestCase
         $this->assertTrue($over);
         $this->assertSame([], $this->audio());
         $this->assertSame(1, $this->silence());
+    }
+
+    public function testPlaysASentenceWhileTheRestOfItStillComesFromTheEncoder(): void
+    {
+        $player = $this->player();
+        $stream = Ogg::opus(['a1', 'a2', 'a3'], perPage: 1);
+        $pages = [strlen($stream) - 2 * strlen(Ogg::page(['a2'], 3)), strlen(Ogg::page(['a2'], 3))];
+        $sentence = $this->sentence();
+        $startedAt = null;
+        $over = false;
+
+        // The headers and the first packet are there: it is played from here.
+        $sentence->write(substr($stream, 0, $pages[0]));
+        $player->play($sentence, function () use (&$startedAt) {
+            $startedAt = $this->now;
+        })->then(function () use (&$over) {
+            $over = true;
+        });
+        $this->assertEqualsWithDelta(OggPlayer::HEAD_START, $this->tick(), 1e-9);
+        $this->assertSame(['a1'], $this->audio());
+        $this->assertSame($this->now, $startedAt);
+
+        // The encoder is faster than the sentence is long: the next packets are there before their turn.
+        $sentence->write(substr($stream, $pages[0]));
+        $this->assertSame(['a1'], $this->audio(), 'A packet that came is sent at its own time, not when it came.');
+        $this->assertEqualsWithDelta(OggPlayer::FRAME, $this->tick(), 1e-9);
+        $this->assertEqualsWithDelta(OggPlayer::FRAME, $this->tick(), 1e-9);
+        $this->assertSame(['a1', 'a2', 'a3'], $this->audio());
+
+        // All that came was sent, and the encoder has not ended: the sentence is not over.
+        $this->tick();
+        $this->assertFalse($over);
+        $this->assertSame(0, $this->silence());
+        $this->assertSame([], $this->loop->pending(), 'Nothing to send until the encoder says more.');
+
+        $sentence->end();
+        $this->assertTrue($over);
+        $this->assertSame(1, $this->silence(), 'The stream ends as after any sentence.');
+    }
+
+    public function testIsReadyForASentenceFromTheFirstOfItsStream(): void
+    {
+        $sentence = $this->sentence();
+        $ready = false;
+        $this->player()->ready($sentence)->then(function () use (&$ready) {
+            $ready = true;
+        });
+        $this->assertFalse($ready);
+
+        $sentence->write(substr(Ogg::opus(['a1', 'a2'], perPage: 1), 0, -strlen(Ogg::page(['a2'], 3, Ogg::LAST))));
+
+        $this->assertTrue($ready, 'It does not wait for the encoder to end.');
+    }
+
+    public function testWaitsForAPacketThatComesLaterThanItsTurnAndGoesOnWithoutABurst(): void
+    {
+        $player = $this->player();
+        $stream = Ogg::opus(['a1', 'a2', 'a3', 'a4'], perPage: 1);
+        $page = strlen(Ogg::page(['a2'], 3));
+        $first = strlen($stream) - 3 * $page;
+        $sentence = $this->sentence();
+        $over = false;
+        $sentence->write(substr($stream, 0, $first));
+        $player->play($sentence)->then(function () use (&$over) {
+            $over = true;
+        });
+        $this->tick();
+
+        // The voice is slower than it speaks: at the second packet's turn, the encoder has not written it.
+        $this->tick();
+        $this->assertSame(['a1'], $this->audio());
+        $this->assertSame(0, $this->silence(), 'The hole is not filled with silence: the sentence is not over.');
+        $this->assertSame([], $this->loop->pending());
+        $this->assertFalse($over);
+
+        // It comes 70 ms late, with the one after it: one is sent at once, and the other a frame later, not both at once.
+        $this->now += 0.07;
+        $sentence->write(substr($stream, $first, 2 * $page));
+        $this->assertSame(['a1', 'a2'], $this->audio());
+        $this->assertSame($this->now, $this->sent[1][0]);
+        $this->assertEqualsWithDelta(OggPlayer::FRAME, $this->tick(), 1e-9);
+        $this->assertSame(['a1', 'a2', 'a3'], $this->audio());
+
+        // Starved again, and then the encoder ends having written its last packet meanwhile.
+        $this->tick();
+        $this->now += 0.5;
+        $sentence->write(substr($stream, $first + 2 * $page));
+        $this->assertSame(['a1', 'a2', 'a3', 'a4'], $this->audio());
+        $sentence->end();
+        $this->assertFalse($over, 'The last packet has its 20 ms before the sentence is over.');
+        $this->assertEqualsWithDelta(OggPlayer::FRAME, $this->tick(), 1e-9);
+        $this->assertTrue($over);
+        $this->assertSame(1, $this->silence());
+    }
+
+    public function testASentenceGivenBeforeItsFirstPacketCameStartsWhenThatComes(): void
+    {
+        $player = $this->player();
+        $stream = Ogg::opus(['a1'], perPage: 1);
+        $headers = strlen($stream) - strlen(Ogg::page(['a1'], 2, Ogg::LAST));
+        $sentence = $this->sentence();
+        $startedAt = null;
+        $sentence->write(substr($stream, 0, $headers));
+        $player->play($sentence, function () use (&$startedAt) {
+            $startedAt = $this->now;
+        });
+
+        $this->tick();
+        $this->assertNull($startedAt);
+        $this->assertSame([], $this->sent);
+
+        $this->now += 0.01;
+        $sentence->write(substr($stream, $headers));
+
+        $this->assertSame($this->now, $startedAt);
+        $this->assertSame(['a1'], $this->audio());
+    }
+
+    public function testASentenceWhoseEncoderFailsIsPlayedAsFarAsItCameAndThenFails(): void
+    {
+        $player = $this->player();
+        $stream = Ogg::opus(['a1', 'a2'], perPage: 1);
+        $sentence = $this->sentence();
+        $sentence->write(substr($stream, 0, strlen($stream) - strlen(Ogg::page(['a2'], 3, Ogg::LAST))));
+        $failed = $player->play($sentence);
+        $next = false;
+        $player->play($this->file('b1'))->then(function () use (&$next) {
+            $next = true;
+        });
+        $this->tick();
+
+        // The encoder ends in the middle of the sentence, before the player ran out of packets.
+        $sentence->fail(new RuntimeException('ffmpeg exited with code 1'));
+        $this->assertSame(['a1'], $this->audio());
+
+        $this->tick();
+        $this->assertRejected($failed, 'ffmpeg exited with code 1');
+        // What waited behind it is played in its place, in the same stream.
+        $this->assertSame(['a1', 'b1'], $this->audio());
+        $this->tick();
+        $this->assertTrue($next);
+
+        // One that fails while the player waits for its next packet fails at once.
+        $starved = $this->sentence();
+        $starved->write(substr($stream, 0, strlen($stream) - strlen(Ogg::page(['a2'], 3, Ogg::LAST))));
+        $failed = $player->play($starved);
+        $this->tick();
+        $this->tick();
+        $this->assertSame([], $this->loop->pending());
+        $starved->fail(new RuntimeException('ffmpeg timed out after 120s'));
+        $this->assertRejected($failed, 'ffmpeg timed out after 120s');
+        $this->assertSame(['a1', 'b1', 'a1'], $this->audio());
+        $this->assertCount(1, $this->loop->pending(), 'The stream ends with its silence.');
+    }
+
+    public function testASentenceThatTurnsOutNotToBeOpusWhileItPlaysFails(): void
+    {
+        $player = $this->player();
+        $sentence = $this->sentence();
+        // The start of a page, as far as anyone can tell.
+        $sentence->write('Og');
+        $failed = $player->play($sentence);
+        $sentence->write('g, what is this?');
+        $this->tick();
+
+        $this->assertRejected($failed, "Could not play {$sentence->path}: Not an Ogg Opus file: it does not start with the OpusHead and OpusTags headers.");
+        $this->assertSame([], $this->audio());
+    }
+
+    public function testStopWhileItWaitsForAPacketEndsTheStreamAndWhatComesLaterIsNotSent(): void
+    {
+        $player = $this->player();
+        $stream = Ogg::opus(['a1', 'a2'], perPage: 1);
+        $first = strlen($stream) - strlen(Ogg::page(['a2'], 3, Ogg::LAST));
+        $sentence = $this->sentence();
+        $result = 'nothing yet';
+        $sentence->write(substr($stream, 0, $first));
+        $player->play($sentence)->then(function ($value) use (&$result) {
+            $result = $value;
+        });
+        $this->tick();
+        $this->tick();
+        $this->assertSame([], $this->loop->pending());
+
+        $player->stop();
+
+        $this->assertNull($result);
+        $this->assertSame(5, $this->silence());
+        $this->assertSame(VoiceClient::NOT_SPEAKING, end($this->speaking)[1]);
+
+        // The next sentence is played, and the encoder of the one that was cut goes on, for nobody: nothing of
+        // the next one is sent before its turn for that, and no second timer sends it at twice the pace.
+        $next = $this->sentence();
+        $next->write(substr($stream, 0, $first));
+        $player->play($next);
+        $this->tick();
+        $sentence->write(substr($stream, $first));
+        $sentence->end();
+        $this->assertSame(['a1', 'a1'], $this->audio());
+        $this->assertCount(1, $this->loop->pending());
+
+        // Nor is what comes of the next one itself, while it plays.
+        $next->write(substr($stream, $first));
+        $this->assertSame(['a1', 'a1'], $this->audio());
+        $this->assertEqualsWithDelta(OggPlayer::FRAME, $this->tick(), 1e-9);
+        $this->assertSame(['a1', 'a1', 'a2'], $this->audio());
+        $player->stop();
+
+        // A sentence that waits behind the one being played, and gets its packets meanwhile, changes nothing either.
+        $playing = $this->sentence();
+        $playing->write(substr($stream, 0, $first));
+        $waiting = $this->sentence();
+        $waiting->write(substr($stream, 0, $first));
+        $player->play($playing);
+        $player->play($waiting);
+        $this->tick();
+        $this->tick();
+        $waiting->write(substr($stream, $first));
+        $this->assertSame([], $this->loop->pending(), 'The one being played still waits for its own packet.');
+        $this->assertSame(['a1', 'a1', 'a2', 'a1'], $this->audio());
+        $playing->write(substr($stream, $first));
+        $this->assertSame(['a1', 'a1', 'a2', 'a1', 'a2'], $this->audio());
+        $player->stop();
     }
 
     public function testRejectsWhenTheVoiceClientIsNotReady(): void
@@ -399,14 +625,33 @@ final class OggPlayerTest extends TestCase
     }
 
     /**
-     * An Ogg Opus file of these packets, in the test's folder.
+     * A sentence that is whole, of these packets: its file is in the test's folder.
      */
-    private function file(string ...$packets): string
+    private function file(string ...$packets): Sentence
+    {
+        return $this->whole(Ogg::opus($packets));
+    }
+
+    /**
+     * A sentence that is whole, of these bytes.
+     */
+    private function whole(string $bytes): Sentence
+    {
+        $sentence = $this->sentence();
+        $sentence->write($bytes);
+        $sentence->end();
+
+        return $sentence;
+    }
+
+    /**
+     * A sentence the voice has spoken, of which nothing has come from the encoder yet.
+     */
+    private function sentence(): Sentence
     {
         static $number = 0;
-        file_put_contents($path = sprintf('%s/%d.ogg', $this->directory, ++$number), Ogg::opus($packets));
 
-        return $path;
+        return new Sentence(sprintf('%s/%d.ogg', $this->directory, ++$number), resolve(null));
     }
 
     /**

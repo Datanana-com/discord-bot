@@ -53,33 +53,6 @@ final class VoiceLookupGivenUpTest extends VoiceTestCase
         }, $what, $timeout);
     }
 
-    public function testTellingWhatWasLookedUpKeepsTheirConversationOpen(): void
-    {
-        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
-
-        // Saying the wake word opened Alice's conversation, which a minute of quiet closes.
-        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
-        $this->waitUntil(fn () => count($this->claudeCalls()) === 2 && in_array(60.0, $this->timers->pending(), true), 'the lookup to start');
-
-        // What was found arrives, and Claude is still telling it when that minute is over.
-        $this->setProcessEnv([
-            'FAKE_CLAUDE_OUTPUT' => self::claudeStream('PHP 8.5.11 is the latest stable version. ', 'It is from late September.'),
-            'FAKE_CLAUDE_PAUSE' => '10',
-        ]);
-        touch($this->go);
-        $this->waitUntil(fn () => count($this->claudeCalls()) === 3 && count($this->played) === 2, 'Claude to start telling it');
-        $this->assertSame(1, $this->timers->elapse(60.0));
-
-        // It counts as answering her: her conversation stays open, and a minute starts again once it is told.
-        $this->assertSame([], $this->logged('Conversation closed'));
-        touch($this->claudeResume);
-        $this->waitUntil(fn () => count($this->sent) === 3 && in_array(60.0, $this->timers->pending(), true), 'it to be told');
-        $this->assertSame([], $this->logged('Conversation closed'));
-
-        $this->assertSame(1, $this->timers->elapse(60.0));
-        $this->assertSame(['quiet'], array_column($this->logged('Conversation closed'), 'reason'));
-    }
-
     public function testPostsAndSaysThatALookupTookTooLong(): void
     {
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);

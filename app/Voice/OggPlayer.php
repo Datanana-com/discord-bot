@@ -17,24 +17,27 @@ use Throwable;
 use function React\Promise\reject;
 
 /**
- * Plays Ogg Opus files by sending their packets to Discord itself, one every 20 ms, from the moment a file is
- * given to it.
+ * Plays sentences by sending their Opus packets to Discord itself, one every 20 ms, from the moment a sentence
+ * is given to it: also while the rest of its packets still come from the encoder.
  *
  * The voice library's playFile() starts an ffmpeg for every file and waits half a second before it sends the
- * first packet, which is also the gap between two sentences of an answer. Piper's sentences are already Ogg Opus
- * files, so there is nothing to convert and nothing to wait for: the first packet goes out after a short head
- * start, and a file given while another plays follows it in the same stream, without a gap.
+ * first packet, which is also the gap between two sentences of an answer. A sentence is already Ogg Opus when it
+ * gets here, so there is nothing to convert and nothing to wait for: the first packet goes out after a short head
+ * start, and a sentence given while another plays follows it in the same stream, without a gap.
  *
  * A stream is the speaking flag on, the packets at their pace, five frames of silence, as Discord asks, so that
- * the listeners' decoders let out what they still hold, and the speaking flag off. A file that comes during the
- * silence goes on with the stream instead.
+ * the listeners' decoders let out what they still hold, and the speaking flag off. A sentence that comes during
+ * the silence goes on with the stream instead.
+ *
+ * When a sentence's next packet has not come yet, as with a voice slower than it speaks, nothing is sent until
+ * it has: the sentence goes on from there at its pace, without a burst to make up for the wait.
  */
 final class OggPlayer implements Player
 {
     /** Seconds between two packets: a packet is 20 ms of audio. */
     public const float FRAME = 0.02;
 
-    /** Seconds from a file being given, while nothing plays, to its first packet: time for the speaking flag to reach the listeners first. */
+    /** Seconds from a sentence being given, while nothing plays, to its first packet: time for the speaking flag to reach the listeners first. */
     public const float HEAD_START = 0.04;
 
     /** Frames of silence that end a stream. */
@@ -43,11 +46,14 @@ final class OggPlayer implements Player
     /** A packet later than this is sent at once, and the pace starts over from it: no burst of late packets after the loop stalled. */
     private const float LATE = 0.1;
 
-    /** @var list<array{packets: list<string>, onStart: (callable(): void)|null, done: Deferred<null>}> The files waiting to be played, in order. */
+    /** @var list<array{sentence: Sentence, onStart: (callable(): void)|null, done: Deferred<null>}> The sentences waiting to be played, in order. */
     private array $queue = [];
 
-    /** @var array{packets: list<string>, sent: int, onStart: (callable(): void)|null, done: Deferred<null>}|null The file being played. */
+    /** @var array{sentence: Sentence, sent: int, onStart: (callable(): void)|null, done: Deferred<null>}|null The sentence being played. */
     private ?array $current = null;
+
+    /** Whether the sentence being played waits for its next packet to come from the encoder: no timer is armed meanwhile. */
+    private bool $starved = false;
 
     /** Whether a stream is going: the speaking flag is on. */
     private bool $streaming = false;
@@ -60,7 +66,7 @@ final class OggPlayer implements Player
 
     private ?TimerInterface $timer = null;
 
-    /** Counts the stops: what a tick calls out to (the waiter of a file that is over, the first packet's callback) may stop the player, and the tick checks this before it goes on. */
+    /** Counts the stops: what a tick calls out to (the waiter of a sentence that is over, the first packet's callback) may stop the player, and the tick checks this before it goes on. */
     private int $generation = 0;
 
     private readonly Closure $clock;
@@ -80,22 +86,23 @@ final class OggPlayer implements Player
         $this->clock = $clock === null ? static fn (): float => hrtime(true) / 1e9 : $clock(...);
     }
 
-    public function play(string $path, ?callable $onStart = null): PromiseInterface
+    public function ready(Sentence $sentence): PromiseInterface
     {
-        $bytes = @file_get_contents($path);
+        return $sentence->started();
+    }
 
-        if ($bytes === false) {
-            return reject(new RuntimeException("Could not read {$path}."));
-        }
-
+    public function play(Sentence $sentence, ?callable $onStart = null): PromiseInterface
+    {
         try {
-            $packets = OggOpus::packets($bytes);
+            // What came of it so far says whether it can be played at all.
+            $sentence->packets();
         } catch (RuntimeException $e) {
-            return reject(new RuntimeException("Could not play {$path}: {$e->getMessage()}", previous: $e));
+            return reject(self::unplayable($sentence, $e));
         }
 
         $done = new Deferred();
-        $this->queue[] = ['packets' => $packets, 'onStart' => $onStart, 'done' => $done];
+        $this->queue[] = ['sentence' => $sentence, 'onStart' => $onStart, 'done' => $done];
+        $sentence->watch($this->came(...));
 
         if (! $this->streaming) {
             $this->begin();
@@ -112,6 +119,7 @@ final class OggPlayer implements Player
         $this->current = null;
         $this->queue = [];
         $this->silence = 0;
+        $this->starved = false;
 
         if ($this->streaming) {
             $this->streaming = false;
@@ -130,7 +138,7 @@ final class OggPlayer implements Player
     }
 
     /**
-     * Starts a stream for the files in the queue.
+     * Starts a stream for the sentences in the queue.
      */
     private function begin(): void
     {
@@ -151,7 +159,7 @@ final class OggPlayer implements Player
     }
 
     /**
-     * Sends what is due now: the next packet of the file, a frame of silence, or the end of the stream.
+     * Sends what is due now: the next packet of the sentence, a frame of silence, or the end of the stream.
      */
     private function tick(): void
     {
@@ -176,12 +184,34 @@ final class OggPlayer implements Player
             }
         }
 
-        if ($this->current['sent'] === count($this->current['packets'])) {
+        $sentence = $this->current['sentence'];
+
+        try {
+            $packets = $sentence->packets();
+            $failure = $sentence->failure();
+        } catch (RuntimeException $e) {
+            $packets = [];
+            $failure = self::unplayable($sentence, $e);
+        }
+
+        if ($this->current['sent'] >= count($packets)) {
+            // The encoder has not come this far yet: the slot goes by, and the sentence goes on when its next packet is there.
+            if ($failure === null && ! $sentence->isOver()) {
+                $this->starved = true;
+
+                return;
+            }
+
             $done = $this->current['done'];
             $this->current = null;
             $this->silence = self::SILENCE_FRAMES;
-            // Whoever waited for the file may give the next one now, which then takes this slot: no gap between two sentences.
-            $done->resolve(null);
+
+            // Whoever waited for the sentence may give the next one now, which then takes this slot: no gap between two sentences.
+            if ($failure === null) {
+                $done->resolve(null);
+            } else {
+                $done->reject($failure);
+            }
 
             if ($generation === $this->generation) {
                 $this->tick();
@@ -190,7 +220,7 @@ final class OggPlayer implements Player
             return;
         }
 
-        $this->send($this->current['packets'][$this->current['sent']++]);
+        $this->send($packets[$this->current['sent']++]);
 
         if ($this->current['sent'] === 1 && $this->current['onStart'] !== null) {
             ($this->current['onStart'])();
@@ -202,6 +232,27 @@ final class OggPlayer implements Player
         }
 
         $this->schedule();
+    }
+
+    /**
+     * More of a sentence came from its encoder, or it is over: when the one being played waited for its next
+     * packet, it goes on now, and the pace starts over from here. When it was another sentence, the one being
+     * played finds nothing and waits again.
+     */
+    private function came(): void
+    {
+        if (! $this->starved) {
+            return;
+        }
+
+        $this->starved = false;
+        $this->next = ($this->clock)() + self::FRAME;
+        $this->tick();
+    }
+
+    private static function unplayable(Sentence $sentence, RuntimeException $e): RuntimeException
+    {
+        return new RuntimeException("Could not play {$sentence->path}: {$e->getMessage()}", previous: $e);
     }
 
     /**

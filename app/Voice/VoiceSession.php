@@ -39,9 +39,12 @@ use function React\Promise\resolve;
  * the call with Piper, sentence by sentence while Claude is writing it, and then posted in the
  * text channel. When the call ends, Claude's summary of it is posted in the text channel as well.
  *
- * Saying the wake word opens a conversation for that person: until they say the stop phrase, are quiet
- * for a minute, opt out or the call ends, everything they say is answered, without the wake word. What
- * other people say is only answered when it mentions the wake word, which opens their own conversation.
+ * People in a call talk to each other most of the time. Only a sentence that mentions the wake word is
+ * answered, every time: nothing someone says later is answered because of an earlier one. The one exception
+ * is a sentence that is the wake word and little else ("Hey Claude."): it isn't answered, and what that
+ * person says next is their question, when they start it within a few seconds: see {@see CALLED_SECONDS}.
+ * Claude is given everything said in the call so far, by everyone who is heard, with its own answers, so
+ * that it can be asked about what people said to each other: see {@see conversation()}.
  *
  * For an answer to start soon after its question, the call keeps two programs running: a Claude
  * Code process that waits for the next question, and Piper, with its voice loaded. Both are ended
@@ -50,7 +53,7 @@ use function React\Promise\resolve;
  * Claude answers at once, without tools. What it can't answer well that way, it hands off to be
  * looked up in the background: see {@see Lookups}. The call goes on meanwhile. What was looked up
  * is posted in the text channel and added to the transcript, and Claude then tells the call what
- * was found, when it is that answer's turn. Telling it keeps their conversation open, like an answer.
+ * was found, when it is that answer's turn.
  *
  * Nothing is kept of people who opted out with /optout: they aren't recorded, transcribed or
  * answered. The voice client still receives and decodes their audio, like everyone's.
@@ -86,9 +89,6 @@ use function React\Promise\resolve;
  */
 final class VoiceSession
 {
-    /** Transcript lines given to Claude as context. */
-    private const int CONTEXT_LINES = 20;
-
     /** Personal memories shared with the call that a question's prompt holds. */
     private const int SHARED_MEMORIES = 5;
 
@@ -102,10 +102,22 @@ final class VoiceSession
     /** Characters that fit in a Discord message. */
     private const int MESSAGE_LIMIT = 2000;
 
-    /** Seconds of quiet that close someone's conversation. */
-    private const float CONVERSATION_QUIET = 60.0;
+    /**
+     * Words a sentence may have besides the wake word and still only call the bot: "Hey Claude." With more, it
+     * says something, and is answered: "Hey Claude, thanks." In Sky's calls until 2026-10-08, 17 sentences were
+     * the wake word and at most two other words: 1 had none, 13 one and 3 two.
+     */
+    private const int CALLING_WORDS = 1;
 
-    /** What the bot says when the stop phrase closed a conversation, and before it leaves a call. */
+    /**
+     * Seconds someone has, after a sentence that only called the bot, to start saying what they want from it.
+     * People pause after the name. In Sky's calls until 2026-10-08, with the bot answering in between, the next
+     * sentence started within 5 s for 4 of 17 such sentences and within 10 s for 10; a longer wait would answer
+     * what they then say to someone else.
+     */
+    private const float CALLED_SECONDS = 5.0;
+
+    /** What the bot says before it leaves a call. */
     private const string OKAY = 'Okay.';
 
     /** What the bot says in the call when something said couldn't be transcribed or answered. Never why: that is posted. */
@@ -163,8 +175,14 @@ final class VoiceSession
     /** Utterances are handled one at a time, in the order they ended. */
     private PromiseInterface $queue;
 
-    /** @var list<string> */
+    /**
+     * @var array<int, string> Everything said in the call so far, as in transcript.txt: one entry for each thing
+     *                         said, with its time, by the number it was added as. /forget takes entries out.
+     */
     private array $transcript = [];
+
+    /** How many entries the transcript was given so far: the number of the last one. */
+    private int $entries = 0;
 
     private int $files = 0;
 
@@ -190,7 +208,7 @@ final class VoiceSession
     /** @var array<string, string> Whose each clip of what was said is, by path, while it waits to be transcribed. */
     private array $clips = [];
 
-    /** @var array<string, list<string>> What was said while the same people were in the call, as in transcript.txt, by the key of their memory. */
+    /** @var array<string, array<int, string>> What was said while the same people were in the call, by the key of their memory: entries of the transcript, by their number. */
     private array $said = [];
 
     /** @var array<string, int> How often each memory was forgotten, by its key, to tell what was said before from what was said after. */
@@ -209,20 +227,23 @@ final class VoiceSession
     /** @var array<int, array{PromiseInterface<string|null>, callable(): bool}> The tasks not over, by object ID, with whether they are still wanted. */
     private array $lookingUp = [];
 
-    /** @var array<string, ?TimerInterface> Who has a conversation open, by user ID, with the timer that closes it once they are quiet. */
-    private array $conversations = [];
+    /** How many utterances, and things looked up, wait for their turn or are being answered or told: see {@see saveUsage()}. */
+    private int $turns = 0;
 
     /**
-     * @var array<string, int> How many utterances of each person, and things looked up for them, wait for
-     *                         their turn or are being answered or told, by user ID.
+     * @var array<string, float> Who only called the bot with the last thing they said, by user ID, with when that
+     *                           sentence ended, by the clock that only goes forward: see {@see CALLED_SECONDS}.
      */
-    private array $waiting = [];
+    private array $called = [];
 
     /** The Claude Code process that is already running for the next question, when there is one: see {@see wait()}. */
     private ?WaitingClaude $waitingClaude = null;
 
     /** How long someone has to be silent for what they said to be over. */
     private readonly float $pauseSeconds;
+
+    /** How many words of an answer are spoken before their sentence is whole: VOICE_FIRST_WORDS, 0 for none. */
+    private readonly int $firstWords;
 
     /**
      * The answer the bot is speaking, from its first sentence until it is over: who it is for, since when,
@@ -265,6 +286,7 @@ final class VoiceSession
         $this->queue = resolve(null);
         $this->left = new Deferred();
         $this->pauseSeconds = self::pauseSeconds() ?? UtteranceSplitter::SILENCE_SECONDS;
+        $this->firstWords = self::firstWords() ?? 0;
         $this->splitter = new UtteranceSplitter("{$directory}/utterances", $this->queueUtterance(...), $this->pauseSeconds);
     }
 
@@ -307,6 +329,24 @@ final class VoiceSession
     }
 
     /**
+     * How many words of an answer are spoken as soon as Claude has written them, before their sentence is
+     * whole: VOICE_FIRST_WORDS. 0, which it is when it isn't set, for none: an answer is spoken sentence by
+     * sentence.
+     *
+     * @return int|null Null when it is set to something that isn't a whole number, 0 or more.
+     */
+    private static function firstWords(): ?int
+    {
+        $value = trim((string) env('VOICE_FIRST_WORDS', ''));
+
+        return match (true) {
+            $value === '' => 0,
+            ctype_digit($value) => (int) $value,
+            default => null,
+        };
+    }
+
+    /**
      * How long someone has to be silent for what they said to be over: VOICE_PAUSE_SECONDS, for people
      * who pause longer in the middle of a sentence.
      *
@@ -326,9 +366,11 @@ final class VoiceSession
     }
 
     /**
-     * The phrase that ends a conversation, for a server with this wake word: "stop <spelling>" for each of
-     * its spellings, unless VOICE_STOP_PHRASE replaces it. Empty when there is no wake word, as there are no
-     * conversations then.
+     * The phrase that is never answered, for a server with this wake word: "stop <spelling>" for each of
+     * its spellings, unless VOICE_STOP_PHRASE replaces it. People say it to make the bot stop, and it holds the
+     * wake word, so without it Claude would answer "stop Claude". It stops nothing by itself: an answer is cut
+     * off by the person it is for talking over it, whatever they say. Empty when there is no wake word:
+     * everything is answered then.
      */
     public static function defaultStopPhrase(string $wakeWord): string
     {
@@ -347,7 +389,7 @@ final class VoiceSession
      * The phrase that ends the call, for a server with this wake word: "disconnect <spelling>" for each of
      * its spellings, unless VOICE_LEAVE_PHRASE replaces it. "Disconnect" alone is never the phrase: people say
      * it in a call, and leaving ends the recording for everyone. Unlike the stop phrase, the variable
-     * also applies in a server without a wake word, which has no conversations to close but a call to leave.
+     * also applies in a server without a wake word, which answers everything but still has a call to leave.
      *
      * A spelling without a letter or a number is dropped: mentions() would take it for no words to wait for,
      * and every sentence would end the call.
@@ -507,6 +549,10 @@ final class VoiceSession
             $session->log('warning', 'VOICE_PAUSE_SECONDS is not a number of seconds, 0.1 or more: what someone says ends after ' . UtteranceSplitter::SILENCE_SECONDS . ' s of silence.');
         }
 
+        if (self::firstWords() === null) {
+            $session->log('warning', 'VOICE_FIRST_WORDS is not a whole number, 0 or more: answers are spoken sentence by sentence.');
+        }
+
         if (self::playerSetting() === null) {
             $session->log('warning', 'VOICE_PLAYER is neither bot nor library: the bot sends the packets of its sentences itself.');
         }
@@ -520,13 +566,14 @@ final class VoiceSession
      * Stops recording, transcribing and answering someone in every call that isn't over, as they used /optout.
      *
      * What they say from now on is dropped, and what was recorded of them is deleted. Their lines
-     * already in the transcript stay, and their conversation is closed.
+     * already in the transcript stay, and Claude is given them with the rest of the call when someone asks it.
      */
     public static function optOut(string $userId): void
     {
         foreach (self::$unfinished as $session) {
             $session->optedOut[$userId] = true;
-            $session->closeConversation($userId, 'opted out');
+            // What they say next is nobody's question, whatever they said before.
+            unset($session->called[$userId]);
             // Their memory is no longer used for anyone, whatever they agreed to before.
             unset($session->shared[$userId]);
 
@@ -600,7 +647,7 @@ final class VoiceSession
         foreach (self::$unfinished as $session) {
             // What would have been remembered is also taken out of the transcript, which what is looked up,
             // what is answered, the summary and /recall are made from.
-            $session->removeFromTranscript($session->said[$key] ?? []);
+            $session->removeFromTranscript(array_keys($session->said[$key] ?? []));
             unset($session->said[$key]);
             $session->forgotten[$key] = ($session->forgotten[$key] ?? 0) + 1;
             // A task made of that memory may hold what they asked to forget: it is no longer looked up.
@@ -649,25 +696,36 @@ final class VoiceSession
         $spellings = self::spellings($wakeWord);
 
         foreach ($spellings as $spelling) {
-            $words = array_map(
-                fn (string $word) => preg_quote($word, '/'),
-                // What has no letters or numbers, like the dash in "Hey - Jarvis", is between words, where nothing counts.
-                preg_grep('/[\p{L}\p{N}]/u', preg_split('/\s+/u', $spelling, flags: PREG_SPLIT_NO_EMPTY)),
-            );
+            $pattern = self::pattern($spelling);
 
-            // Nothing but such characters: no word to wait for, like an empty wake word.
-            if ($words === []) {
-                return true;
-            }
-
-            // Between two of its words: anything but letters, their accents, and numbers. Around it too:
-            // \b would also end a word before a vowel sign, which is how Hindi or Bengali write vowels.
-            if (preg_match('/(?<![\p{L}\p{M}\p{N}])' . implode('[^\p{L}\p{M}\p{N}]+', $words) . '(?![\p{L}\p{M}\p{N}])/iu', $text) === 1) {
+            // No word to wait for, like an empty wake word.
+            if ($pattern === null || preg_match($pattern, $text) === 1) {
                 return true;
             }
         }
 
         return $spellings === [];
+    }
+
+    /**
+     * What finds a spelling of the wake word in a text, or null when it has nothing but characters that
+     * aren't words.
+     */
+    private static function pattern(string $spelling): ?string
+    {
+        $words = array_map(
+            fn (string $word) => preg_quote($word, '/'),
+            // What has no letters or numbers, like the dash in "Hey - Jarvis", is between words, where nothing counts.
+            preg_grep('/[\p{L}\p{N}]/u', preg_split('/\s+/u', $spelling, flags: PREG_SPLIT_NO_EMPTY)),
+        );
+
+        if ($words === []) {
+            return null;
+        }
+
+        // Between two of its words: anything but letters, their accents, and numbers. Around it too:
+        // \b would also end a word before a vowel sign, which is how Hindi or Bengali write vowels.
+        return '/(?<![\p{L}\p{M}\p{N}])' . implode('[^\p{L}\p{M}\p{N}]+', $words) . '(?![\p{L}\p{M}\p{N}])/iu';
     }
 
     /**
@@ -721,15 +779,6 @@ final class VoiceSession
         unset(self::$sessions[$this->vc->channel->guild_id]);
         $this->discord->getLoop()->cancelTimer($this->ticker);
 
-        // Conversations end with the call. What is still waiting to be handled isn't answered any more.
-        foreach ($this->conversations as $timer) {
-            if ($timer !== null) {
-                $this->discord->getLoop()->cancelTimer($timer);
-            }
-        }
-
-        $this->conversations = [];
-
         // No question is coming for the Claude Code process that waited for one. One that is answering ends once it has.
         $this->waitingClaude?->stop();
         $this->waitingClaude = null;
@@ -767,6 +816,8 @@ final class VoiceSession
         $ms = $this->msSince($this->startedAt);
         $this->log('info', 'Voice session stopped', ['ms' => $ms, 'speakers' => count($this->speakers), ...$this->counts]);
         $this->track(Usage::CALL_ENDED, ['duration_ms' => $ms]);
+        // Now, unless this or another call is answering or speaking: then when its turn is over.
+        $this->saveUsage();
 
         // The queue gets here once everything said is transcribed, so the summary includes the last thing said.
         return $this->queue = $this->queue
@@ -965,6 +1016,10 @@ final class VoiceSession
 
         $this->clips[$wavPath] = $userId;
         $endedAt = microtime(true);
+        // When they started and stopped saying it, by the clock that only goes forward: see CALLED_SECONDS. Both
+        // are late by the pause that ended it, which is the same for every sentence.
+        $until = hrtime(true) / 1e9;
+        $from = $until - $seconds;
         // Who was there when it was said, not when it is transcribed: they may have come or gone by then.
         $people = $this->group($userId);
         // How often each memory was forgotten when it was said: see unlessForgotten().
@@ -974,7 +1029,7 @@ final class VoiceSession
         $this->log('info', 'Utterance ended', ['user' => $userId, 'ms' => $ms]);
         $this->track(Usage::UTTERANCE, ['user' => $userId, 'duration_ms' => $ms]);
 
-        $this->inTurn($userId, fn () => $this->handleUtterance($userId, $wavPath, $endedAt, $people, $seconds, $forgotten));
+        $this->inTurn($userId, fn () => $this->handleUtterance($userId, $wavPath, $endedAt, $people, $seconds, $forgotten, $from, $until));
     }
 
     /**
@@ -985,8 +1040,8 @@ final class VoiceSession
      */
     private function inTurn(string $userId, callable $turn): void
     {
-        // Counted from now, not when its turn comes: their conversation can't end quietly meanwhile.
-        $this->waiting[$userId] = ($this->waiting[$userId] ?? 0) + 1;
+        // Counted from now, not when its turn comes: what waits for its turn is someone waiting for the bot.
+        $this->turns++;
 
         $this->queue = $this->queue
             ->then($turn)
@@ -997,10 +1052,10 @@ final class VoiceSession
 
                 return $this->apologize($e, $userId);
             })
-            ->finally(function () use ($userId) {
-                // Answered and spoken, or not answered at all: their conversation is quiet from now on.
-                $this->waiting[$userId]--;
-                $this->startQuiet($userId);
+            ->finally(function () {
+                // Answered and spoken, or not answered at all.
+                $this->turns--;
+                $this->saveUsage();
             });
     }
 
@@ -1049,8 +1104,10 @@ final class VoiceSession
      * @param list<string>|null $people Who was in the call then: see {@see group()}.
      * @param float $seconds How long it is: whisper has longer to transcribe a longer one.
      * @param array<string, int> $forgotten How often each memory had been forgotten when it was said.
+     * @param float $from When they started saying it, by the clock that only goes forward: see {@see CALLED_SECONDS}.
+     * @param float $until When they stopped, by the same clock.
      */
-    private function handleUtterance(string $userId, string $wavPath, float $endedAt, ?array $people, float $seconds, array $forgotten): PromiseInterface
+    private function handleUtterance(string $userId, string $wavPath, float $endedAt, ?array $people, float $seconds, array $forgotten, float $from, float $until): PromiseInterface
     {
         // They opted out while this waited for its turn, and it was deleted then.
         if (! isset($this->clips[$wavPath])) {
@@ -1063,7 +1120,7 @@ final class VoiceSession
         return $this->transcriber->transcribe($wavPath, $seconds, $this->log(...))
             ->finally(fn () => unlink($wavPath))
             ->catch(fn (Throwable $e) => throw new FailedReply(FailedReply::WHISPER, $e))
-            ->then(function (string $text) use ($userId, $endedAt, $transcribing, $people, $forgotten) {
+            ->then(function (string $text) use ($userId, $endedAt, $transcribing, $people, $forgotten, $from, $until) {
                 $this->log('info', 'Transcribed', ['user' => $userId, 'ms' => $this->msSince($transcribing), 'characters' => mb_strlen($text)]);
 
                 // Nothing was said, or they opted out while it was transcribed.
@@ -1074,7 +1131,7 @@ final class VoiceSession
                 // Someone else in the call may have opted out since it was said, while it waited for its turn.
                 $people = $this->unlessOptedOut($people);
                 $name = $this->nameOf($userId);
-                $this->remember(Lookups::personLine($name, $text), $this->unlessForgotten($people, $forgotten));
+                $said = $this->remember(Lookups::personLine($name, $text), $this->unlessForgotten($people, $forgotten));
 
                 if ($this->stopped) {
                     $this->log('debug', 'Not answering', ['user' => $userId, 'reason' => 'the session stopped']);
@@ -1082,115 +1139,81 @@ final class VoiceSession
                     return null;
                 }
 
+                // Whether the last thing they said only called the bot, a moment ago: then this is what they want
+                // from it. It counts for this sentence alone, whatever this one is.
+                $called = isset($this->called[$userId]) && $from - $this->called[$userId] <= self::CALLED_SECONDS;
+                unset($this->called[$userId]);
+
                 // Before the stop phrase and the wake word: by default, it contains the wake word, and the
                 // stop phrase someone set could match it too.
                 if ($this->leavePhrase !== '' && self::mentions($text, $this->leavePhrase)) {
                     return $this->leave($userId);
                 }
 
-                // Before the wake word: by default, the stop phrase contains it.
+                // Before the wake word: by default, the stop phrase contains it, and "stop Claude" is nothing to answer.
                 if ($this->stopPhrase !== '' && self::mentions($text, $this->stopPhrase)) {
-                    return $this->closeConversation($userId, 'stop phrase') ? $this->sayOkay($userId) : null;
+                    $this->log('debug', 'Not answering', ['user' => $userId, 'reason' => 'the stop phrase']);
+
+                    return null;
                 }
 
-                if (! $this->hasConversation($userId) && ! self::mentions($text, $this->wakeWord)) {
+                // "Hey Claude." and then, after a pause, the question: the pause made it two sentences.
+                if ($this->onlyCalls($text)) {
+                    $this->called[$userId] = $until;
+                    $this->log('debug', 'Not answering', ['user' => $userId, 'reason' => 'only the wake word']);
+
+                    return null;
+                }
+
+                if (! $called && ! self::mentions($text, $this->wakeWord)) {
                     $this->log('debug', 'Not answering', ['user' => $userId, 'reason' => 'Claude was not addressed']);
 
                     return null;
                 }
 
-                // Without a wake word, everything is answered already.
-                if (self::wakeWordName($this->wakeWord) !== '') {
-                    $this->openConversation($userId);
-                }
-
-                return $this->answer($userId, $name, $text, $endedAt, $people, forgotten: $forgotten);
+                return $this->answer($userId, $name, $text, $endedAt, $people, forgotten: $forgotten, said: $said);
             });
     }
 
     /**
-     * Whether everything someone says is answered. Not isset(): a conversation without a timer holds null.
+     * Whether a sentence only calls the bot: the wake word and at most {@see CALLING_WORDS} other words. It holds
+     * no question, so Claude isn't asked. Never in a server without a wake word, which answers everything.
      */
-    private function hasConversation(string $userId): bool
+    private function onlyCalls(string $text): bool
     {
-        return array_key_exists($userId, $this->conversations);
-    }
+        $named = 0;
 
-    /**
-     * Starts answering everything someone says, until they say the stop phrase or are quiet for a while.
-     */
-    private function openConversation(string $userId): void
-    {
-        if (! $this->hasConversation($userId)) {
-            $this->conversations[$userId] = null;
-            $this->log('info', 'Conversation opened', ['user' => $userId]);
-        }
-    }
+        foreach (self::spellings($this->wakeWord) as $spelling) {
+            $pattern = self::pattern($spelling);
 
-    /**
-     * @param string $reason Why it closed, for the log: "stop phrase", "quiet" or "opted out".
-     * @return bool False when they had no conversation open.
-     */
-    private function closeConversation(string $userId, string $reason): bool
-    {
-        if (! $this->hasConversation($userId)) {
-            return false;
-        }
-
-        if ($this->conversations[$userId] !== null) {
-            $this->discord->getLoop()->cancelTimer($this->conversations[$userId]);
-        }
-
-        unset($this->conversations[$userId]);
-        $this->log('info', 'Conversation closed', ['user' => $userId, 'reason' => $reason]);
-
-        return true;
-    }
-
-    /**
-     * Has their conversation, if one is open, close after a minute of quiet.
-     */
-    private function startQuiet(string $userId): void
-    {
-        if (! $this->hasConversation($userId)) {
-            return;
-        }
-
-        if ($this->conversations[$userId] !== null) {
-            $this->discord->getLoop()->cancelTimer($this->conversations[$userId]);
-        }
-
-        $this->conversations[$userId] = $this->discord->getLoop()->addTimer(self::CONVERSATION_QUIET, function () use ($userId) {
-            $this->conversations[$userId] = null;
-
-            // Something they said is waiting for its turn, or being answered: it starts again once that is over.
-            if (($this->waiting[$userId] ?? 0) > 0) {
-                return;
+            // A spelling without a word is no wake word: see mentions().
+            if ($pattern === null) {
+                return false;
             }
 
-            // They are saying something that hasn't ended yet, so it isn't quiet: a minute from now, unless it is answered first.
-            if ($this->splitter->isSpeaking($userId)) {
-                $this->startQuiet($userId);
+            $text = (string) preg_replace($pattern, ' ', $text, count: $count);
+            $named += $count;
+        }
 
-                return;
-            }
-
-            $this->closeConversation($userId, 'quiet');
-        });
+        // A word with an apostrophe in it is one word. Chinese, Japanese and Thai are written without spaces
+        // between words, so each of their characters counts as one: a whole question would otherwise be one word.
+        // Only their letters: PCRE also takes the punctuation those scripts share for theirs.
+        return $named > 0 && preg_match_all('/(?=\p{L})[\p{Han}\p{Hiragana}\p{Katakana}\p{Thai}]|[\p{L}\p{N}][\p{L}\p{M}\p{N}\'’]*/u', $text) <= self::CALLING_WORDS;
     }
 
     /**
-     * Tells someone, in the call, that their conversation is closed.
+     * Says okay in the call, before the bot leaves it.
      *
      * @return PromiseInterface<mixed> Resolves once it is said. It never rejects.
      */
     private function sayOkay(string $userId): PromiseInterface
     {
         $path = sprintf('%s/claude-%d.ogg', $this->directory, ++$this->files);
+        $okay = $this->synthesize(self::OKAY, $path);
 
-        return $this->synthesize(self::OKAY, $path)
+        return $this->player->ready($okay)
             // It holds nothing of anyone's memory, so only the call ending, or them opting out, stops it.
-            ->then(fn () => ! $this->stopped && ! isset($this->optedOut[$userId]) ? race([$this->player->play($path), $this->left->promise()]) : null)
+            ->then(fn () => $this->stillTalkingTo($userId) ? race([$this->player->play($okay), $this->left->promise()]) : $okay->drop())
             ->catch(fn (Throwable $e) => $this->log('warning', 'Could not say okay: ' . $e->getMessage(), ['user' => $userId]));
     }
 
@@ -1228,9 +1251,10 @@ final class VoiceSession
      *        and what the answer that handed it off was made from: see {@see lookUp()}.
      * @param array<string, int>|null $forgotten How often each memory had been forgotten when they said it, when that
      *                                           is known: otherwise it is taken now.
+     * @param string $said The entry of the transcript that is answered, when it is what they said.
      * @return PromiseInterface<mixed> Resolves once the answer is posted and the bot has stopped speaking.
      */
-    private function answer(string $userId, string $name, string $question, float $endedAt, ?array $people, ?array $lookedUp = null, ?array $forgotten = null): PromiseInterface
+    private function answer(string $userId, string $name, string $question, float $endedAt, ?array $people, ?array $lookedUp = null, ?array $forgotten = null, string $said = ''): PromiseInterface
     {
         $asking = microtime(true);
         // How often each memory was forgotten before what they said was said, or else before Claude is asked
@@ -1257,13 +1281,20 @@ final class VoiceSession
             // Remembered only for the person it was looked up for, who is still alone with the bot.
             $people = $group;
         }
-        // What the last sentence so far waits for: Piper to be done with it, and the bot to have said it.
-        $synthesized = $spoken = resolve(null);
+        // What the last sentence so far waits for: Piper to be free for it, and the bot to have said the one before it.
+        $free = $spoken = resolve(null);
+        /** @var array<int, Sentence> $unplayed The sentences Piper was given, until they are played. */
+        $unplayed = [];
 
         // Only Piper and the voice client: anything else that fails on the way is nothing the bot expects to.
         $unspoken = static fn (Throwable $e) => throw new FailedReply(FailedReply::SPEECH, $e);
 
-        $sentences = new SentenceSplitter(function (string $sentence) use (&$synthesized, &$spoken, $unspoken, $userId, $depends, $basis, $among, $endedAt) {
+        // While nothing more can wait to be looked up, the bot may have to say something in the place of what
+        // Claude writes: nothing is spoken until the answer is whole.
+        // Telling what was looked up hands nothing off, so it is spoken while it is written.
+        $full = $lookedUp === null && $this->lookups->full();
+
+        $sentences = new SentenceSplitter(function (string $sentence) use (&$free, &$spoken, &$unplayed, $unspoken, $userId, $depends, $basis, $among, $endedAt) {
             if (! $this->stillAnswering($userId, $depends, $basis, $among)) {
                 return;
             }
@@ -1272,14 +1303,32 @@ final class VoiceSession
             $oggPath = sprintf('%s/claude-%d.ogg', $this->directory, ++$this->files);
             $before = $spoken;
 
-            // A sentence is synthesized as soon as Piper is free, while the ones before it are spoken. It is
-            // spoken once they are over: one file at a time, in order.
+            // A sentence is given to Piper as soon as Piper has spoken the one before it, while that one is still
+            // encoded and the ones before it are spoken. It is spoken once they are over, and as soon as the
+            // player is ready for it, which the bot's own is from the first of what the encoder gives of it: one
+            // sentence at a time, in order.
             // Once the call stops, they opt out or talk over the answer, the sentences still waiting for Piper are no longer synthesized either.
-            $synthesized = $synthesized->then(fn () => $this->stillAnswering($userId, $depends, $basis, $among) ? $this->synthesize($sentence, $oggPath)->catch($unspoken) : null);
-            $spoken = $synthesized->finally(fn () => $before)->then(function () use ($unspoken, $userId, $depends, $basis, $among, $oggPath, $endedAt) {
+            $given = $free->then(function () use (&$unplayed, $sentence, $oggPath, $userId, $depends, $basis, $among): ?Sentence {
                 if (! $this->stillAnswering($userId, $depends, $basis, $among)) {
                     return null;
                 }
+
+                $made = $this->synthesize($sentence, $oggPath);
+
+                return $unplayed[spl_object_id($made)] = $made;
+            });
+            // After a sentence Piper can't speak, none of the answer is given to it any more.
+            $free = $given->then(static fn (?Sentence $made) => $made?->voiced());
+            // Nobody waits for Piper after the last sentence, and it can still fail on that one.
+            $free->catch(static fn () => null);
+            $spoken = $given->then(fn (?Sentence $made) => $made === null ? null : $this->player->ready($made)->then(static fn () => $made))->catch($unspoken)->finally(fn () => $before)->then(function (?Sentence $made) use (&$unplayed, $unspoken, $userId, $depends, $basis, $among, $endedAt) {
+                // Checked as late as can be: it was synthesized, and the ones before it were spoken, meanwhile.
+                // The player starts on it at once, so nothing changes between this and the call hearing it.
+                if ($made === null || ! $this->stillAnswering($userId, $depends, $basis, $among)) {
+                    return null;
+                }
+
+                unset($unplayed[spl_object_id($made)]);
 
                 $started = null;
 
@@ -1291,20 +1340,17 @@ final class VoiceSession
 
                 // The player may say nothing more about a sentence once it is stopped, as the voice library
                 // doesn't when it is stopped or closed while speaking one: see hear().
-                return race([$this->player->play($oggPath, $started)->catch($unspoken), $this->left->promise(), $this->speaking['cut']->promise()]);
+                return race([$this->player->play($made, $started)->catch($unspoken), $this->left->promise(), $this->speaking['cut']->promise()]);
             });
-        });
+            // An answer that is held back comes all at once: there is no first sound to gain by cutting it.
+        }, $full ? 0 : $this->firstWords);
 
         // The line that hands a question off is never spoken: the start of a line waits until it is known not to be it.
         $handOff = new HandOff($sentences->push(...));
-        // While nothing more can wait to be looked up, the bot may have to say something in the place of what
-        // Claude writes: nothing is spoken until the answer is whole.
-        // Telling what was looked up hands nothing off, so it is spoken while it is written.
-        $full = $lookedUp === null && $this->lookups->full();
         // Where the time to a slow answer went: logged once the first piece of the answer is there.
         $started = fn (array $timing) => $this->log('info', 'Claude started answering', ['user' => $userId, ...$timing, 'held' => $full]);
 
-        return $this->ask($userId, $this->prompt($userId, $name, $group, $sharers, $basis !== null, $lookedUp['text'] ?? null), $full ? static fn () => null : $handOff->push(...), $started)->then(
+        return $this->ask($userId, $this->prompt($userId, $name, $said, $group, $sharers, $basis !== null, $lookedUp['text'] ?? null), $full ? static fn () => null : $handOff->push(...), $started)->then(
             function (string $answer) use ($sentences, $handOff, $full, $lookedUp, $forgotten, &$spoken, $userId, $sharers, $depends, $basis, $among, $name, $question, $endedAt, $asking, $people) {
                 $this->log('info', 'Claude answered', ['user' => $userId, 'ms' => $this->msSince($asking), 'characters' => mb_strlen($answer)]);
                 $handOff->flush();
@@ -1390,19 +1436,27 @@ final class VoiceSession
             // Whatever failed, also in what is done with Claude's answer: the turn is only over once the bot has
             // stopped speaking, or the call would be told that it failed over the sentences still being spoken.
             return $spoken->finally(fn () => throw $e);
-        })->finally(function () {
+        })->finally(function () use (&$unplayed) {
             // The bot is no longer speaking: nobody can talk over it.
             $this->speaking = null;
+
+            // What Piper spoke and nobody heard is not kept: Piper can't be stopped in a sentence it has started,
+            // but its file is not written, or deleted.
+            foreach ($unplayed as $made) {
+                $made->drop();
+            }
         });
     }
 
     /**
      * Stops the answer the bot is speaking once the person it is for has talked over it for as long as it
-     * takes for what they say to be transcribed, in one go. Nobody else can stop it.
+     * takes for what they say to be transcribed, in one go. Nobody else can stop it: people in a call talk
+     * to each other, and that would cut off every answer.
      *
      * The sentence being spoken is cut off, and the rest of the answer is neither synthesized nor spoken.
      * It is still posted and added to the transcript once Claude has written it, like an answer cut off
-     * by the end of the call. What they said over it is transcribed like anything else they say.
+     * by the end of the call. What they said over it is transcribed like anything else they say, and
+     * answered only when it mentions the wake word.
      */
     private function hear(string $userId, string $pcm, float $now): void
     {
@@ -1479,7 +1533,8 @@ final class VoiceSession
         $this->waitingClaude = null;
         // How long the process that gets the question had been waiting for one, or null when none was: one
         // that only just started may still be starting, which the time to the first word then includes.
-        $this->log('info', 'Asked Claude', ['user' => $userId, 'waited_ms' => $waiting?->waitedMs()]);
+        // And how much it was given: the whole call so far, which grows. Counts, never what was said.
+        $this->log('info', 'Asked Claude', ['user' => $userId, 'waited_ms' => $waiting?->waitedMs(), 'lines' => count($this->transcript), 'characters' => mb_strlen($prompt)]);
 
         if ($waiting === null) {
             $this->log('warning', 'No Claude Code process was waiting for the question', ['user' => $userId]);
@@ -1501,16 +1556,19 @@ final class VoiceSession
     }
 
     /**
-     * Has Piper speak a sentence into a file. Piper keeps running for the whole call. When it stopped by
-     * itself, as when a sentence of an earlier answer made it fail, it is started again. The rest of that
-     * answer wasn't spoken: after a sentence that can't be, none of its answer is.
+     * Has Piper speak a sentence, and ffmpeg encode it. Piper keeps running for the whole call. When it stopped
+     * by itself, as when a sentence of an earlier answer made it fail, it is started again. The rest of that
+     * answer wasn't spoken: after a sentence that can't be, none of its answer is. So is the ffmpeg that waits
+     * for the next sentence, when it stopped by itself.
      *
-     * @return PromiseInterface<string> The path of the file.
+     * @return Sentence The sentence on its way to the call: see {@see Speech::synthesize()}.
      */
-    private function synthesize(string $sentence, string $oggPath): PromiseInterface
+    private function synthesize(string $sentence, string $oggPath): Sentence
     {
         if (! $this->speech->isRunning()) {
             $this->log('warning', 'Piper had stopped: starting it again');
+        } elseif (! $this->speech->isReadyToEncode()) {
+            $this->log('warning', 'ffmpeg had stopped: starting it again');
         }
 
         return $this->speech->synthesize($sentence, $oggPath);
@@ -1652,13 +1710,9 @@ final class VoiceSession
             $task,
             $userId,
             'Transcript of the voice call so far',
-            // Read once it is the task's turn, from its file: $this->transcript only holds its last lines.
-            // The file is gone when /forget took everything out of it.
-            function () use ($wanted): ?string {
-                $path = "{$this->directory}/transcript.txt";
-
-                return $wanted() ? (is_file($path) ? trim(file_get_contents($path)) : '') : null;
-            },
+            // Taken once it is the task's turn, in one step with whether it is still wanted. It is empty
+            // when /forget took everything out of it. Of a long call it is given the end: see Lookups::recent().
+            fn (): ?string => $wanted() ? implode("\n", $this->transcript) : null,
             $hard,
         );
         // Kept to stop it, for as long as it isn't over.
@@ -1771,10 +1825,11 @@ final class VoiceSession
     {
         $this->remember("Claude: {$sentence}", null);
         $oggPath = sprintf('%s/claude-%d.ogg', $this->directory, ++$this->files);
+        $said = $this->synthesize($sentence, $oggPath);
 
-        return $this->synthesize($sentence, $oggPath)->then(
+        return $this->player->ready($said)->then(
             // The player may say nothing more about the sentence once the call is closed while it is spoken.
-            fn () => $this->stillTalkingTo($userId) ? race([$this->player->play($oggPath), $this->left->promise()]) : null,
+            fn () => $this->stillTalkingTo($userId) ? race([$this->player->play($said), $this->left->promise()]) : $said->drop(),
         )->catch(fn (Throwable $e) => throw new FailedReply(FailedReply::SPEECH, $e));
     }
 
@@ -1791,7 +1846,6 @@ final class VoiceSession
         }
 
         $asking = microtime(true);
-        // The transcript is read from its file: $this->transcript only holds its last lines.
         $prompt = "Transcript of the voice call:\n\n" . trim(file_get_contents($transcript)) . "\n\nSummarize the call.";
 
         return $this->claude->ask($prompt, self::SUMMARY_PROMPT)->then(function (string $summary) use ($asking) {
@@ -1807,20 +1861,22 @@ final class VoiceSession
     }
 
     /**
-     * What Claude is asked when someone talks to it: the memories it has of them, then the call so far.
+     * What Claude is asked when someone talks to it: the memories it has of them, the call so far, and then
+     * what it is to answer. People go on talking to each other, and what was looked up arrives when it is found,
+     * so the sentence that is answered is named: it need not be the last line.
      *
+     * @param string $said The entry of the transcript that is answered.
      * @param list<string>|null $people Who is in the call, when they are who was there when the question was asked: see {@see group()}.
      * @param list<string> $sharers Whose shared memories are added: see {@see sharers()}.
      * @param bool $personalAllowed Whether the asker's personal memory may be added: see {@see personalMemoryBasis()}.
      * @param string|null $lookedUp What was looked up for them, when Claude is asked to tell them that: no memory is added then.
      */
-    private function prompt(string $userId, string $name, ?array $people, array $sharers, bool $personalAllowed, ?string $lookedUp = null): string
+    private function prompt(string $userId, string $name, string $said, ?array $people, array $sharers, bool $personalAllowed, ?string $lookedUp = null): string
     {
         // Telling what was looked up has no memory in it: it tells what was found, so there is nothing in it
         // for a web page to make it repeat.
         if ($lookedUp !== null) {
-            // The transcript only holds its last lines, which what was looked up may no longer be among.
-            return "Transcript of the voice call so far:\n\n" . implode("\n", $this->transcript) . "\n\n" . Lookups::telling($name, $lookedUp);
+            return "Transcript of the voice call so far:\n\n{$this->conversation()}\n\n" . Lookups::telling($name, $lookedUp);
         }
 
         $remembered = '';
@@ -1847,67 +1903,64 @@ final class VoiceSession
             }
         }
 
-        return $remembered . "Transcript of the voice call so far:\n\n"
-            . implode("\n", $this->transcript)
-            . "\n\n{$name} is talking to you. Reply to their last message.";
+        return $remembered . "Transcript of the voice call so far:\n\n{$this->conversation()}\n\n" . Lookups::asking($name, $said);
     }
 
     /**
-     * Takes lines out of the transcript, the file and what Claude is given of it, as when someone used /forget.
+     * What Claude is given of the call: everything said so far, by everyone who is heard, with the bot's own
+     * answers and what was looked up, each with its time, in the order it was said. Of a call too long to fit,
+     * the end: see {@see Lookups::recent()}. It is taken in the same step as who is in the call and whose memory
+     * may be used are checked, with nothing to wait for in between.
+     */
+    private function conversation(): string
+    {
+        return Lookups::recent(implode("\n", $this->transcript));
+    }
+
+    /**
+     * Takes entries out of the transcript, the file and what Claude is given of it, as when someone used /forget.
      * The file is deleted when nothing is left of it: there is no transcript when nobody said anything.
      *
-     * @param list<string> $lines As they were written to transcript.txt, with their time, one entry each.
+     * @param list<int> $entries Their numbers: an entry is taken out as itself, not as the first that says the same.
      */
-    private function removeFromTranscript(array $lines): void
+    private function removeFromTranscript(array $entries): void
     {
-        if ($lines === []) {
+        if ($entries === []) {
             return;
+        }
+
+        foreach ($entries as $entry) {
+            unset($this->transcript[$entry]);
         }
 
         $path = "{$this->directory}/transcript.txt";
 
-        if (is_file($path)) {
-            $written = file_get_contents($path);
-
-            foreach ($lines as $line) {
-                $at = strpos($written, $line . PHP_EOL);
-
-                if ($at !== false) {
-                    $written = substr_replace($written, '', $at, strlen($line . PHP_EOL));
-                }
-            }
-
-            $written === '' ? unlink($path) : file_put_contents($path, $written);
+        // The file holds what the call does, entry for entry.
+        if ($this->transcript === []) {
+            unlink($path);
+        } else {
+            file_put_contents($path, implode(PHP_EOL, $this->transcript) . PHP_EOL);
         }
-
-        foreach ($lines as $line) {
-            // Without the time that was added when it was written.
-            $index = array_search(preg_replace('/^\[\d\d:\d\d:\d\d\] /', '', $line), $this->transcript, true);
-
-            if ($index !== false) {
-                unset($this->transcript[$index]);
-            }
-        }
-
-        $this->transcript = array_values($this->transcript);
     }
 
     /**
      * Adds a line to the transcript, and to what the memory of the people who were there is updated from.
      *
      * @param list<string>|null $people Who was in the call: see {@see group()}.
+     * @return string The entry it was added as, with its time.
      */
-    private function remember(string $line, ?array $people): void
+    private function remember(string $line, ?array $people): string
     {
-        $this->transcript[] = $line;
-        $this->transcript = array_slice($this->transcript, -self::CONTEXT_LINES);
         $line = date('[H:i:s] ') . $line;
+        $this->transcript[++$this->entries] = $line;
 
         file_put_contents("{$this->directory}/transcript.txt", $line . PHP_EOL, FILE_APPEND);
 
         if ($people !== null) {
-            $this->said[implode('-', $people)][] = $line;
+            $this->said[implode('-', $people)][$this->entries] = $line;
         }
+
+        return $line;
     }
 
     /**
@@ -1993,7 +2046,7 @@ final class VoiceSession
         return $this->writer
             ->update(
                 $people,
-                $said,
+                array_values($said),
                 // Not saved when it was forgotten, or someone opted out, while it waited or Claude was writing it.
                 fn () => ($this->forgotten[$key] ?? 0) === $forgotten && $this->unlessOptedOut($people) !== null,
             )
@@ -2041,13 +2094,32 @@ final class VoiceSession
     }
 
     /**
-     * Records something that happened in the call, for /stats.
+     * Records something that happened in the call, for /stats. It is only kept: see {@see saveUsage()}.
      *
      * @param array{channel?: string, user?: string, duration_ms?: int} $details
      */
     private function track(string $type, array $details = []): void
     {
         $this->usage->record($type, (string) $this->vc->channel->guild_id, ['session' => $this->id, ...$details]);
+    }
+
+    /**
+     * Writes what {@see track()} kept, when nobody waits for the bot: in no call is something said waiting for
+     * its turn or being answered, which includes the bot speaking. A write blocks the event loop, which
+     * sends the next packet of a sentence every 20 ms and starts the next step of an answer.
+     *
+     * Called at the end of every turn, and when a call ends, so what is kept waits for the end of the
+     * turn that is going on and no longer. The bot's exit writes the rest: see {@see \App\Application::run()}.
+     */
+    private function saveUsage(): void
+    {
+        foreach (self::$unfinished as $call) {
+            if ($call->turns > 0) {
+                return;
+            }
+        }
+
+        $this->usage->flush();
     }
 
     private function msSince(float $time): int

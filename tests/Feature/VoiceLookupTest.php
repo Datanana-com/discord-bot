@@ -227,6 +227,24 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->assertCount(1, $this->logged('Looking something up'));
     }
 
+    public function testTellingWhatWasLookedUpGetsTheWholeCallToo(): void
+    {
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->saidEarlier($session, array_map(fn (int $line) => sprintf('[10:%02d:%02d] Bob: This is line %03d of a long call.', intdiv($line, 60), $line % 60, $line), range(1, 300)));
+        $this->ask($vc, '555', self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 1, 'the lookup to start');
+
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream(self::TOLD)]);
+        touch($this->go);
+        $this->waitUntil(fn () => count($this->sent) === 3 && count($this->played) === 2, 'what was looked up to be told');
+
+        // Not only its last lines: what was found is told with everything said before in mind, like an answer.
+        $telling = $this->claudeCalls()[2]['prompt'];
+        $this->assertStringStartsWith("Transcript of the voice call so far:\n\n[10:00:01] Bob: This is line 001 of a long call.\n", $telling);
+        $this->assertSame(300, substr_count($telling, 'of a long call.'));
+        $this->assertStringContainsString("\nClaude: " . self::LOOKING . "\n" . self::LOOKED_UP . "\n\n" . self::TELLING, $this->untimed($telling));
+    }
+
     public function testSaysItLooksIntoItWhenClaudeOnlyWritesTheLine(): void
     {
         $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream('LOOK UP: ' . self::TASK)]);
@@ -249,13 +267,12 @@ final class VoiceLookupTest extends VoiceTestCase
     {
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
         $lines = array_map(fn (int $line) => sprintf('[10:00:00] Bob: This is line %05d of a very long call.', $line), range(1, 3500));
-        file_put_contents("{$session->directory}/transcript.txt", implode("\n", $lines) . "\n");
+        $this->saidEarlier($session, $lines);
 
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
         $this->waitUntil(fn () => count($this->claudeCalls()) === 2, 'the lookup to start');
 
-        // The whole call is read from its file, not only the last lines an answer gets. Of a call that is too
-        // long, the lookup gets the end, from the start of a line, and is told so.
+        // Of a call that is too long, the lookup gets the end, from the start of something said, and is told so.
         $prompt = $this->claudeCalls()[1]['prompt'];
         $this->assertStringStartsWith("Transcript of the voice call so far:\n\n(Its beginning is left out: it is too long.)\n[10:00:00] Bob: This is line 0", $prompt);
         $this->assertStringContainsString("Bob: This is line 03500 of a very long call.\n", $prompt);
@@ -263,8 +280,9 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->assertStringNotContainsString('line 00001 ', $prompt);
         $this->assertLessThan(150_200, mb_strlen($prompt));
         $this->assertGreaterThan(149_900, mb_strlen($prompt));
-        // An answer only gets the call's last lines.
-        $this->assertLessThan(2_000, mb_strlen($this->claudeCalls()[0]['prompt']));
+        // The answer that handed it off was given the same: one rule for both.
+        $this->assertStringStartsWith("Transcript of the voice call so far:\n\n(Its beginning is left out: it is too long.)\n[10:00:00] Bob: This is line 0", $this->claudeCalls()[0]['prompt']);
+        $this->assertSame(explode("\n", $prompt)[3], explode("\n", $this->claudeCalls()[0]['prompt'])[4], 'The lookup has two lines more at its end, so one less at its start.');
 
         $this->finishLookups($session);
     }
@@ -812,6 +830,37 @@ final class VoiceLookupTest extends VoiceTestCase
             'Each under the question it answers.',
         );
         $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testAnAnswerThatIsHeldBackIsNotCutAfterItsFirstWords(): void
+    {
+        $this->setEnv(['VOICE_FIRST_WORDS' => '5']);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        // One task is looked up and three wait: from here on an answer is held back until it is whole.
+        foreach (['one', 'two', 'three', 'four'] as $number) {
+            $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::handsOff("Task {$number}.")]);
+            $this->ask($vc, '555', "Hey Claude, question {$number}.");
+        }
+
+        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 4, 'the first lookup to start');
+
+        // It comes all at once, and there is nothing to gain by speaking its first words on their own.
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is a quarter past four in the afternoon')]);
+        $this->ask($vc, '555', 'Hey Claude, what time is it?');
+        $this->waitUntil(fn () => count($this->played) > 4, 'the answer to be spoken');
+        $this->runFor(0.3);
+
+        $this->assertSame(['It is a quarter past four in the afternoon'], array_map(file_get_contents(...), array_slice($this->played, 4)));
+        $this->assertTrue($this->logged('Claude started answering')[4]['held']);
+
+        foreach ([2, 3, 4] as $lookups) {
+            touch($this->go);
+            $this->waitUntil(fn () => count($this->lookups()) === $lookups, "lookup {$lookups} to start");
+        }
+
+        touch($this->go);
+        $this->waitUntil(fn () => count($this->logged('Looked something up')) === 4 && count($this->sent) === 13, 'everything to be told');
     }
 
     public function testPostsWhatWasLookedUpAfterTheCallWithoutSpeakingIt(): void

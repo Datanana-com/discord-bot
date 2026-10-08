@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace App\Analytics;
 
 use Illuminate\Database\Capsule\Manager as DB;
-use Illuminate\Database\Query\Builder;
+use Illuminate\Database\ConnectionInterface;
 use Illuminate\Database\Schema\Blueprint;
 use Psr\Log\LoggerInterface;
 use Throwable;
@@ -13,6 +13,12 @@ use Throwable;
 /**
  * Usage statistics, shown by /stats: one row per thing that happened in a call, in the "stats"
  * database from configs/database.php. Nothing anyone said is stored, only what happened and when.
+ *
+ * A row is held in memory when it happens and written later, with the others, in one transaction: a write to
+ * SQLite blocks the event loop for a few milliseconds, and for tens of them now and then, which nobody should
+ * wait for while an answer is on its way or being spoken. {@see flush()} is called when nobody does. The rows
+ * are held by the class, not by an instance, because /stats and each call make their own: a bot that crashes
+ * loses the rows it still held, and the time of each is the time it happened, not the time it was written.
  *
  * Statistics never get in the way of the bot: when they can't be saved or read, that is logged
  * and the bot carries on.
@@ -38,6 +44,14 @@ final class Usage
     /** Something said could not be transcribed or answered, or the answer could not be spoken. */
     public const string FAILED = 'failed';
 
+    /** Rows to one INSERT: SQLite allows 999 values in a statement at the least, and a row has 7. */
+    private const int INSERT_ROWS = 100;
+
+    /**
+     * @var list<array{type: string, guild_id: string, channel_id: ?string, user_id: ?string, session_id: ?string, duration_ms: ?int, created_at: string}>
+     */
+    private static array $held = [];
+
     private bool $tableExists = false;
 
     public function __construct(private readonly LoggerInterface $log)
@@ -45,28 +59,61 @@ final class Usage
     }
 
     /**
+     * Keeps something that happened, to be written by {@see flush()}. Nothing is written here.
+     *
      * @param string $type One of the constants above.
      * @param array{channel?: string, user?: string, session?: string, duration_ms?: int} $details
      */
     public function record(string $type, string $guildId, array $details = []): void
     {
+        self::$held[] = [
+            'type' => $type,
+            'guild_id' => $guildId,
+            'channel_id' => $details['channel'] ?? null,
+            'user_id' => $details['user'] ?? null,
+            'session_id' => $details['session'] ?? null,
+            'duration_ms' => $details['duration_ms'] ?? null,
+            'created_at' => gmdate('Y-m-d H:i:s'),
+        ];
+    }
+
+    /**
+     * Writes what is held, in the order it happened, in one transaction. Rows that can't be written are logged
+     * once and dropped, as the one row that couldn't be was before: statistics are not worth holding on to.
+     */
+    public function flush(): void
+    {
+        if (self::$held === []) {
+            return;
+        }
+
+        // Taken first: whatever is recorded while this writes is for the next time.
+        $rows = self::$held;
+        self::$held = [];
+
         try {
-            $this->events()->insert([
-                'type' => $type,
-                'guild_id' => $guildId,
-                'channel_id' => $details['channel'] ?? null,
-                'user_id' => $details['user'] ?? null,
-                'session_id' => $details['session'] ?? null,
-                'duration_ms' => $details['duration_ms'] ?? null,
-                'created_at' => gmdate('Y-m-d H:i:s'),
-            ]);
+            $connection = $this->connection();
+            $connection->transaction(function () use ($connection, $rows) {
+                foreach (array_chunk($rows, self::INSERT_ROWS) as $chunk) {
+                    $connection->table('events')->insert($chunk);
+                }
+            });
         } catch (Throwable $e) {
-            $this->log->warning('Could not save usage statistics: ' . $e->getMessage(), ['type' => $type, 'guild' => $guildId]);
+            $this->log->warning('Could not save usage statistics: ' . $e->getMessage(), ['rows' => count($rows)]);
         }
     }
 
     /**
-     * A server's usage so far, or null when the statistics can't be read.
+     * Forgets what is held, without writing it. For tests, which each have a database of their own.
+     */
+    public static function reset(): void
+    {
+        self::$held = [];
+    }
+
+    /**
+     * A server's usage so far, or null when the statistics can't be read. What is held and not yet written
+     * counts too: reading it writes nothing, as it may be asked for while an answer is spoken.
      *
      * @return array{since: ?string, calls: int, call_ms: int, speakers: int, utterances: int, speech_ms: int, answers: int, answer_ms: ?int, lookups: int, failures: int}|null
      *         since is the first event's time, in UTC; answer_ms is the average time to answer.
@@ -74,10 +121,29 @@ final class Usage
     public function summary(string $guildId): ?array
     {
         try {
-            $row = $this->events()
-                ->where('guild_id', $guildId)
-                ->selectRaw(
-                    'MIN(created_at) AS since,
+            $connection = DB::connection(self::CONNECTION);
+            $parts = $bindings = [];
+
+            // The table is made when the first rows are written, not by someone reading: that would be a write too.
+            if ($this->tableExists || $connection->getSchemaBuilder()->hasTable('events')) {
+                $parts[] = 'SELECT type, user_id, duration_ms, created_at FROM events WHERE guild_id = ?';
+                $bindings[] = $guildId;
+            }
+
+            $held = array_values(array_filter(self::$held, fn (array $row) => $row['guild_id'] === $guildId));
+
+            if ($held !== []) {
+                $parts[] = 'VALUES ' . implode(', ', array_fill(0, count($held), '(?, ?, ?, ?)'));
+
+                foreach ($held as $row) {
+                    array_push($bindings, $row['type'], $row['user_id'], $row['duration_ms'], $row['created_at']);
+                }
+            }
+
+            $seen = $parts === [] ? 'SELECT NULL, NULL, NULL, NULL WHERE 0' : implode(' UNION ALL ', $parts);
+            $row = $connection->selectOne(
+                "WITH seen (type, user_id, duration_ms, created_at) AS ({$seen})
+                SELECT MIN(created_at) AS since,
                     SUM(CASE WHEN type = ? THEN 1 ELSE 0 END) AS calls,
                     SUM(CASE WHEN type = ? THEN duration_ms ELSE 0 END) AS call_ms,
                     COUNT(DISTINCT CASE WHEN type = ? THEN user_id END) AS speakers,
@@ -86,10 +152,10 @@ final class Usage
                     SUM(CASE WHEN type = ? THEN 1 ELSE 0 END) AS answers,
                     AVG(CASE WHEN type = ? THEN duration_ms END) AS answer_ms,
                     SUM(CASE WHEN type = ? THEN 1 ELSE 0 END) AS lookups,
-                    SUM(CASE WHEN type = ? THEN 1 ELSE 0 END) AS failures',
-                    [self::CALL_STARTED, self::CALL_ENDED, self::UTTERANCE, self::UTTERANCE, self::UTTERANCE, self::ANSWERED, self::ANSWERED, self::LOOKED_UP, self::FAILED],
-                )
-                ->first();
+                    SUM(CASE WHEN type = ? THEN 1 ELSE 0 END) AS failures
+                FROM seen",
+                [...$bindings, self::CALL_STARTED, self::CALL_ENDED, self::UTTERANCE, self::UTTERANCE, self::UTTERANCE, self::ANSWERED, self::ANSWERED, self::LOOKED_UP, self::FAILED],
+            );
         } catch (Throwable $e) {
             $this->log->warning('Could not read usage statistics: ' . $e->getMessage(), ['guild' => $guildId]);
 
@@ -111,9 +177,9 @@ final class Usage
     }
 
     /**
-     * The events table, created the first time it is needed.
+     * The statistics database, with the events table created the first time it is needed.
      */
-    private function events(): Builder
+    private function connection(): ConnectionInterface
     {
         $connection = DB::connection(self::CONNECTION);
 
@@ -133,6 +199,6 @@ final class Usage
 
         $this->tableExists = true;
 
-        return $connection->table('events');
+        return $connection;
     }
 }

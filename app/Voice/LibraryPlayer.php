@@ -11,27 +11,47 @@ use Throwable;
 /**
  * Plays through the voice library: {@see VoiceClient::playFile()} starts an ffmpeg for the file and sends its
  * first packet half a second later, which is also the gap between two files. {@see OggPlayer} sends the packets
- * itself, without the half second; this one is what VOICE_PLAYER=library plays with, and what the feature tests
- * play with, as their voice client plays nothing.
+ * itself, without the half second, and from the first of them; this one is what VOICE_PLAYER=library plays with,
+ * and what the feature tests play with, as their voice client plays nothing.
  */
 final class LibraryPlayer implements Player
 {
+    /** Counts the stops: a sentence that was still being encoded when the player was stopped is not played once its file is there. */
+    private int $stops = 0;
+
     public function __construct(private readonly VoiceClient $vc)
     {
     }
 
-    public function play(string $path, ?callable $onStart = null): PromiseInterface
+    public function ready(Sentence $sentence): PromiseInterface
     {
-        // The library says nothing when it sends a packet: the file is handed over now, and heard half a second later.
-        if ($onStart !== null) {
-            $onStart();
-        }
+        // The library plays files, and the sentence's is written once all of it is encoded.
+        return $sentence->whole();
+    }
 
-        return $this->vc->playFile($path);
+    public function play(Sentence $sentence, ?callable $onStart = null): PromiseInterface
+    {
+        $stops = $this->stops;
+
+        // At once for a sentence it is ready for. One that was given sooner is played when its file is there.
+        return $sentence->whole()->then(function () use ($sentence, $onStart, $stops) {
+            if ($stops !== $this->stops) {
+                return null;
+            }
+
+            // The library says nothing when it sends a packet: the file is handed over now, and heard half a second later.
+            if ($onStart !== null) {
+                $onStart();
+            }
+
+            return $this->vc->playFile($sentence->path);
+        });
     }
 
     public function stop(): void
     {
+        $this->stops++;
+
         try {
             $this->vc->stop();
         } catch (Throwable) {

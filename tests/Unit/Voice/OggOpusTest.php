@@ -69,6 +69,63 @@ final class OggOpusTest extends TestCase
         }
     }
 
+    public function testReadsAStreamThatComesInPiecesOfAnySize(): void
+    {
+        $packets = ['a', str_repeat('b', 254), str_repeat('c', 255), str_repeat('d', 600), 'e'];
+        $bytes = Ogg::opus($packets, perPage: 2);
+
+        foreach ([1, 7, 27, 300, strlen($bytes)] as $size) {
+            $stream = new OggOpus();
+            $read = [];
+            $counts = [];
+
+            foreach (str_split($bytes, $size) as $piece) {
+                array_push($read, ...$stream->push($piece));
+                $counts[] = count($read);
+            }
+
+            $this->assertSame($packets, $read, "In pieces of {$size} bytes.");
+            $stream->end();
+
+            // A packet is handed over with the piece that completes it, and not later.
+            if ($size === 1) {
+                // The two header pages, then a page's header, its table of two sizes, and the packet's one byte.
+                $firstPacketEnds = strlen(Ogg::opus([])) + 27 + 2 + 1;
+                $this->assertSame([0, 1], [$counts[$firstPacketEnds - 2], $counts[$firstPacketEnds - 1]]);
+            }
+        }
+    }
+
+    public function testSaysWhatIsNoOggOpusStreamAsSoonAsItsFirstBytesAreThere(): void
+    {
+        foreach (['R' => 'the first byte of a WAV file', 'OggX' => 'four bytes that are not a page', Ogg::page(["\x01vorbis"], 0, Ogg::FIRST) => 'the first page of Ogg Vorbis'] as $bytes => $what) {
+            try {
+                (new OggOpus())->push((string) $bytes);
+                $this->fail("{$what} was read as Ogg Opus.");
+            } catch (RuntimeException $e) {
+                $this->assertSame('Not an Ogg Opus file: it does not start with the OpusHead and OpusTags headers.', $e->getMessage(), $what);
+            }
+        }
+
+        // The start of a page may still become one.
+        $stream = new OggOpus();
+        $this->assertSame([], $stream->push('Og'));
+        $this->assertSame([], $stream->push('gS'));
+
+        // A stream that ends there was none.
+        $this->expectException(RuntimeException::class);
+        $stream->end();
+    }
+
+    public function testReadsNothingAfterWhatIsNoPage(): void
+    {
+        $stream = new OggOpus();
+
+        $this->assertSame(['one'], $stream->push(Ogg::opus(['one']) . 'noise'));
+        $this->assertSame([], $stream->push(Ogg::page(['two'], 3)), 'What follows the noise may be anything.');
+        $stream->end();
+    }
+
     public function testReadsWhatFfmpegWritesLikeTheVoiceLibraryDoes(): void
     {
         if (! Ffmpeg::checkForFFmpeg()) {

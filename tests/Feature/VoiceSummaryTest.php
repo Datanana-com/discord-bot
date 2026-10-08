@@ -74,7 +74,7 @@ final class VoiceSummaryTest extends VoiceTestCase
     {
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
 
-        // As if the call had been going on for a while: to answer, Claude only gets its last 20 lines.
+        // As if the call had been going on for a while.
         $earlier = implode('', array_map(fn (int $minute) => sprintf("[10:%02d:00] Bob: Point %d.\n", $minute, $minute), range(1, 30)));
         file_put_contents("{$session->directory}/transcript.txt", $earlier);
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
