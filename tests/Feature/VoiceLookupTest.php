@@ -227,6 +227,24 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->assertCount(1, $this->logged('Looking something up'));
     }
 
+    public function testTellingWhatWasLookedUpGetsTheWholeCallToo(): void
+    {
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->saidEarlier($session, array_map(fn (int $line) => sprintf('[10:%02d:%02d] Bob: This is line %03d of a long call.', intdiv($line, 60), $line % 60, $line), range(1, 300)));
+        $this->ask($vc, '555', self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 1, 'the lookup to start');
+
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream(self::TOLD)]);
+        touch($this->go);
+        $this->waitUntil(fn () => count($this->sent) === 3 && count($this->played) === 2, 'what was looked up to be told');
+
+        // Not only its last lines: what was found is told with everything said before in mind, like an answer.
+        $telling = $this->claudeCalls()[2]['prompt'];
+        $this->assertStringStartsWith("Transcript of the voice call so far:\n\n[10:00:01] Bob: This is line 001 of a long call.\n", $telling);
+        $this->assertSame(300, substr_count($telling, 'of a long call.'));
+        $this->assertStringContainsString("\nClaude: " . self::LOOKING . "\n" . self::LOOKED_UP . "\n\n" . self::TELLING, $this->untimed($telling));
+    }
+
     public function testSaysItLooksIntoItWhenClaudeOnlyWritesTheLine(): void
     {
         $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream('LOOK UP: ' . self::TASK)]);

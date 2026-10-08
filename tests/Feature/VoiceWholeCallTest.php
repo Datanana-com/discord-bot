@@ -59,19 +59,21 @@ final class VoiceWholeCallTest extends VoiceTestCase
         $lines = array_map(fn (int $line) => sprintf('[10:%02d:%02d] Bob: This is line %03d of a long call.', intdiv($line, 60), $line % 60, $line), range(1, 600));
         $this->saidEarlier($session, $lines);
 
-        $this->ask($vc, '555', 'Hey Claude, what did Bob say first?');
+        $this->ask($vc, '555', 'Hey Claude, o que é que o Bob disse primeiro?');
 
         $prompt = $this->claudeCalls()[0]['prompt'];
         $this->assertStringStartsWith("Transcript of the voice call so far:\n\n[10:00:01] Bob: This is line 001 of a long call.\n[10:00:02] Bob: This is line 002", $prompt);
         $this->assertSame(600, substr_count($prompt, 'of a long call.'), 'Every line is there.');
         $this->assertStringContainsString("Bob: This is line 600 of a long call.\n[", $prompt);
-        $this->assertStringEndsWith($this->asking('Alice', 'Hey Claude, what did Bob say first?'), $this->untimed($prompt));
+        $this->assertStringEndsWith($this->asking('Alice', 'Hey Claude, o que é que o Bob disse primeiro?'), $this->untimed($prompt));
 
         // The log says how much Claude was given, in counts: never a word of it.
         $asked = $this->logged('Asked Claude')[0];
         $this->assertSame(['guild', 'session', 'user', 'waited_ms', 'lines', 'characters'], array_keys($asked));
         $this->assertSame([601, mb_strlen($prompt)], [$asked['lines'], $asked['characters']]);
-        $this->assertLogsNeverMention('of a long call', 'what did Bob say', 'quarter past');
+        // In characters, not bytes.
+        $this->assertNotSame(strlen($prompt), mb_strlen($prompt));
+        $this->assertLogsNeverMention('of a long call', 'Bob disse', 'quarter past');
         $this->assertSame([], $this->loggedProblems());
     }
 
