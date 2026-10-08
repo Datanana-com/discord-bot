@@ -141,7 +141,8 @@ final class KokoroProgramTest extends TestCase
 
         $this->speech = new Speech(self::PROGRAM, "{$this->directory}/voices/af_bella.onnx", 'ffmpeg');
         $this->speech->start("{$this->directory}/kokoro");
-        $ogg = $this->within(10.0, $this->speech->synthesize('Hello there, my dear friend.', "{$this->directory}/claude-1.ogg"), 'the voice');
+        $ogg = "{$this->directory}/claude-1.ogg";
+        $this->within(10.0, $this->speech->synthesize('Hello there, my dear friend.', $ogg)->whole(), 'the voice');
 
         $this->assertFileExists($ogg);
         $this->assertStringStartsWith('voice=af_bella device=cpu ', (string) file_get_contents("{$this->directory}/loaded.log"), 'The voice a server chose is the one that was loaded.');

@@ -50,6 +50,7 @@ final class Program
      * @param (Closure(string $line): mixed)|null $onLine
      * @param (Closure(string $line): mixed)|null $onErrorLine
      * @param array<string, string>|null $env
+     * @param (Closure(string $bytes): mixed)|null $onBytes
      */
     public function __construct(
         private readonly array $command,
@@ -57,6 +58,7 @@ final class Program
         private readonly ?Closure $onErrorLine,
         ?string $cwd,
         ?array $env,
+        private readonly ?Closure $onBytes = null,
     ) {
         $this->done = new Deferred();
         // Nobody may be waiting for a program to end, and it can still fail.
@@ -76,7 +78,7 @@ final class Program
         }
 
         Shell::track($this->process);
-        $this->process->stdout->on('data', fn (string $chunk) => $this->read('stdout', $chunk));
+        $this->process->stdout->on('data', fn (string $chunk) => $this->onBytes === null ? $this->read('stdout', $chunk) : $this->handOver('stdout', $chunk));
         $this->process->stderr->on('data', fn (string $chunk) => $this->read('stderr', $chunk));
         $this->process->on('exit', $this->exited(...));
     }
@@ -152,6 +154,7 @@ final class Program
 
     /**
      * Hands over the whole lines of what it printed: the start of the next one waits for its end.
+     * What a program prints for $onBytes is handed over as it comes instead.
      *
      * @param 'stdout'|'stderr' $stream
      */
@@ -170,7 +173,7 @@ final class Program
      */
     private function handOver(string $stream, string $line): void
     {
-        $listener = $stream === 'stdout' ? $this->onLine : $this->onErrorLine;
+        $listener = $stream === 'stdout' ? $this->onBytes ?? $this->onLine : $this->onErrorLine;
         $expected = false;
 
         if ($listener !== null && $this->failure === null) {

@@ -221,9 +221,11 @@ final class VoiceInterruptionTest extends VoiceTestCase
 
         $this->waitUntil(fn () => count($this->logged('Transcribed')) === 2, 'what Alice said to be transcribed');
 
-        // The second sentence was already with Piper, which finished it. It isn't spoken, and the third never gets to Piper.
+        // The second sentence was already with Piper, which finished it. It isn't spoken, and its file isn't kept.
+        // The third never gets to Piper.
         $this->assertCount(1, $this->played);
-        $this->assertSame(["{$session->directory}/claude-2.ogg", "{$session->directory}/claude-3.ogg"], glob("{$session->directory}/claude-*"));
+        $this->assertSame(['It is a quarter past four.', 'Time for a cup of tea.'], $this->givenToPiper());
+        $this->waitUntil(fn () => glob("{$session->directory}/claude-*") === ["{$session->directory}/claude-2.ogg"], 'the file of the sentence nobody heard to be deleted');
         $this->assertSame([self::QUESTION . "\n" . self::ANSWER], $this->sent);
         $this->assertSame([], $this->loggedProblems());
     }

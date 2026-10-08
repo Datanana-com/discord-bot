@@ -6,8 +6,10 @@ namespace Tests\Feature;
 
 use App\Voice\VoiceSession;
 use React\Promise\Deferred;
+use Throwable;
 
 use function React\Async\await;
+use function React\Promise\set_rejection_handler;
 
 /**
  * Claude's answer is spoken sentence by sentence, while Claude is still writing it.
@@ -113,6 +115,182 @@ final class VoiceStreamingTest extends VoiceTestCase
         $this->assertSame(self::SENTENCES, array_map(file_get_contents(...), $this->played));
     }
 
+    public function testGivesPiperTheNextSentenceWhileTheOneBeforeIsStillEncodedAndSpeaksThemInOrder(): void
+    {
+        // The first sentence's ffmpeg takes its time.
+        touch($hold = "{$this->recordings}/ffmpeg.hold");
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream(self::ANSWER), 'FAKE_FFMPEG_HOLD' => $hold, 'FAKE_FFMPEG_HOLD_ON' => 'quarter']);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        // Piper doesn't wait for it: it speaks the other two, which are encoded before the first one is.
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => is_file("{$session->directory}/claude-3.ogg") && is_file("{$session->directory}/claude-4.ogg"), 'the sentences after the first to be encoded');
+
+        $this->assertSame(self::SENTENCES, $this->givenToPiper());
+        $this->assertFileDoesNotExist("{$session->directory}/claude-2.ogg");
+        $this->assertSame([], $this->played, 'A sentence that is ready first still waits for the ones before it.');
+
+        unlink($hold);
+        $this->waitUntil(fn () => count($this->played) === 3, 'every sentence to be spoken');
+
+        $this->assertSame(self::SENTENCES, array_map(file_get_contents(...), $this->played));
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testCountsAFailureWhenASentenceCannotBeEncoded(): void
+    {
+        $finished = new Deferred();
+        $this->playing = $finished->promise();
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream(self::ANSWER), 'FAKE_FFMPEG_FAILS_ON' => 'cup of tea']);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->played !== [], 'the first sentence to be spoken');
+
+        // The second sentence's ffmpeg fails while the first one is spoken, which is not interrupted. Piper had
+        // already been given the third.
+        $this->waitUntil(fn () => count($this->givenToPiper()) === 3, 'Piper to get the last sentence');
+        $this->runFor(0.3);
+        $this->assertSame([], $this->loggedProblems());
+
+        $finished->resolve(null);
+        $this->waitUntil(fn () => $this->loggedProblems() !== [], 'the failure to be logged');
+
+        $this->assertCount(1, $this->loggedProblems());
+        $this->assertStringStartsWith('Voice reply failed: ', $this->loggedProblems()[0]);
+        $this->assertStringEndsWith('fake-ffmpeg exited with code 1: Error while encoding.', $this->loggedProblems()[0]);
+        $this->assertSame('speech', $this->logged($this->loggedProblems()[0])[0]['step']);
+        $this->assertSame(["{$session->directory}/claude-2.ogg"], $this->played, 'Nothing is spoken after the sentence that is missing.');
+        $this->assertSame(["{$session->directory}/claude-2.ogg"], glob("{$session->directory}/claude-*"), 'Nor kept: not the half of the second, and not the third, which nobody heard.');
+        $this->assertSame([self::QUESTION . "\n" . self::ANSWER, "Sorry, I couldn't say that out loud. The bot's logs say why."], $this->sent);
+
+        // The next answer is spoken: an ffmpeg waits for its sentence as if nothing had happened.
+        $this->setProcessEnv(['FAKE_FFMPEG_FAILS_ON' => '', 'FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is a quarter past four.')]);
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => count($this->played) === 2, 'the next answer to be spoken');
+        $this->assertCount(1, $this->loggedProblems());
+        $this->assertLogsNeverMention('cup of tea');
+    }
+
+    public function testAFailureOfTheLastSentenceIsReportedOnceAndNotAsSomethingNobodyHandled(): void
+    {
+        $unhandled = [];
+        $previous = set_rejection_handler(function (Throwable $e) use (&$unhandled) {
+            $unhandled[] = $e->getMessage();
+        });
+
+        try {
+            // Piper fails on the last sentence: nothing waits for Piper to be free after it.
+            $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream(self::ANSWER), 'FAKE_PIPER_FAILS_ON' => 'kettle']);
+            $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);
+
+            $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+            $this->waitUntil(fn () => $this->loggedProblems() !== [], 'the failure to be logged');
+            await($session->stop());
+            unset($session);
+            gc_collect_cycles();
+        } finally {
+            set_rejection_handler($previous);
+        }
+
+        $this->assertCount(1, $this->loggedProblems());
+        $this->assertStringStartsWith('Voice reply failed: ', $this->loggedProblems()[0]);
+        $this->assertCount(2, $this->played, 'The two sentences before it were spoken.');
+        $this->assertSame([], $unhandled);
+    }
+
+    public function testDoesNotKeepASentenceThatWasStillEncodedWhenTheCallStops(): void
+    {
+        touch($hold = "{$this->recordings}/ffmpeg.hold");
+        $this->setProcessEnv(['FAKE_FFMPEG_HOLD' => $hold]);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->givenToPiper() !== [] && $this->sent !== [], 'the sentence to be with its ffmpeg');
+
+        // The call stops while the sentence is in the ffmpeg, which is left to end: the call is over once it has.
+        $over = false;
+        $session->stop()->then(function () use (&$over) {
+            $over = true;
+        });
+        $this->runFor(0.5);
+        $this->assertFalse($over);
+
+        unlink($hold);
+        $this->waitUntil(function () use (&$over) {
+            return $over;
+        }, 'the call to be over');
+
+        $this->assertSame([], $this->played);
+        $this->assertSame([], glob("{$session->directory}/claude-*"), 'Nobody heard it: its file is not kept.');
+        $this->assertSame([], array_filter($this->ffmpegs(), $this->isRunning(...)), 'No ffmpeg is left.');
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testSpeaksTheFirstWordsOfAnAnswerBeforeItsFirstSentenceIsWholeWhenSetTo(): void
+    {
+        $this->setEnv(['VOICE_FIRST_WORDS' => '5']);
+        // Claude stops in the middle of its first sentence.
+        $this->setProcessEnv([
+            'FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is a quarter past four in', ' the afternoon. Time for a cup of tea.'),
+            'FAKE_CLAUDE_PAUSE' => '10',
+        ]);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->played !== [], 'the first words to be spoken');
+
+        $this->assertSame(['It is a quarter past'], array_map(file_get_contents(...), $this->played));
+        $this->assertSame(['It is a quarter past'], $this->givenToPiper());
+        $this->assertSame([], $this->sent, 'Claude is still writing.');
+        $this->assertCount(1, $this->logged('Started speaking'));
+
+        // The rest of the sentence follows as a piece of its own, and after it the answer goes on sentence by sentence.
+        touch($this->claudeResume);
+        $this->waitUntil(fn () => count($this->played) === 3, 'the whole answer to be spoken');
+
+        $this->assertSame(['It is a quarter past', 'four in the afternoon.', 'Time for a cup of tea.'], array_map(file_get_contents(...), $this->played));
+        $this->assertSame([self::QUESTION . "\nIt is a quarter past four in the afternoon. Time for a cup of tea."], $this->sent, 'What is posted is what Claude wrote.');
+        $this->assertCount(1, $this->logged('Started speaking'));
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testLooksWhetherASentenceIsStillWantedWhenTheLibraryCanStartOnIt(): void
+    {
+        // The sentence's ffmpeg has written the first of it, and takes its time over the rest.
+        touch($hold = "{$this->recordings}/ffmpeg.hold");
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is a quarter past four.'), 'FAKE_FFMPEG_HOLD' => $hold, 'FAKE_FFMPEG_STARTS' => '1']);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->sent !== [] && $this->givenToPiper() !== [], 'the answer to be posted, and its sentence to be with its ffmpeg');
+        $this->runFor(0.3);
+
+        // The voice library plays files, so it can't start yet. Alice opts out meanwhile: it never does.
+        VoiceSession::optOut('555');
+        unlink($hold);
+        $this->runFor(0.5);
+
+        $this->assertSame([], $this->played);
+        $this->assertSame([], $this->logged('Started speaking'));
+        $this->waitUntil(fn () => glob("{$session->directory}/claude-*") === [], 'the file of the sentence nobody heard to be gone');
+        VoiceSession::optIn('555');
+    }
+
+    public function testSpeaksSentenceBySentenceAndSaysSoWhenTheFirstWordsAreNotANumber(): void
+    {
+        $this->setEnv(['VOICE_FIRST_WORDS' => 'five']);
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is a quarter past four in', ' the afternoon. Time for a cup of tea.')]);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->assertSame(['VOICE_FIRST_WORDS is not a whole number, 0 or more: answers are spoken sentence by sentence.'], $this->loggedProblems());
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => count($this->played) === 2, 'the answer to be spoken');
+
+        $this->assertSame(['It is a quarter past four in the afternoon.', 'Time for a cup of tea.'], array_map(file_get_contents(...), $this->played));
+    }
+
     public function testSpeaksAnAnswerThatWasNotStreamedSentenceBySentence(): void
     {
         $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeResult(self::ANSWER)]);
@@ -192,8 +370,9 @@ final class VoiceStreamingTest extends VoiceTestCase
         $this->waitUntil(fn () => $this->played !== [], 'the first sentence to be spoken');
         await($session->stop());
 
-        // The second one was already being synthesized; the third never is.
-        $this->assertSame(["{$session->directory}/claude-2.ogg", "{$session->directory}/claude-3.ogg"], glob("{$session->directory}/claude-*"));
+        // The second one was already being synthesized, and its file isn't kept: nobody heard it. The third never is.
+        $this->assertSame(array_slice(self::SENTENCES, 0, 2), $this->givenToPiper());
+        $this->waitUntil(fn () => glob("{$session->directory}/claude-*") === ["{$session->directory}/claude-2.ogg"], 'the file of the sentence nobody heard to be deleted');
         $this->assertCount(1, $this->played);
         $this->assertSame([], $this->loggedProblems());
     }

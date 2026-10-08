@@ -372,7 +372,8 @@ final class ShareCommandTest extends CommandTestCase
         $this->runFor(2.0);
 
         $this->assertSame([], $this->played);
-        $this->assertCount(1, glob("{$session->directory}/claude-*"), 'Only the sentence Piper was already working on.');
+        $this->assertSame(['It is a quarter past four.'], $this->givenToPiper(), 'Only the sentence Piper was already working on.');
+        $this->assertSame([], glob("{$session->directory}/claude-*"), 'Nobody heard it: its file is not kept.');
         await($session->stop());
     }
 
