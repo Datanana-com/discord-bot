@@ -170,6 +170,30 @@ final class VoiceWholeCallTest extends VoiceTestCase
         $this->assertSame("{$said}\nClaude: " . self::ANSWER . "\n", $this->untimed($this->transcript($session)));
     }
 
+    public function testWhatIsSaidAfterForgettingAnEarlierLineTakesNoOtherLinesPlace(): void
+    {
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        // Alice's first line is hers alone; the two after it were said with Bob there.
+        $this->inCall('555');
+        $this->hearsNoAnswer($vc, $session, '555', 'I like bananas.');
+        $this->joins('666');
+        $this->hearsNoAnswer($vc, $session, '666', 'Hello there.');
+        $this->hearsNoAnswer($vc, $session, '555', 'Hello Bob.');
+
+        // The first line goes, and the call goes on: each new line is one more, not one in the place of another.
+        VoiceSession::forget('555');
+        $this->hearsNoAnswer($vc, $session, '666', 'Shall we start?');
+        $this->ask($vc, '555', 'Claude, are we all here?');
+
+        $said = "Bob: Hello there.\nAlice: Hello Bob.\nBob: Shall we start?\nAlice: Claude, are we all here?";
+        $this->assertSame(
+            "Transcript of the voice call so far:\n\n{$said}\n\n" . $this->asking('Alice', 'Claude, are we all here?'),
+            $this->untimed($this->claudeCalls()[0]['prompt']),
+        );
+        $this->assertSame("{$said}\nClaude: " . self::ANSWER . "\n", $this->untimed($this->transcript($session)));
+    }
+
     public function testForgettingEverythingSaidDeletesTheFileAndLeavesClaudeAnEmptyCall(): void
     {
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);

@@ -331,6 +331,7 @@ final class VoiceWhenAskedTest extends VoiceTestCase
         yield 'every spelling is the name' => ['claude, claud', ['Hey Claud.', 'Claude, Claud, Claude.', 'You, Claud.'], ['Hey you, Claud.']];
         yield 'a name of two words is one name' => ['okay computer', ['Okay, computer.', 'Hey, okay computer.'], ['Hey you, okay computer.']];
         yield 'a word with an apostrophe is one word' => ['claude', ["Claude, what's?", 'Claude, c’est ?'], ["Claude, what's up?"]];
+        yield 'a language written without spaces has a word in each character' => ['claude', ['Claude, 嗨。'], ['Claude, 你好吗？', 'Claude, 今日の天気はどうですか', 'Claude สวัสดี']];
         yield 'numbers and letters with accents are words' => ['claude', ['Claude, 2.', 'Claude, é?'], ['Claude, 2 3.', 'Claude, é isso.', 'Claude, não é.']];
     }
 
@@ -406,6 +407,28 @@ final class VoiceWhenAskedTest extends VoiceTestCase
         $this->waitUntil(fn () => $this->sent !== [], 'the answer');
 
         $this->assertSame(['> **Alice:** What time is it in the place where my sister lives?' . "\n" . self::ANSWER], $this->sent);
+    }
+
+    public function testAQuestionThatWaitsForItsTurnCountsFromWhenItWasSaid(): void
+    {
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->hearsNoAnswer($vc, $session, '555', 'Hey Claude.');
+        // The bot is answering Bob, at length, when Alice says what she wanted: it waits its turn behind that answer.
+        $speaking = new Deferred();
+        $this->playing = $speaking->promise();
+        $this->ask($vc, '666', 'Claude, tell us a long story.');
+        $this->waitUntil(fn () => count($this->played) === 1, 'the answer to Bob to be spoken');
+        $this->says($vc, '555', 'What time is it?');
+        $this->waitUntil(fn () => count($this->logged('Utterance ended')) === 3, 'Alice to finish speaking');
+        $this->runFor(5.5);
+
+        // Its turn comes long after the five seconds, but she said it within them.
+        $this->playing = null;
+        $speaking->resolve(null);
+        $this->waitUntil(fn () => count($this->sent) === 2, 'the answer to Alice');
+
+        $this->assertSame('> **Alice:** What time is it?' . "\n" . self::ANSWER, $this->sent[1]);
     }
 
     public function testOptingOutForgetsThatTheyCalledTheBot(): void

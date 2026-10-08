@@ -1156,8 +1156,10 @@ final class VoiceSession
             $named += $count;
         }
 
-        // A word with an apostrophe in it is one word.
-        return $named > 0 && preg_match_all('/[\p{L}\p{N}][\p{L}\p{M}\p{N}\'’]*/u', $text) <= self::CALLING_WORDS;
+        // A word with an apostrophe in it is one word. Chinese, Japanese and Thai are written without spaces
+        // between words, so each of their characters counts as one: a whole question would otherwise be one word.
+        // Only their letters: PCRE also takes the punctuation those scripts share for theirs.
+        return $named > 0 && preg_match_all('/(?=\p{L})[\p{Han}\p{Hiragana}\p{Katakana}\p{Thai}]|[\p{L}\p{N}][\p{L}\p{M}\p{N}\'’]*/u', $text) <= self::CALLING_WORDS;
     }
 
     /**
