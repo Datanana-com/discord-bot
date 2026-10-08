@@ -96,6 +96,30 @@ final class ClaudeTest extends TestCase
         $this->assertSame(['haiku', 'sonnet', 'opus'], Claude::MODELS);
     }
 
+    public function testAsksForHaikuByTheIdOfItsLatestModel(): void
+    {
+        putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeStream(" Paris.\n"));
+
+        // Claude Code 2.1.289 gives Haiku 4.5 for "haiku", so the bot asks for the newer one by its ID.
+        $claude = $this->claude();
+        await($claude->ask('Hello'));
+
+        $this->assertSame('claude-haiku-5-5', $this->option($this->arguments(file_get_contents($this->log)), '--model'));
+        $this->assertSame('haiku', $claude->model, 'A server still chooses it, and is shown it, by its name.');
+    }
+
+    public function testPassesAModelThatIsNotOneOfItsNamesOnAsItIs(): void
+    {
+        putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeStream(" Paris.\n"));
+
+        // CLAUDE_MODEL can hold a full ID, to go back to an older model, say.
+        $_ENV['CLAUDE_MODEL'] = 'claude-haiku-4-5-20251001';
+        $_ENV['CLAUDE_BINARY'] = __DIR__ . '/../../Fixtures/fake-claude';
+        await(Claude::fromEnv()->ask('Hello'));
+
+        $this->assertSame('claude-haiku-4-5-20251001', $this->option($this->arguments(file_get_contents($this->log)), '--model'));
+    }
+
     public function testAsksClaudeCodeWithoutToolsOrAnApiKey(): void
     {
         putenv('FAKE_CLAUDE_OUTPUT=' . self::claudeStream(" Paris.\n"));
@@ -114,7 +138,7 @@ final class ClaudeTest extends TestCase
         $this->assertSame('stream-json', $this->option($args, '--output-format'));
         $this->assertContains('--verbose', $args, '--print only streams with --verbose.');
         $this->assertContains('--include-partial-messages', $args, 'Without it, the text only comes once it is all written.');
-        $this->assertSame('haiku', $this->option($args, '--model'));
+        $this->assertSame('claude-haiku-5-5', $this->option($args, '--model'));
         $this->assertSame('', $this->option($args, '--tools'));
         $this->assertNotContains('--allowedTools', $args);
         $this->assertNotContains('--advisor', $args);
@@ -480,7 +504,7 @@ final class ClaudeTest extends TestCase
         // Everything else is as for a process started for the prompt.
         $args = $this->arguments($log);
         $this->assertSame(
-            ['--print', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--model', 'haiku'],
+            ['--print', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--model', 'claude-haiku-5-5'],
             array_slice($args, 0, 7),
         );
         $this->assertStringContainsString('Discord voice call', $this->option($args, '--system-prompt'));
