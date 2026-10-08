@@ -1,0 +1,15 @@
+#!/bin/sh
+# Stands in for piper with audio a test made: for each line it reads on stdin, it copies the WAV file named by
+# FAKE_PIPER_WAV to a file of its own in the --output-dir folder, and says so on stderr like Piper. The test
+# decides what the voice's files hold: silence around a soft sound, say.
+while [ $# -gt 0 ]; do
+    if [ "$1" = "--output-dir" ]; then dir="$2"; fi
+    shift
+done
+mkdir -p "$dir"
+n=0
+while IFS= read -r line; do
+    n=$((n + 1))
+    cp "$FAKE_PIPER_WAV" "$dir/$$-$n.wav"
+    echo "INFO:__main__:Wrote $dir/$$-$n.wav" >&2
+done

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# What PIPER_BINARY points at to speak with Kokoro: starts kokoro_serve.py with this folder's own Python
+# (installed by install.sh), wherever the folder is. Takes the arguments the bot gives Piper:
+#   kokoro --model <folder>/voices/af_heart.onnx --output-dir <folder>
+here=$(dirname "$(readlink -f "$0")")
+exec "$here/venv/bin/python" "$here/kokoro_serve.py" "$@"

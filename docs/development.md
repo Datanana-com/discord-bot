@@ -111,7 +111,7 @@ composer test -- --testsuite Unit      # or Feature
 
 Unit tests cover each class on its own. Feature tests run the whole voice flow, the direct messages with their memory, and the slash commands against a fake Discord, with whisper.cpp, Claude Code, Piper and, for voice messages, ffmpeg replaced by the scripts in `tests/Fixtures`, and Discord's attachment hosts by a small web server on your machine, so they need no models, Claude login or Discord connection.
 
-The stand-ins for Claude Code and Piper keep running like the real programs do in a call: `fake-claude` waits for its question when it is started with `--input-format stream-json`, and `fake-piper` speaks a sentence for each line it reads.
+The stand-ins for Claude Code and Piper keep running like the real programs do in a call: `fake-claude` waits for its question when it is started with `--input-format stream-json`, and `fake-piper` speaks a sentence for each line it reads. The program that speaks with Kokoro (`kokoro/kokoro_serve.py`) is tested as it is, with its engine replaced by a stand-in that needs neither PyTorch nor the model (`KokoroProgramTest`, which needs `python3`); `kokoro/engine.py`, which holds all that does, is only run for real by hand (see the pull request that added it).
 
 `tests/Feature/VoiceCallTest.php` goes further: the call's audio travels over a local UDP socket standing in for Discord's media server, encrypted and Opus-encoded like in a real call, and the spoken answer is encoded by ffmpeg. It needs ffmpeg and libopus, like the bot itself, and is skipped without them.
 
