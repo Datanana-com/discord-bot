@@ -25,6 +25,8 @@ use Discord\Builders\MessageBuilder;
 use App\Exceptions\EventNotFoundException;
 use Discord\Parts\Application\Command\Command;
 use Discord\Parts\Interactions\Interaction;
+use Discord\Parts\Interactions\Request\Option as RequestOption;
+use App\Commands\SuggestsOptions;
 
 use function React\Promise\all;
 
@@ -409,7 +411,9 @@ final class Application
                 }
 
                 $working?->catch(fn (Throwable $e) => $this->commandFailed($commandName, $interaction, $e));
-            });
+            }, $commandClass instanceof SuggestsOptions
+                ? fn (Interaction $interaction, ?RequestOption $focused) => $this->suggest($commandName, $commandClass, $interaction, $focused)
+                : null);
         }
 
         // The repository is empty until the registered commands are fetched from Discord.
@@ -435,6 +439,27 @@ final class Application
             },
             fn (\Throwable $e) => $this->log->error('Could not fetch the registered commands: ' . $e->getMessage()),
         );
+    }
+
+    /**
+     * What a command offers for the option someone is typing. Nobody is told when it fails and nothing is
+     * logged for each keystroke, only for the failure: the option can still be typed without suggestions.
+     *
+     * @return list<array{name: string, value: string}>
+     */
+    private function suggest(string $commandName, SuggestsOptions $command, Interaction $interaction, ?RequestOption $focused): array
+    {
+        try {
+            return $command->suggest($interaction, $focused);
+        } catch (Throwable $e) {
+            $this->log->warning("/{$commandName} could not suggest: {$e->getMessage()}", [
+                'guild' => $interaction->guild_id,
+                'user' => $interaction->user?->id,
+                ...Failures::context($e),
+            ]);
+
+            return [];
+        }
     }
 
     /**

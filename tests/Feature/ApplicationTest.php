@@ -18,6 +18,7 @@ use Discord\Parts\Application\Command\Command;
 use Discord\Parts\Application\Command\Option;
 use Discord\Parts\Channel\Message;
 use Discord\Parts\Interactions\Interaction;
+use Discord\Parts\Interactions\Request\Option as RequestOption;
 use Discord\Helpers\RegisteredCommand;
 use Discord\WebSockets\Event;
 use Monolog\Handler\TestHandler;
@@ -258,6 +259,41 @@ final class ApplicationTest extends TestCase
         $this->assertContains('Pong!', $this->logged());
     }
 
+    public function testOnlyRegistersSuggestionsForCommandsThatMakeThem(): void
+    {
+        [$app, $commands] = $this->appWithCommands();
+
+        $app->prepareCommandClasses();
+
+        $this->assertSame(['settings'], array_keys($commands->suggesters), 'The others have nothing to complete.');
+    }
+
+    public function testHandsWhatIsTypedToTheCommandAndReturnsItsSuggestions(): void
+    {
+        $this->addAppFile('Commands/Global/ColorCommand.php', "<?php\n\nnamespace App\\Commands\\Global;\n\nuse App\\CommandAbstract;\nuse App\\Commands\\SuggestsOptions;\nuse Discord\\Parts\\Interactions\\Interaction;\nuse Discord\\Parts\\Interactions\\Request\\Option;\n\nfinal class ColorCommand extends CommandAbstract implements SuggestsOptions\n{\n    public string \$description = 'Picks a color';\n\n    public function handle(Interaction \$interaction): ?\\React\\Promise\\PromiseInterface\n    {\n        return null;\n    }\n\n    public function suggest(Interaction \$interaction, ?Option \$focused): array\n    {\n        if (\$focused?->value === 'boom') {\n            throw new \\RuntimeException('Nope');\n        }\n\n        if (\$focused?->value === 'error') {\n            throw new \\TypeError('Bad');\n        }\n\n        return [['name' => 'Red (' . \$focused?->value . ')', 'value' => 'red']];\n    }\n}\n");
+        [$app, $commands] = $this->appWithCommands();
+
+        $app->prepareCommandClasses();
+
+        $interaction = new Interaction($app->discord, ['guild_id' => '100', 'channel_id' => '200', 'user' => ['id' => '555', 'username' => 'alice']], true);
+        $focused = fn (string $value) => new RequestOption($app->discord, ['name' => 'color', 'type' => Option::STRING, 'value' => $value, 'focused' => true], true);
+
+        $this->assertSame([['name' => 'Red (re)', 'value' => 'red']], ($commands->suggesters['color'])($interaction, $focused('re')));
+        $this->assertNotContains('/color used', $this->logged(), 'Each keystroke would be logged.');
+        $this->assertSame([], array_filter($this->logged(), fn (string $message) => str_contains($message, 'could not suggest')));
+
+        // Nothing to suggest is better than an option that can't be typed, so it is logged and nobody is told.
+        $this->assertSame([], ($commands->suggesters['color'])($interaction, $focused('boom')));
+        $this->assertSame([Level::Warning], array_map(fn ($record) => $record->level, array_values(array_filter($this->logs->getRecords(), fn ($record) => str_contains($record->message, 'could not suggest')))), 'A warning: the command works without it.');
+        // Not only exceptions: a wrong type in the command is an Error.
+        $this->assertSame([], ($commands->suggesters['color'])($interaction, $focused('error')));
+        $this->assertContains('/color could not suggest: Bad', $this->logged());
+        $this->assertContains(['/color could not suggest: Nope', ['guild' => '100', 'user' => '555']], array_map(
+            fn (array $record) => [$record[0], array_intersect_key($record[1], ['guild' => 1, 'user' => 1])],
+            $this->loggedWithContext(),
+        ));
+    }
+
     public function testOnlyRegistersGlobalCommands(): void
     {
         // Commands in Commands/Guild are meant for one server, which isn't supported yet.
@@ -314,6 +350,7 @@ final class ApplicationTest extends TestCase
             [['name' => 'haiku', 'value' => 'haiku'], ['name' => 'sonnet', 'value' => 'sonnet'], ['name' => 'opus', 'value' => 'opus']],
             $settings['options'][3]['choices'],
         );
+        $this->assertSame([false, true, false], array_map(fn (array $option) => $option['autocomplete'] ?? false, [$settings['options'][0], $settings['options'][2], $settings['options'][3]]), 'Only the voice is completed while it is typed.');
         $this->assertSame('32', $settings['default_member_permissions']);
         $this->assertSame(200, $settings['options'][0]['max_length'], 'Discord stops a wake word that is too long from being typed: five spellings of 32, with their commas.');
 
@@ -869,6 +906,9 @@ final class ApplicationTest extends TestCase
             /** @var array<string, callable> Interaction handlers by command name. */
             public array $listeners = [];
 
+            /** @var array<string, callable> What fills in an option while it is typed, by command name. */
+            public array $suggesters = [];
+
             /** @var array<string, string> The commands removed from Discord: name => the ID that was sent. */
             public array $removed = [];
 
@@ -929,7 +969,7 @@ final class ApplicationTest extends TestCase
                 return resolve($command);
             }
         };
-        $app->discord = $this->discordStub($client, ['application' => (object) ['commands' => $commands]], $commands->listeners);
+        $app->discord = $this->discordStub($client, ['application' => (object) ['commands' => $commands]], $commands->listeners, suggesters: $commands->suggesters);
 
         return [$app, $commands];
     }
@@ -1023,8 +1063,9 @@ final class ApplicationTest extends TestCase
      *
      * @param array<string, mixed>     $properties
      * @param array<string, callable> &$listeners  Collects the handlers passed to listenCommand().
+     * @param array<string, callable> &$suggesters Collects the ones that fill in an option while it is typed.
      */
-    private function discordStub(Discord $client, array $properties, array &$listeners, bool $expectClose = false): Discord
+    private function discordStub(Discord $client, array $properties, array &$listeners, bool $expectClose = false, array &$suggesters = []): Discord
     {
         $methods = ['__get', 'getLogger', 'getHttpClient', 'getFactory', 'listenCommand', 'close'];
         $discord = $expectClose
@@ -1043,8 +1084,12 @@ final class ApplicationTest extends TestCase
         $discord->method('getLogger')->willReturn($client->getLogger());
         $discord->method('getHttpClient')->willReturn($client->getHttpClient());
         $discord->method('getFactory')->willReturn($client->getFactory());
-        $discord->method('listenCommand')->willReturnCallback(function (string $name, callable $callback) use (&$listeners): RegisteredCommand {
+        $discord->method('listenCommand')->willReturnCallback(function (string $name, callable $callback, ?callable $suggest = null) use (&$listeners, &$suggesters): RegisteredCommand {
             $listeners[$name] = $callback;
+
+            if ($suggest !== null) {
+                $suggesters[$name] = $suggest;
+            }
 
             return (new ReflectionClass(RegisteredCommand::class))->newInstanceWithoutConstructor();
         });
