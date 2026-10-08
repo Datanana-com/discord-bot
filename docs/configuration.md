@@ -40,7 +40,7 @@
 |---|---|
 | `wake_word` | A word or short phrase: at most 32 letters, numbers, spaces, apostrophes and hyphens, starting and ending with a letter or number. List up to 5 spellings separated by commas, for what whisper writes when it mishears it: `claude, cloud, claud`. The first is the one the bot tells people to say. `none` answers everything: Discord doesn't let an option be empty. |
 | `language` | `auto`, or a whisper language code such as `en` or `pt`. With `auto`, whisper detects the language of everything said first, which makes the bot answer a second or two later. |
-| `voice` | The name of a Piper voice in the same folder as `PIPER_MODEL`, e.g. `pt_BR-faber-medium` for `pt_BR-faber-medium.onnx`. |
+| `voice` | The name of a Piper voice in the same folder as `PIPER_MODEL`, e.g. `pt_BR-faber-medium` for `pt_BR-faber-medium.onnx`. Discord lists the installed voices while you type it, and the ones that have what you typed in their name or in the simple name shown: `en_US-lessac-medium` is shown as `Lessac (en_US, medium)`. Up to 25 are listed; the name that is saved is the file's. |
 | `model` | `haiku` (Haiku 5.5), `sonnet` or `opus`. It answers in the server's calls, writes their summaries, and answers `/recall`. |
 | `reset` | Goes back to the `.env` defaults. Other options given with it are applied after it. |
 
