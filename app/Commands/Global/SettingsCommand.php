@@ -5,18 +5,21 @@ declare(strict_types=1);
 namespace App\Commands\Global;
 
 use App\CommandAbstract;
+use App\Commands\SuggestsOptions;
 use App\Settings\GuildSettings;
 use App\Voice\Claude;
 use App\Voice\Speech;
 use App\Voice\Transcriber;
+use App\Voice\VoiceLabel;
 use App\Voice\VoiceSession;
 use Discord\Builders\MessageBuilder;
 use Discord\Parts\Application\Command\Option;
 use Discord\Parts\Interactions\Interaction;
+use Discord\Parts\Interactions\Request\Option as GivenOption;
 use React\Promise\PromiseInterface;
 use Discord\Parts\Permissions\Permission;
 
-final class SettingsCommand extends CommandAbstract
+final class SettingsCommand extends CommandAbstract implements SuggestsOptions
 {
     public string $description = "Shows or changes this server's wake word, language, voice and Claude model.";
 
@@ -35,7 +38,8 @@ final class SettingsCommand extends CommandAbstract
         [
             'type' => Option::STRING,
             'name' => 'voice',
-            'description' => 'The Piper voice that speaks the answers, e.g. "pt_BR-faber-medium".',
+            'description' => 'The voice that speaks the answers: start typing to see the installed ones.',
+            'autocomplete' => true,
         ],
         [
             'type' => Option::STRING,
@@ -63,6 +67,29 @@ final class SettingsCommand extends CommandAbstract
         $reply = mb_substr($this->reply($interaction), 0, 2000);
 
         return $interaction->respondWithMessage(MessageBuilder::new()->setContent($reply), ephemeral: true);
+    }
+
+    public function suggest(Interaction $interaction, ?GivenOption $focused): array
+    {
+        if ($focused?->name !== 'voice') {
+            return [];
+        }
+
+        $typed = mb_strtolower(trim((string) $focused->value));
+        $choices = [];
+
+        foreach (Speech::voices() as $voice) {
+            $label = VoiceLabel::of($voice);
+
+            // Discord refuses all the suggestions when one has a value over 100 characters, or when there are over 25.
+            if (mb_strlen($voice) > 100 || ! str_contains(mb_strtolower("{$voice} {$label}"), $typed)) {
+                continue;
+            }
+
+            $choices[] = ['name' => mb_substr($label, 0, 100), 'value' => $voice];
+        }
+
+        return array_slice($choices, 0, 25);
     }
 
     private function reply(Interaction $interaction): string
