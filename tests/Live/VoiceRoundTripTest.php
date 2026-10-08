@@ -217,8 +217,9 @@ final class VoiceRoundTripTest extends TestCase
         $heard = await(Transcriber::fromEnv()->transcribe($speaker['recordings'][0]));
         $this->assertMatchesRegularExpression('/quarter.+meeting/is', $heard, "The speaker heard both sentences, in order: {$heard}");
         // From the first word: the bot sends the first packet of an answer 40 ms after it says it speaks, and nothing of the
-        // start may be lost on the way. Piper's file begins with about 80 ms of near-silence before "It", so this bounds
-        // what was lost at about 80 ms, not at the 40 ms.
+        // start may be lost on the way. The silence at the start of Piper's file is taken off, but for the 20 ms Speech
+        // keeps, so this bounds what was lost at about 20 ms: the 80 ms it used to be were silence, these are not. "It" starts
+        // on a vowel, so this says little about a soft first sound, which SpeechTrimTest proves is kept in the file.
         $this->assertMatchesRegularExpression('/^\W*(it is|it\'s) a quarter/i', $heard, "The speaker heard the answer from its first word: {$heard}");
     }
 
