@@ -227,6 +227,9 @@ final class VoiceSession
     /** @var array<int, array{PromiseInterface<string|null>, callable(): bool}> The tasks not over, by object ID, with whether they are still wanted. */
     private array $lookingUp = [];
 
+    /** How many utterances, and things looked up, wait for their turn or are being answered or told: see {@see saveUsage()}. */
+    private int $turns = 0;
+
     /**
      * @var array<string, float> Who only called the bot with the last thing they said, by user ID, with when that
      *                           sentence ended, by the clock that only goes forward: see {@see CALLED_SECONDS}.
@@ -813,6 +816,8 @@ final class VoiceSession
         $ms = $this->msSince($this->startedAt);
         $this->log('info', 'Voice session stopped', ['ms' => $ms, 'speakers' => count($this->speakers), ...$this->counts]);
         $this->track(Usage::CALL_ENDED, ['duration_ms' => $ms]);
+        // Now, unless this or another call is answering or speaking: then when its turn is over.
+        $this->saveUsage();
 
         // The queue gets here once everything said is transcribed, so the summary includes the last thing said.
         return $this->queue = $this->queue
@@ -1035,6 +1040,9 @@ final class VoiceSession
      */
     private function inTurn(string $userId, callable $turn): void
     {
+        // Counted from now, not when its turn comes: what waits for its turn is someone waiting for the bot.
+        $this->turns++;
+
         $this->queue = $this->queue
             ->then($turn)
             ->catch(function (Throwable $e) use ($userId) {
@@ -1043,6 +1051,11 @@ final class VoiceSession
                 $this->track(Usage::FAILED, ['user' => $userId]);
 
                 return $this->apologize($e, $userId);
+            })
+            ->finally(function () {
+                // Answered and spoken, or not answered at all.
+                $this->turns--;
+                $this->saveUsage();
             });
     }
 
@@ -2081,13 +2094,32 @@ final class VoiceSession
     }
 
     /**
-     * Records something that happened in the call, for /stats.
+     * Records something that happened in the call, for /stats. It is only kept: see {@see saveUsage()}.
      *
      * @param array{channel?: string, user?: string, duration_ms?: int} $details
      */
     private function track(string $type, array $details = []): void
     {
         $this->usage->record($type, (string) $this->vc->channel->guild_id, ['session' => $this->id, ...$details]);
+    }
+
+    /**
+     * Writes what {@see track()} kept, when nobody waits for the bot: in no call is something said waiting for
+     * its turn or being answered, which includes the bot speaking. A write blocks the event loop, which
+     * sends the next packet of a sentence every 20 ms and starts the next step of an answer.
+     *
+     * Called at the end of every turn, and when a call ends, so what is kept waits for the end of the
+     * turn that is going on and no longer. The bot's exit writes the rest: see {@see \App\Application::run()}.
+     */
+    private function saveUsage(): void
+    {
+        foreach (self::$unfinished as $call) {
+            if ($call->turns > 0) {
+                return;
+            }
+        }
+
+        $this->usage->flush();
     }
 
     private function msSince(float $time): int

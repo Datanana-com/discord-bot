@@ -215,6 +215,7 @@ abstract class VoiceTestCase extends TestCase
         // A call a test left starting, as when the bot never got to join, is not starting in the next test.
         (new ReflectionProperty(VoiceSession::class, 'starting'))->setValue(null, []);
         LookupSlots::reset();
+        Usage::reset();
         // Nor is a bot that was stopped in one test still stopping in the next.
         (new ReflectionProperty(VoiceSession::class, 'refusing'))->setValue(null, false);
 
