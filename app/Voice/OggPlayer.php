@@ -97,7 +97,7 @@ final class OggPlayer implements Player
 
         $done = new Deferred();
         $this->queue[] = ['sentence' => $sentence, 'onStart' => $onStart, 'done' => $done];
-        $sentence->watch(fn () => $this->came($sentence));
+        $sentence->watch($this->came(...));
 
         if (! $this->streaming) {
             $this->begin();
@@ -230,12 +230,13 @@ final class OggPlayer implements Player
     }
 
     /**
-     * More of a sentence came from its encoder, or it is over: when it is the one being played, and it waited
-     * for that, it goes on now, and the pace starts over from here.
+     * More of a sentence came from its encoder, or it is over: when the one being played waited for its next
+     * packet, it goes on now, and the pace starts over from here. When it was another sentence, the one being
+     * played finds nothing and waits again.
      */
-    private function came(Sentence $sentence): void
+    private function came(): void
     {
-        if (! $this->starved || $this->current === null || $this->current['sentence'] !== $sentence) {
+        if (! $this->starved) {
             return;
         }
 

@@ -138,9 +138,7 @@ final class Sentence
      */
     public function watch(callable $watcher): void
     {
-        if (! $this->over) {
-            $this->watchers[] = $watcher;
-        }
+        $this->watchers[] = $watcher;
     }
 
     /**
@@ -210,14 +208,7 @@ final class Sentence
 
     private function tell(): void
     {
-        $watchers = $this->watchers;
-
-        // Nothing more is coming: whoever watched is let go.
-        if ($this->over) {
-            $this->watchers = [];
-        }
-
-        foreach ($watchers as $watcher) {
+        foreach ($this->watchers as $watcher) {
             $watcher();
         }
     }

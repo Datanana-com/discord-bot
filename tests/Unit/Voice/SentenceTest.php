@@ -12,7 +12,9 @@ use RuntimeException;
 use Tests\Ogg;
 use Throwable;
 
+use function React\Promise\reject;
 use function React\Promise\resolve;
+use function React\Promise\set_rejection_handler;
 
 final class SentenceTest extends TestCase
 {
@@ -128,11 +130,35 @@ final class SentenceTest extends TestCase
         $this->assertSame($failure, $this->settled($sentence->whole()));
         $this->assertFileDoesNotExist($path, 'Half a sentence is not kept.');
 
-        // Nothing changes it any more.
+        // Nothing changes it any more: not what the encoder still had to write, either.
+        $sentence->write(Ogg::page(['two'], 3));
         $sentence->end();
         $sentence->fail(new RuntimeException('again'));
+        $this->assertSame(['one'], $sentence->packets());
+        $this->assertSame(2, $told);
         $this->assertSame($failure, $sentence->failure());
         $this->assertFileDoesNotExist($path);
+    }
+
+    public function testAFailureNobodyWaitsForIsNotReported(): void
+    {
+        $unhandled = [];
+        $previous = set_rejection_handler(function (Throwable $e) use (&$unhandled) {
+            $unhandled[] = $e->getMessage();
+        });
+
+        try {
+            // A sentence of an answer that was cut off: nobody waits for the voice, for its first packet or for its file.
+            $failure = new RuntimeException('piper exited with code 1');
+            $sentence = new Sentence("{$this->directory}/claude-1.ogg", reject($failure));
+            $sentence->fail($failure);
+            unset($sentence);
+            gc_collect_cycles();
+        } finally {
+            set_rejection_handler($previous);
+        }
+
+        $this->assertSame([], $unhandled);
     }
 
     public function testFailsBeforeAnythingCameWhenTheVoiceDidNotSpeakIt(): void

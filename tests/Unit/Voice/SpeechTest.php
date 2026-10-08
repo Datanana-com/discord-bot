@@ -9,6 +9,7 @@ use App\Voice\Speech;
 use PHPUnit\Framework\TestCase;
 use React\Promise\PromiseInterface;
 use ReflectionClassConstant;
+use ReflectionProperty;
 use RuntimeException;
 use Tests\RunsOutOfFileDescriptors;
 use Tests\WaitsWithin;
@@ -260,6 +261,9 @@ final class SpeechTest extends TestCase
         $this->assertTrue($speech->isRunning());
         $this->assertCount(2, $this->pipers());
         $this->assertStringContainsString("arg=--output-dir\narg={$this->directory}/piper\n", file_get_contents("{$this->directory}/piper.log"));
+        // The ffmpeg that waited is still the one that waits: one for each of the two sentences that got to one, and it.
+        delay(0.2);
+        $this->assertCount(3, $this->ffmpegs());
     }
 
     public function testWhatPiperSaidOfASentenceItSpokeIsNotWhyALaterOneFails(): void
@@ -320,11 +324,15 @@ final class SpeechTest extends TestCase
 
         $this->assertSame('It is a quarter past four.', file_get_contents($this->settled($speaking)));
 
-        // Once it has ended, nothing is left of it.
+        // Once it has ended, nothing is left of it: nor an ffmpeg waiting for a sentence that isn't coming.
         $this->assertNull($this->settled($ended));
         $this->assertFalse($speech->isRunning());
         $this->assertFalse(posix_kill($this->pipers()[0], 0));
         $this->assertDirectoryDoesNotExist("{$this->directory}/piper");
+        delay(0.2);
+        $this->assertCount(2, $this->ffmpegs(), 'The one that waited, and the one started for the sentence.');
+        $this->assertSame([false, false], array_map(fn (int $pid) => posix_kill($pid, 0), $this->ffmpegs()));
+        $this->assertFalse($speech->isReadyToEncode());
 
         // Stopping it again does nothing.
         $this->assertNull($this->settled($speech->stop()));
@@ -438,6 +446,9 @@ final class SpeechTest extends TestCase
 
         $this->settled($this->spoken($speech, 'Time for a cup of tea.', "{$this->directory}/claude-2.ogg"));
         $this->waitUntil(fn () => count($this->ffmpegs()) === 3);
+        $this->waitUntil(fn () => ! posix_kill($this->ffmpegs()[1], 0));
+        // Those that have ended are let go: a call speaks hundreds of sentences.
+        $this->waitUntil(fn () => count((new ReflectionProperty(Speech::class, 'encoders'))->getValue($speech)) === 1);
 
         // No sentence is coming once the call ends: the one that waited is ended with Piper.
         $this->assertNull($this->settled($speech->stop()));
@@ -489,7 +500,7 @@ final class SpeechTest extends TestCase
 
         $this->assertSame('It is a quarter past four.', file_get_contents($path));
         $this->assertTrue($speech->isReadyToEncode());
-        // One for the sentence, started while Piper spoke it, and one for the sentence after it.
+        // One for the sentence, and one for the sentence after it.
         $this->waitUntil(fn () => count($this->ffmpegs()) === 3);
     }
 

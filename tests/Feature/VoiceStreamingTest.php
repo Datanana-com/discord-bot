@@ -6,8 +6,10 @@ namespace Tests\Feature;
 
 use App\Voice\VoiceSession;
 use React\Promise\Deferred;
+use Throwable;
 
 use function React\Async\await;
+use function React\Promise\set_rejection_handler;
 
 /**
  * Claude's answer is spoken sentence by sentence, while Claude is still writing it.
@@ -168,6 +170,33 @@ final class VoiceStreamingTest extends VoiceTestCase
         $this->waitUntil(fn () => count($this->played) === 2, 'the next answer to be spoken');
         $this->assertCount(1, $this->loggedProblems());
         $this->assertLogsNeverMention('cup of tea');
+    }
+
+    public function testAFailureOfTheLastSentenceIsReportedOnceAndNotAsSomethingNobodyHandled(): void
+    {
+        $unhandled = [];
+        $previous = set_rejection_handler(function (Throwable $e) use (&$unhandled) {
+            $unhandled[] = $e->getMessage();
+        });
+
+        try {
+            // Piper fails on the last sentence: nothing waits for Piper to be free after it.
+            $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream(self::ANSWER), 'FAKE_PIPER_FAILS_ON' => 'kettle']);
+            $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);
+
+            $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+            $this->waitUntil(fn () => $this->loggedProblems() !== [], 'the failure to be logged');
+            await($session->stop());
+            unset($session);
+            gc_collect_cycles();
+        } finally {
+            set_rejection_handler($previous);
+        }
+
+        $this->assertCount(1, $this->loggedProblems());
+        $this->assertStringStartsWith('Voice reply failed: ', $this->loggedProblems()[0]);
+        $this->assertCount(2, $this->played, 'The two sentences before it were spoken.');
+        $this->assertSame([], $unhandled);
     }
 
     public function testDoesNotKeepASentenceThatWasStillEncodedWhenTheCallStops(): void

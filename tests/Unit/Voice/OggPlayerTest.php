@@ -503,6 +503,17 @@ final class OggPlayerTest extends TestCase
         $this->assertSame(['a1'], $this->audio());
         $this->assertSame([], $this->loop->pending());
 
+        // The next sentence waits for nothing: what comes of it while it plays is sent at its turn.
+        $next = $this->sentence();
+        $next->write(substr($stream, 0, $first));
+        $player->play($next);
+        $this->tick();
+        $next->write(substr($stream, $first));
+        $this->assertSame(['a1', 'a1'], $this->audio());
+        $this->assertEqualsWithDelta(OggPlayer::FRAME, $this->tick(), 1e-9);
+        $this->assertSame(['a1', 'a1', 'a2'], $this->audio());
+        $player->stop();
+
         // A sentence that waits behind the one being played, and gets its packets meanwhile, changes nothing either.
         $playing = $this->sentence();
         $playing->write(substr($stream, 0, $first));
@@ -514,7 +525,9 @@ final class OggPlayerTest extends TestCase
         $this->tick();
         $waiting->write(substr($stream, $first));
         $this->assertSame([], $this->loop->pending(), 'The one being played still waits for its own packet.');
-        $this->assertSame(['a1', 'a1'], $this->audio());
+        $this->assertSame(['a1', 'a1', 'a2', 'a1'], $this->audio());
+        $playing->write(substr($stream, $first));
+        $this->assertSame(['a1', 'a1', 'a2', 'a1', 'a2'], $this->audio());
         $player->stop();
     }
 

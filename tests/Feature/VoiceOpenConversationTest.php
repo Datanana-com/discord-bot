@@ -462,10 +462,11 @@ final class VoiceOpenConversationTest extends VoiceTestCase
         // The call ends while "Okay." is being made.
         $this->setProcessEnv(['FAKE_PIPER_DELAY' => '0.5']);
         $this->say($vc, '555', 'Stop, Claude.');
-        $this->waitUntil(fn () => $this->logged('Conversation closed') !== [], 'the conversation to be closed');
+        $this->waitUntil(fn () => $this->logged('Conversation closed') !== [] && count($this->givenToPiper()) === 2, 'the conversation to be closed, and okay to be with Piper');
         await($session->stop());
 
         $this->assertCount(1, $this->played);
+        $this->assertSame($this->played, glob("{$session->directory}/claude-*"), 'An okay nobody heard is not kept.');
         $this->assertSame([], $this->loggedProblems());
     }
 

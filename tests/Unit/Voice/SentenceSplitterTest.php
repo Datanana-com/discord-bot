@@ -85,7 +85,7 @@ final class SentenceSplitterTest extends TestCase
         $splitter->flush();
 
         $this->assertSame($expected, $handedOver, 'Before the text is complete.');
-        $this->assertSame($text, implode(' ', $this->sentences), 'Nothing of the text is lost or said twice.');
+        $this->assertSame(rtrim($text), implode(' ', $this->sentences), 'Nothing of the text is lost or said twice.');
     }
 
     /**
@@ -95,6 +95,7 @@ final class SentenceSplitterTest extends TestCase
     {
         yield 'as many words as asked' => [5, 'A refrigerator moves heat from inside the box', ['A refrigerator moves heat from']];
         yield 'not while the last of them could still go on' => [5, 'A refrigerator moves heat from', []];
+        yield 'nor when only the space after it has come' => [5, 'A refrigerator moves heat from ', []];
         yield 'not fewer than there are' => [5, 'A refrigerator moves heat', []];
         yield 'more of them when they are too short to be spoken alone' => [3, 'It is a quarter past four in the', ['It is a quarter past']];
         yield 'exactly as long as the shortest sentence' => [1, 'This is twenty longs and goes on', ['This is twenty longs']];

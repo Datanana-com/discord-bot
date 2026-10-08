@@ -214,6 +214,19 @@ final class VoiceFailureTest extends VoiceTestCase
         $this->assertSame(['Sorry, something went wrong with what was said. The bot\'s logs say why.'], $this->sent);
     }
 
+    public function testDoesNotKeepASorryNobodyHeardWhenTheCallEndsWhileItIsMade(): void
+    {
+        $this->setProcessEnv(['FAKE_WHISPER_EXIT' => '1', 'FAKE_PIPER_DELAY' => '0.5']);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->givenToPiper() === [self::SORRY], 'sorry to be with Piper');
+        await($session->stop());
+
+        $this->assertSame([], $this->played);
+        $this->assertSame([], glob("{$session->directory}/claude-*"));
+    }
+
     public function testWhatFailsBetweenPiperAndTheCallIsNotTakenForASentenceThatCannotBeSpoken(): void
     {
         $this->memory()->save(['555', '666'], 'They are planning a trip.');

@@ -15,6 +15,7 @@ use Throwable;
 
 use function React\Promise\all;
 use function React\Promise\reject;
+use function React\Promise\resolve;
 
 /**
  * Text-to-speech through a local Piper install.
@@ -115,7 +116,6 @@ final class Speech
         }
 
         $this->folder = $folder;
-        $this->stopping = false;
         $this->prepare();
         // With --output-dir, Piper keeps reading its stdin: it speaks each line into a WAV file of the folder,
         // and says on stderr when the file is complete.
@@ -153,17 +153,13 @@ final class Speech
     {
         $this->stopping = true;
         $this->waiting?->stop();
-        $this->waiting = null;
-        // Those that encode a sentence end by themselves, also the one of a sentence Piper is still speaking.
-        $encoded = fn () => all(array_map(static fn (Encoder $encoder) => $encoder->done()->catch(static fn () => null), $this->encoders))->then(static fn () => null);
+        $this->piper?->end(timeout: $this->timeout);
 
-        if ($this->piper === null) {
-            return $encoded();
-        }
-
-        $this->piper->end(timeout: $this->timeout);
-
-        return $this->piper->done()->catch(static fn () => null)->then($encoded);
+        return ($this->piper?->done() ?? resolve(null))
+            ->catch(static fn () => null)
+            // Those that encode a sentence end by themselves, also the one of a sentence Piper was still speaking.
+            ->then(fn () => all(array_map(static fn (Encoder $encoder) => $encoder->done()->catch(static fn () => null), $this->encoders)))
+            ->then(static fn () => null);
     }
 
     /**
@@ -203,8 +199,6 @@ final class Speech
         // Before Piper is started: when it can't be, it has ended at once, and this sentence with it.
         $this->sentences[] = $spoken = new Deferred();
         $this->start($this->folder);
-        // An ffmpeg that stopped by itself is started again now, while Piper speaks, and not once Piper is done.
-        $this->prepare();
         $piper = $this->piper;
         $timer = Loop::addTimer($this->timeout, fn () => $piper?->stop("timed out after {$this->timeout}s"));
 
@@ -248,7 +242,8 @@ final class Speech
     }
 
     /**
-     * Has an ffmpeg wait for the speech of the next sentence, unless one does, or no sentence is coming.
+     * Has an ffmpeg wait for the speech of the next sentence, unless one does, or no sentence is coming: the
+     * call is ending.
      */
     private function prepare(): void
     {
@@ -262,8 +257,8 @@ final class Speech
      */
     private function encode(string $wav, Sentence $sentence): void
     {
-        // None waits when it stopped by itself since the sentence was given to Piper, or when the call is
-        // ending and Piper had still been speaking this sentence.
+        // None waits when it stopped by itself, or when the call is ending and Piper had still been speaking
+        // this sentence: one is started for it then.
         $encoder = $this->isReadyToEncode() ? $this->waiting : $this->encoder();
         $this->waiting = null;
         $this->prepare();
