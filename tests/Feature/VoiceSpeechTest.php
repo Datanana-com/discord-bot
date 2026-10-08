@@ -85,6 +85,27 @@ final class VoiceSpeechTest extends VoiceTestCase
         $this->assertCount(1, $this->loggedProblems());
     }
 
+    public function testAnFfmpegIsStartedAgainForTheNextSentenceWhenTheOneThatWaitedStopped(): void
+    {
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->waitUntil(fn () => count($this->ffmpegs()) === 1, 'an ffmpeg to wait for the first sentence');
+
+        // It ends by itself, long before anyone asks anything.
+        posix_kill($this->ffmpegs()[0], SIGKILL);
+        $this->waitUntil(fn () => ! $this->isRunning($this->ffmpegs()[0]), 'the ffmpeg to be gone');
+        $this->runFor(0.2);
+        $this->assertSame([], $this->loggedProblems(), 'Nothing is said, and nothing started, until a sentence needs one.');
+        $this->assertCount(1, $this->ffmpegs());
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');
+
+        $this->assertSame('It is a quarter past four.', file_get_contents($this->played[0]));
+        $this->assertSame(['ffmpeg had stopped: starting it again'], $this->loggedProblems());
+        $this->assertSame(1, $this->usage()['answers']);
+        await($session->stop());
+    }
+
     public function testASentencePiperFailsOnIsNotSpokenAndTheNextAnswerIs(): void
     {
         $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream(self::ANSWER), 'FAKE_PIPER_FAILS_ON' => 'cup of tea']);

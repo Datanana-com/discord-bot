@@ -239,6 +239,9 @@ final class VoiceSession
     /** How long someone has to be silent for what they said to be over. */
     private readonly float $pauseSeconds;
 
+    /** How many words of an answer are spoken before their sentence is whole: VOICE_FIRST_WORDS, 0 for none. */
+    private readonly int $firstWords;
+
     /**
      * The answer the bot is speaking, from its first sentence until it is over: who it is for, since when,
      * how much of their own audio arrived in one go meanwhile and when the last of it did, whether they
@@ -280,6 +283,7 @@ final class VoiceSession
         $this->queue = resolve(null);
         $this->left = new Deferred();
         $this->pauseSeconds = self::pauseSeconds() ?? UtteranceSplitter::SILENCE_SECONDS;
+        $this->firstWords = self::firstWords() ?? 0;
         $this->splitter = new UtteranceSplitter("{$directory}/utterances", $this->queueUtterance(...), $this->pauseSeconds);
     }
 
@@ -319,6 +323,24 @@ final class VoiceSession
     public static function defaultWakeWord(): string
     {
         return trim(env('VOICE_WAKE_WORD', 'claude, claud'));
+    }
+
+    /**
+     * How many words of an answer are spoken as soon as Claude has written them, before their sentence is
+     * whole: VOICE_FIRST_WORDS. 0, which it is when it isn't set, for none: an answer is spoken sentence by
+     * sentence.
+     *
+     * @return int|null Null when it is set to something that isn't a whole number, 0 or more.
+     */
+    private static function firstWords(): ?int
+    {
+        $value = trim((string) env('VOICE_FIRST_WORDS', ''));
+
+        return match (true) {
+            $value === '' => 0,
+            ctype_digit($value) => (int) $value,
+            default => null,
+        };
     }
 
     /**
@@ -522,6 +544,10 @@ final class VoiceSession
 
         if (self::pauseSeconds() === null) {
             $session->log('warning', 'VOICE_PAUSE_SECONDS is not a number of seconds, 0.1 or more: what someone says ends after ' . UtteranceSplitter::SILENCE_SECONDS . ' s of silence.');
+        }
+
+        if (self::firstWords() === null) {
+            $session->log('warning', 'VOICE_FIRST_WORDS is not a whole number, 0 or more: answers are spoken sentence by sentence.');
         }
 
         if (self::playerSetting() === null) {
@@ -1170,10 +1196,11 @@ final class VoiceSession
     private function sayOkay(string $userId): PromiseInterface
     {
         $path = sprintf('%s/claude-%d.ogg', $this->directory, ++$this->files);
+        $okay = $this->synthesize(self::OKAY, $path);
 
-        return $this->synthesize(self::OKAY, $path)
+        return $this->player->ready($okay)
             // It holds nothing of anyone's memory, so only the call ending, or them opting out, stops it.
-            ->then(fn () => ! $this->stopped && ! isset($this->optedOut[$userId]) ? race([$this->player->play($path), $this->left->promise()]) : null)
+            ->then(fn () => $this->stillTalkingTo($userId) ? race([$this->player->play($okay), $this->left->promise()]) : $okay->drop())
             ->catch(fn (Throwable $e) => $this->log('warning', 'Could not say okay: ' . $e->getMessage(), ['user' => $userId]));
     }
 
@@ -1241,13 +1268,20 @@ final class VoiceSession
             // Remembered only for the person it was looked up for, who is still alone with the bot.
             $people = $group;
         }
-        // What the last sentence so far waits for: Piper to be done with it, and the bot to have said it.
-        $synthesized = $spoken = resolve(null);
+        // What the last sentence so far waits for: Piper to be free for it, and the bot to have said the one before it.
+        $free = $spoken = resolve(null);
+        /** @var array<int, Sentence> $unplayed The sentences Piper was given, until they are played. */
+        $unplayed = [];
 
         // Only Piper and the voice client: anything else that fails on the way is nothing the bot expects to.
         $unspoken = static fn (Throwable $e) => throw new FailedReply(FailedReply::SPEECH, $e);
 
-        $sentences = new SentenceSplitter(function (string $sentence) use (&$synthesized, &$spoken, $unspoken, $userId, $depends, $basis, $among, $endedAt) {
+        // While nothing more can wait to be looked up, the bot may have to say something in the place of what
+        // Claude writes: nothing is spoken until the answer is whole.
+        // Telling what was looked up hands nothing off, so it is spoken while it is written.
+        $full = $lookedUp === null && $this->lookups->full();
+
+        $sentences = new SentenceSplitter(function (string $sentence) use (&$free, &$spoken, &$unplayed, $unspoken, $userId, $depends, $basis, $among, $endedAt) {
             if (! $this->stillAnswering($userId, $depends, $basis, $among)) {
                 return;
             }
@@ -1256,14 +1290,32 @@ final class VoiceSession
             $oggPath = sprintf('%s/claude-%d.ogg', $this->directory, ++$this->files);
             $before = $spoken;
 
-            // A sentence is synthesized as soon as Piper is free, while the ones before it are spoken. It is
-            // spoken once they are over: one file at a time, in order.
+            // A sentence is given to Piper as soon as Piper has spoken the one before it, while that one is still
+            // encoded and the ones before it are spoken. It is spoken once they are over, and as soon as the
+            // player is ready for it, which the bot's own is from the first of what the encoder gives of it: one
+            // sentence at a time, in order.
             // Once the call stops, they opt out or talk over the answer, the sentences still waiting for Piper are no longer synthesized either.
-            $synthesized = $synthesized->then(fn () => $this->stillAnswering($userId, $depends, $basis, $among) ? $this->synthesize($sentence, $oggPath)->catch($unspoken) : null);
-            $spoken = $synthesized->finally(fn () => $before)->then(function () use ($unspoken, $userId, $depends, $basis, $among, $oggPath, $endedAt) {
+            $given = $free->then(function () use (&$unplayed, $sentence, $oggPath, $userId, $depends, $basis, $among): ?Sentence {
                 if (! $this->stillAnswering($userId, $depends, $basis, $among)) {
                     return null;
                 }
+
+                $made = $this->synthesize($sentence, $oggPath);
+
+                return $unplayed[spl_object_id($made)] = $made;
+            });
+            // After a sentence Piper can't speak, none of the answer is given to it any more.
+            $free = $given->then(static fn (?Sentence $made) => $made?->voiced());
+            // Nobody waits for Piper after the last sentence, and it can still fail on that one.
+            $free->catch(static fn () => null);
+            $spoken = $given->then(fn (?Sentence $made) => $made === null ? null : $this->player->ready($made)->then(static fn () => $made))->catch($unspoken)->finally(fn () => $before)->then(function (?Sentence $made) use (&$unplayed, $unspoken, $userId, $depends, $basis, $among, $endedAt) {
+                // Checked as late as can be: it was synthesized, and the ones before it were spoken, meanwhile.
+                // The player starts on it at once, so nothing changes between this and the call hearing it.
+                if ($made === null || ! $this->stillAnswering($userId, $depends, $basis, $among)) {
+                    return null;
+                }
+
+                unset($unplayed[spl_object_id($made)]);
 
                 $started = null;
 
@@ -1275,16 +1327,13 @@ final class VoiceSession
 
                 // The player may say nothing more about a sentence once it is stopped, as the voice library
                 // doesn't when it is stopped or closed while speaking one: see hear().
-                return race([$this->player->play($oggPath, $started)->catch($unspoken), $this->left->promise(), $this->speaking['cut']->promise()]);
+                return race([$this->player->play($made, $started)->catch($unspoken), $this->left->promise(), $this->speaking['cut']->promise()]);
             });
-        });
+            // An answer that is held back comes all at once: there is no first sound to gain by cutting it.
+        }, $full ? 0 : $this->firstWords);
 
         // The line that hands a question off is never spoken: the start of a line waits until it is known not to be it.
         $handOff = new HandOff($sentences->push(...));
-        // While nothing more can wait to be looked up, the bot may have to say something in the place of what
-        // Claude writes: nothing is spoken until the answer is whole.
-        // Telling what was looked up hands nothing off, so it is spoken while it is written.
-        $full = $lookedUp === null && $this->lookups->full();
         // Where the time to a slow answer went: logged once the first piece of the answer is there.
         $started = fn (array $timing) => $this->log('info', 'Claude started answering', ['user' => $userId, ...$timing, 'held' => $full]);
 
@@ -1374,9 +1423,15 @@ final class VoiceSession
             // Whatever failed, also in what is done with Claude's answer: the turn is only over once the bot has
             // stopped speaking, or the call would be told that it failed over the sentences still being spoken.
             return $spoken->finally(fn () => throw $e);
-        })->finally(function () {
+        })->finally(function () use (&$unplayed) {
             // The bot is no longer speaking: nobody can talk over it.
             $this->speaking = null;
+
+            // What Piper spoke and nobody heard is not kept: Piper can't be stopped in a sentence it has started,
+            // but its file is not written, or deleted.
+            foreach ($unplayed as $made) {
+                $made->drop();
+            }
         });
     }
 
@@ -1488,16 +1543,19 @@ final class VoiceSession
     }
 
     /**
-     * Has Piper speak a sentence into a file. Piper keeps running for the whole call. When it stopped by
-     * itself, as when a sentence of an earlier answer made it fail, it is started again. The rest of that
-     * answer wasn't spoken: after a sentence that can't be, none of its answer is.
+     * Has Piper speak a sentence, and ffmpeg encode it. Piper keeps running for the whole call. When it stopped
+     * by itself, as when a sentence of an earlier answer made it fail, it is started again. The rest of that
+     * answer wasn't spoken: after a sentence that can't be, none of its answer is. So is the ffmpeg that waits
+     * for the next sentence, when it stopped by itself.
      *
-     * @return PromiseInterface<string> The path of the file.
+     * @return Sentence The sentence on its way to the call: see {@see Speech::synthesize()}.
      */
-    private function synthesize(string $sentence, string $oggPath): PromiseInterface
+    private function synthesize(string $sentence, string $oggPath): Sentence
     {
         if (! $this->speech->isRunning()) {
             $this->log('warning', 'Piper had stopped: starting it again');
+        } elseif (! $this->speech->isReadyToEncode()) {
+            $this->log('warning', 'ffmpeg had stopped: starting it again');
         }
 
         return $this->speech->synthesize($sentence, $oggPath);
@@ -1754,10 +1812,11 @@ final class VoiceSession
     {
         $this->remember("Claude: {$sentence}", null);
         $oggPath = sprintf('%s/claude-%d.ogg', $this->directory, ++$this->files);
+        $said = $this->synthesize($sentence, $oggPath);
 
-        return $this->synthesize($sentence, $oggPath)->then(
+        return $this->player->ready($said)->then(
             // The player may say nothing more about the sentence once the call is closed while it is spoken.
-            fn () => $this->stillTalkingTo($userId) ? race([$this->player->play($oggPath), $this->left->promise()]) : null,
+            fn () => $this->stillTalkingTo($userId) ? race([$this->player->play($said), $this->left->promise()]) : $said->drop(),
         )->catch(fn (Throwable $e) => throw new FailedReply(FailedReply::SPEECH, $e));
     }
 

@@ -832,6 +832,37 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->assertSame([], $this->loggedProblems());
     }
 
+    public function testAnAnswerThatIsHeldBackIsNotCutAfterItsFirstWords(): void
+    {
+        $this->setEnv(['VOICE_FIRST_WORDS' => '5']);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        // One task is looked up and three wait: from here on an answer is held back until it is whole.
+        foreach (['one', 'two', 'three', 'four'] as $number) {
+            $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::handsOff("Task {$number}.")]);
+            $this->ask($vc, '555', "Hey Claude, question {$number}.");
+        }
+
+        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 4, 'the first lookup to start');
+
+        // It comes all at once, and there is nothing to gain by speaking its first words on their own.
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is a quarter past four in the afternoon')]);
+        $this->ask($vc, '555', 'Hey Claude, what time is it?');
+        $this->waitUntil(fn () => count($this->played) > 4, 'the answer to be spoken');
+        $this->runFor(0.3);
+
+        $this->assertSame(['It is a quarter past four in the afternoon'], array_map(file_get_contents(...), array_slice($this->played, 4)));
+        $this->assertTrue($this->logged('Claude started answering')[4]['held']);
+
+        foreach ([2, 3, 4] as $lookups) {
+            touch($this->go);
+            $this->waitUntil(fn () => count($this->lookups()) === $lookups, "lookup {$lookups} to start");
+        }
+
+        touch($this->go);
+        $this->waitUntil(fn () => count($this->logged('Looked something up')) === 4 && count($this->sent) === 13, 'everything to be told');
+    }
+
     public function testPostsWhatWasLookedUpAfterTheCallWithoutSpeakingIt(): void
     {
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);

@@ -74,6 +74,12 @@ abstract class VoiceTestCase extends TestCase
     /** The PID of every stand-in of Piper that was started: see {@see pipers()}. */
     protected string $piperRunning;
 
+    /** Where the fake Piper writes each line it is given. */
+    protected string $piperLines;
+
+    /** Where each fake ffmpeg that encodes a sentence writes its process ID. */
+    protected string $ffmpegRunning;
+
     /** While this file exists, Claude's stand-in doesn't answer when it is asked for a new memory. */
     protected string $claudeHold;
 
@@ -144,6 +150,8 @@ abstract class VoiceTestCase extends TestCase
         $this->claudeCalls = "{$this->recordings}/claude.calls";
         $this->claudeWaiting = "{$this->recordings}/claude.waiting";
         $this->piperRunning = "{$this->recordings}/piper.running";
+        $this->piperLines = "{$this->recordings}/piper.lines";
+        $this->ffmpegRunning = "{$this->recordings}/ffmpeg.running";
         $this->claudeHold = "{$this->recordings}/claude.hold";
         $this->whisperHold = "{$this->recordings}/whisper.hold";
         $this->memories = "{$this->recordings}/memories";
@@ -176,6 +184,8 @@ abstract class VoiceTestCase extends TestCase
             'FAKE_CLAUDE_PAUSE' => '0',
             'FAKE_CLAUDE_RESUME' => $this->claudeResume,
             'FAKE_PIPER_RUNNING' => $this->piperRunning,
+            'FAKE_PIPER_LINES' => $this->piperLines,
+            'FAKE_FFMPEG_RUNNING' => $this->ffmpegRunning,
             'FAKE_CLAUDE_HOLD' => $this->claudeHold,
             'FAKE_WHISPER_OUTPUT' => 'Hey Claude, what time is it?',
             'FAKE_WHISPER_HOLD' => $this->whisperHold,
@@ -427,6 +437,23 @@ abstract class VoiceTestCase extends TestCase
     protected function pipers(): array
     {
         return is_file($this->piperRunning) ? array_map(intval(...), file($this->piperRunning, FILE_IGNORE_NEW_LINES)) : [];
+    }
+
+    /**
+     * @return list<string> Every sentence Piper was given, in order: also those it had not finished, or that nobody heard.
+     */
+    protected function givenToPiper(): array
+    {
+        return is_file($this->piperLines) ? file($this->piperLines, FILE_IGNORE_NEW_LINES) : [];
+    }
+
+    /**
+     * @return list<int> The process ID of every ffmpeg that was started to encode a sentence, oldest first: the
+     *                   last one waits for the next sentence.
+     */
+    protected function ffmpegs(): array
+    {
+        return is_file($this->ffmpegRunning) ? array_map(intval(...), file($this->ffmpegRunning, FILE_IGNORE_NEW_LINES)) : [];
     }
 
     /**

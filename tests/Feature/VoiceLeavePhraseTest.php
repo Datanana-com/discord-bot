@@ -365,16 +365,37 @@ final class VoiceLeavePhraseTest extends VoiceTestCase
         $this->setProcessEnv(['FAKE_PIPER_DELAY' => '0.5']);
         $this->says($vc, '555', 'Disconnect Claude.');
         // Transcribed, so it has been heard and okay is being made, which takes half a second.
-        $this->waitUntil(fn () => str_contains($this->transcript($session), 'Alice: Disconnect Claude.'), 'it to be transcribed');
+        $this->waitUntil(fn () => str_contains($this->transcript($session), 'Alice: Disconnect Claude.') && count($this->givenToPiper()) === 1, 'it to be transcribed, and okay to be with Piper');
         // /stop, or someone disconnecting the bot, ends it first.
         await($session->stop());
         $this->runFor(0.5);
 
         $this->assertSame([], $this->logged('Ended by the leave phrase'));
         $this->assertSame([], $this->played, '"Okay." is not said in a call that ended.');
+        $this->assertSame([], glob("{$session->directory}/claude-*"), 'An okay nobody heard is not kept.');
         $this->assertSame([self::ANSWER], $this->sent, 'Only the summary was posted.');
         $this->assertCount(1, $this->logged('Voice session stopped'));
         $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testDoesNotSayOkayToSomeoneWhoOptedOutWhileItWasStillEncoded(): void
+    {
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        // The ffmpeg of "Okay." has written the first of it, and takes its time over the rest: the voice library can't start yet.
+        touch($hold = "{$this->recordings}/ffmpeg.hold");
+        $this->setProcessEnv(['FAKE_FFMPEG_HOLD' => $hold, 'FAKE_FFMPEG_STARTS' => '1']);
+        $this->says($vc, '555', 'Disconnect Claude.');
+        $this->waitUntil(fn () => count($this->givenToPiper()) === 1, 'okay to be with Piper');
+        $this->runFor(0.3);
+        VoiceSession::optOut('555');
+        unlink($hold);
+        $this->callEnds($session);
+
+        // They had said it before they opted out, so the call ends. Nothing is said to them any more.
+        $this->assertSame([], $this->played);
+        $this->assertSame([], glob("{$session->directory}/claude-*"), 'An okay nobody heard is not kept.');
+        $this->assertSame([['user' => '555']], $this->contexts('Ended by the leave phrase'));
     }
 
     public function testTheLogOfTheLeavePhraseHoldsNoIdsButTheirsAndNeverWhatWasSaid(): void

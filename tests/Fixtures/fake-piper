@@ -6,7 +6,8 @@
 # Of a line that contains FAKE_PIPER_WARNS_ON it first says, on stderr, that it can't say all of it, quoting it,
 # as Piper does with the characters it has no sound for.
 # It takes FAKE_PIPER_DELAY seconds for a line, and fails on one that contains FAKE_PIPER_FAILS_ON: it then
-# ends with code 1, and leaves the file it had started. Its PID is appended to FAKE_PIPER_RUNNING when it starts.
+# ends with code 1, and leaves the file it had started. Its PID is appended to FAKE_PIPER_RUNNING when it starts,
+# and every line it starts on to FAKE_PIPER_LINES.
 # A test may set these variables after it started: it reads them again from the file FAKE_ENV, when there is
 # one, for every line.
 for arg in "$@"; do printf 'arg=%s\n' "$arg"; done > "${FAKE_PIPER_LOG:-/dev/null}"
@@ -21,6 +22,7 @@ while IFS= read -r line; do
     if [ -z "$(printf '%s' "$line" | sed 's/\xc2\xa0//g' | tr -d '[:space:]')" ]; then continue; fi
     if [ -r "${FAKE_ENV:-}" ]; then . "$FAKE_ENV"; fi
     n=$((n + 1))
+    if [ -n "${FAKE_PIPER_LINES:-}" ]; then printf '%s\n' "$line" >> "$FAKE_PIPER_LINES"; fi
     out="$dir/$$-$n.wav"
     printf '%s' "$line" > "$out"
     if [ -n "${FAKE_PIPER_WARNS_ON:-}" ] && grep -qF "$FAKE_PIPER_WARNS_ON" "$out"; then
