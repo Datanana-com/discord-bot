@@ -18,7 +18,7 @@ final class MemoryCommand extends CommandAbstract
 
     public array $options = MemoryGroup::OPTIONS;
 
-    public function handle(Interaction $interaction): void
+    public function handle(Interaction $interaction): ?PromiseInterface
     {
         $userId = (string) $interaction->user->id;
         $store = Memory::fromEnv();
@@ -48,7 +48,7 @@ final class MemoryCommand extends CommandAbstract
         // A memory can be longer than a Discord message: the rest follows, also only for whoever asked.
         $parts = VoiceSession::split($reply);
 
-        array_reduce(
+        return array_reduce(
             array_slice($parts, 1),
             fn (PromiseInterface $sent, string $part) => $sent->then(
                 fn () => $interaction->sendFollowUpMessage(MessageBuilder::new()->setContent($part), ephemeral: true),

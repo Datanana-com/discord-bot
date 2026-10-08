@@ -18,6 +18,32 @@ final class DirectChatTest extends TestCase
         $this->assertSame([$answer], DirectChat::parts($answer));
     }
 
+    public function testStartsEveryMessageWithTheMarkAndLeavesRoomForIt(): void
+    {
+        $this->assertSame(["Looked up:\nIt is Friday."], DirectChat::parts('It is Friday.', 'Looked up:'));
+
+        // Fits in one message without the mark, and not with it: it is cut, and each part is marked and fits.
+        $answer = trim(str_repeat('They agreed to meet again on Friday. ', 54));
+        $parts = DirectChat::parts($answer, 'Looked up:');
+
+        $this->assertCount(2, $parts);
+
+        foreach ($parts as $part) {
+            $this->assertStringStartsWith("Looked up:\n", $part);
+            $this->assertLessThanOrEqual(2000, mb_strlen($part));
+        }
+
+        $this->assertSame($answer, implode(' ', array_map(fn (string $part) => substr($part, strlen("Looked up:\n")), $parts)));
+
+        // A code block that is cut keeps its fences, after the mark.
+        $lines = array_map(fn (int $line) => sprintf('echo "%02d. %s"', $line, str_repeat('word ', 12)), range(1, 60));
+        $parts = DirectChat::parts("```sh\n" . implode("\n", $lines) . "\n```", 'Looked up:');
+
+        $this->assertGreaterThan(1, count($parts));
+        $this->assertStringStartsWith("Looked up:\n```sh\n", $parts[0]);
+        $this->assertStringStartsWith("Looked up:\n```sh\n", $parts[1]);
+    }
+
     public function testLeavesTheEndOfAnAnswerAsClaudeWroteIt(): void
     {
         // A code block Claude didn't close is only closed where the answer is cut, so it still fits.

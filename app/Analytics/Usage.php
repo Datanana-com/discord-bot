@@ -32,6 +32,9 @@ final class Usage
     /** Claude answered; its duration is from the end of the question to the answer being posted. */
     public const string ANSWERED = 'answered';
 
+    /** Something Claude handed off was looked up, and what was found is posted. */
+    public const string LOOKED_UP = 'looked_up';
+
     /** Something said could not be transcribed or answered, or the answer could not be spoken. */
     public const string FAILED = 'failed';
 
@@ -65,7 +68,7 @@ final class Usage
     /**
      * A server's usage so far, or null when the statistics can't be read.
      *
-     * @return array{since: ?string, calls: int, call_ms: int, speakers: int, utterances: int, speech_ms: int, answers: int, answer_ms: ?int, failures: int}|null
+     * @return array{since: ?string, calls: int, call_ms: int, speakers: int, utterances: int, speech_ms: int, answers: int, answer_ms: ?int, lookups: int, failures: int}|null
      *         since is the first event's time, in UTC; answer_ms is the average time to answer.
      */
     public function summary(string $guildId): ?array
@@ -82,8 +85,9 @@ final class Usage
                     SUM(CASE WHEN type = ? THEN duration_ms ELSE 0 END) AS speech_ms,
                     SUM(CASE WHEN type = ? THEN 1 ELSE 0 END) AS answers,
                     AVG(CASE WHEN type = ? THEN duration_ms END) AS answer_ms,
+                    SUM(CASE WHEN type = ? THEN 1 ELSE 0 END) AS lookups,
                     SUM(CASE WHEN type = ? THEN 1 ELSE 0 END) AS failures',
-                    [self::CALL_STARTED, self::CALL_ENDED, self::UTTERANCE, self::UTTERANCE, self::UTTERANCE, self::ANSWERED, self::ANSWERED, self::FAILED],
+                    [self::CALL_STARTED, self::CALL_ENDED, self::UTTERANCE, self::UTTERANCE, self::UTTERANCE, self::ANSWERED, self::ANSWERED, self::LOOKED_UP, self::FAILED],
                 )
                 ->first();
         } catch (Throwable $e) {
@@ -101,6 +105,7 @@ final class Usage
             'speech_ms' => (int) $row->speech_ms,
             'answers' => (int) $row->answers,
             'answer_ms' => $row->answer_ms === null ? null : (int) round((float) $row->answer_ms),
+            'lookups' => (int) $row->lookups,
             'failures' => (int) $row->failures,
         ];
     }

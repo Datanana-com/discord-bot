@@ -7,6 +7,7 @@ namespace App;
 use Discord\Discord;
 use Discord\Parts\Interactions\Interaction;
 use Psr\Log\LoggerInterface;
+use React\Promise\PromiseInterface;
 
 abstract class CommandAbstract
 {
@@ -60,5 +61,10 @@ abstract class CommandAbstract
         $this->log->info('Command initialized: ' . static::class);
     }
 
-    abstract public function handle(Interaction $interaction): void;
+    /**
+     * @return PromiseInterface<mixed>|null What the command is still doing when this returns, such as sending
+     *                                      its reply. When that is rejected, or this throws, whoever used the
+     *                                      command is told that it failed: see {@see Application::handleGlobalCommands()}.
+     */
+    abstract public function handle(Interaction $interaction): ?PromiseInterface;
 }

@@ -9,6 +9,7 @@ use App\Privacy\OptOuts;
 use App\Voice\VoiceSession;
 use Discord\Builders\MessageBuilder;
 use Discord\Parts\Interactions\Interaction;
+use React\Promise\PromiseInterface;
 use Throwable;
 
 final class OptinCommand extends CommandAbstract
@@ -23,7 +24,7 @@ final class OptinCommand extends CommandAbstract
 
     public string $description = 'Lets the bot record, transcribe and answer you again, after /optout.';
 
-    public function handle(Interaction $interaction): void
+    public function handle(Interaction $interaction): ?PromiseInterface
     {
         $userId = (string) $interaction->user->id;
 
@@ -36,6 +37,6 @@ final class OptinCommand extends CommandAbstract
             $reply = self::NOT_SAVED;
         }
 
-        $interaction->respondWithMessage(MessageBuilder::new()->setContent($reply), ephemeral: true);
+        return $interaction->respondWithMessage(MessageBuilder::new()->setContent($reply), ephemeral: true);
     }
 }

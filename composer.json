@@ -28,6 +28,18 @@
         "test:coverage": [
             "Composer\\Config::disableProcessTimeout",
             "XDEBUG_MODE=coverage php -d pcov.directory=. vendor/bin/phpunit --coverage-text"
+        ],
+        "check:lookups": [
+            "Composer\\Config::disableProcessTimeout",
+            "phpunit --testsuite Real"
+        ],
+        "bench": [
+            "Composer\\Config::disableProcessTimeout",
+            "phpunit --testsuite Bench"
+        ],
+        "bench:baseline": [
+            "Composer\\Config::disableProcessTimeout",
+            "BENCH_SAVE=1 phpunit --testsuite Bench"
         ]
     },
     "autoload": {

@@ -46,7 +46,8 @@ final class ForgetInCallTest extends CommandTestCase
         (new ForgetCommand($this->discord))->handle($this->interaction(null));
         await($session->stop());
 
-        $this->assertCount(2, $this->claudeCalls(), 'The answer and the summary: there is nothing to remember.');
+        $this->assertCount(1, $this->claudeCalls(), 'Only the answer: what was said is out of the transcript, so there is nothing to summarize or remember.');
+        $this->assertFileDoesNotExist("{$session->directory}/transcript.txt");
         $this->assertFileDoesNotExist("{$this->memories}/555.md");
         $this->assertSame([], $this->logged('Updated memory'));
     }
