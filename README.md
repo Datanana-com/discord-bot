@@ -219,7 +219,7 @@ Set these in `.env`. The notes and measurements behind each one are in [docs/con
 | `RECORDINGS_PATH` | `recordings` | Where recordings, transcripts and summaries are saved. |
 | `RECORDINGS_RETENTION_DAYS` | | Calls older than this many days are deleted. Leave it empty to keep everything. |
 | `VOICE_WAKE_WORD` | `claude, claud` | Claude only answers what mentions it. List the spellings whisper writes for your voice, separated by commas: `claude, cloud, claud`. With `cloud` in the list, the bot also answers when people talk about the cloud, which is why the default has `claud` and not `cloud`. Leave it empty to answer everything. |
-| `VOICE_STOP_PHRASE` | `stop <wake word>` | A sentence with it is never answered. It stops nothing by itself. |
+| `VOICE_STOP_PHRASE` | `stop <wake word>` | Stops what the bot is saying, whoever says it. A sentence with it is never answered. |
 | `VOICE_LEAVE_PHRASE` | `disconnect <wake word>` | What ends the call when anyone in it says it. |
 | `VOICE_PAUSE_SECONDS` | `0.6` | How long someone has to be silent for what they said to be over. |
 | `VOICE_PLAYER` | `bot` | Who sends the bot's speech to Discord: the bot itself (`bot`), as soon as each sentence is ready, or the voice library (`library`), which waits half a second before every sentence. |
@@ -260,9 +260,9 @@ Every log message, and more queries, in [docs/logs-and-statistics.md](docs/logs-
 ## Known limitations
 
 - The bot starts on its answer about two seconds after a short question, as measured on a 10-core desktop CPU with whisper `base`, `WHISPER_LANGUAGE=en`, 8 threads and `CLAUDE_MODEL=haiku`; the whisper server, with a GPU, takes about half a second off that, and the bot sending its speech itself (`VOICE_PLAYER=bot`) another half second. With the default `auto` language it takes a second or two longer.
-- Only the person the bot is answering can interrupt it.
+- Only the person the bot is answering can interrupt it by talking over it. Anyone can stop it with the stop phrase.
 - Speech recognition sometimes mishears the wake word ("cloud" for "Claude"). The default wake word already has "Claud", which whisper also writes for it. List the spellings whisper writes for your voice in `VOICE_WAKE_WORD` or `/settings`.
-- The leave phrase waits its turn behind what was said before it: a sentence is only known once it is transcribed, and sentences are handled one at a time. The stop phrase stops nothing by itself: talking over an answer to you does, whatever you say.
+- The stop phrase and the leave phrase are heard once whisper has written them, about half a second after the sentence ended and the 0.6 seconds of silence that end it.
 - The voice library keeps every decoded audio frame in memory until `/stop`, roughly 12 MB per speaker per minute of speech. For very long calls, `/stop` and `/record` again now and then.
 - Discord lets a bot be in one voice channel per server, and doesn't let bots join the calls of direct messages: use `/meet` for a private call.
 - The bot only remembers its meetings while it runs. Stopped with Ctrl+C or a signal, it ends them and deletes their channels. When it ends another way during a meeting made with `/meet`, the meeting's channel stays: delete it by hand.

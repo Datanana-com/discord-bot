@@ -50,6 +50,11 @@ use function React\Promise\resolve;
  * Code process that waits for the next question, and Piper, with its voice loaded. Both are ended
  * with the call. Whoever is being answered can stop the answer by talking over it.
  *
+ * What is said is transcribed when it ends, one sentence after the other, and not when its turn to be
+ * answered comes: the bot knows what a sentence is while it still answers the ones before it. So the stop
+ * phrase stops what the bot is saying at once, whoever says it, the leave phrase ends the call at once, and
+ * a new question replaces what the bot was going to say to whoever asks it: see {@see hearUtterance()}.
+ *
  * Claude answers at once, without tools. What it can't answer well that way, it hands off to be
  * looked up in the background: see {@see Lookups}. The call goes on meanwhile. What was looked up
  * is posted in the text channel and added to the transcript, and Claude then tells the call what
@@ -172,8 +177,14 @@ final class VoiceSession
 
     private TimerInterface $ticker;
 
-    /** Utterances are handled one at a time, in the order they ended. */
+    /** Utterances are answered one at a time, in the order they ended. */
     private PromiseInterface $queue;
+
+    /**
+     * Utterances are transcribed one at a time, in the order they ended, and not in the queue: what one says is
+     * known while the ones before it are still being answered. It never rejects. See {@see hearUtterance()}.
+     */
+    private PromiseInterface $hearing;
 
     /**
      * @var array<int, string> Everything said in the call so far, as in transcript.txt: one entry for each thing
@@ -236,6 +247,25 @@ final class VoiceSession
      */
     private array $called = [];
 
+    /**
+     * @var array<string, array{int, string}> How often each person took back what they had asked the bot, by user
+     *                                        ID, and what with last: the stop phrase or a new question. A question
+     *                                        that waits for its turn is not answered once this has changed.
+     */
+    private array $replaced = [];
+
+    /** Whether someone said the leave phrase: the bot says okay and leaves, and answers nothing more. */
+    private bool $leaving = false;
+
+    /**
+     * The answer Claude is writing or the bot is speaking, from when Claude is asked until it is over: who it is
+     * for, whether it was stopped, what is resolved when it is, and what ends Claude Code for it. There is one
+     * at most: answers have their turns. Null between them.
+     *
+     * @var array{user: string, stopped: bool, cut: Deferred<null>, end: Closure(): void}|null
+     */
+    private ?array $answering = null;
+
     /** The Claude Code process that is already running for the next question, when there is one: see {@see wait()}. */
     private ?WaitingClaude $waitingClaude = null;
 
@@ -247,10 +277,10 @@ final class VoiceSession
 
     /**
      * The answer the bot is speaking, from its first sentence until it is over: who it is for, since when,
-     * how much of their own audio arrived in one go meanwhile and when the last of it did, whether they
-     * talked over it, and what is resolved when they do. Null while the bot isn't speaking.
+     * how much of their own audio arrived in one go meanwhile, and when the first and the last of it did.
+     * Null while the bot isn't speaking: nothing of the answer in {@see $answering} was heard yet.
      *
-     * @var array{user: string, since: float, heard: int, heardAt: float, interrupted: bool, cut: Deferred<null>}|null
+     * @var array{user: string, since: float, heard: int, heardFrom: float, heardAt: float}|null
      */
     private ?array $speaking = null;
 
@@ -284,6 +314,7 @@ final class VoiceSession
         $this->allLookedUp = resolve(null);
         $this->startedAt = microtime(true);
         $this->queue = resolve(null);
+        $this->hearing = resolve(null);
         $this->left = new Deferred();
         $this->pauseSeconds = self::pauseSeconds() ?? UtteranceSplitter::SILENCE_SECONDS;
         $this->firstWords = self::firstWords() ?? 0;
@@ -366,11 +397,10 @@ final class VoiceSession
     }
 
     /**
-     * The phrase that is never answered, for a server with this wake word: "stop <spelling>" for each of
-     * its spellings, unless VOICE_STOP_PHRASE replaces it. People say it to make the bot stop, and it holds the
-     * wake word, so without it Claude would answer "stop Claude". It stops nothing by itself: an answer is cut
-     * off by the person it is for talking over it, whatever they say. Empty when there is no wake word:
-     * everything is answered then.
+     * The phrase that stops the bot and is never answered, for a server with this wake word: "stop <spelling>"
+     * for each of its spellings, unless VOICE_STOP_PHRASE replaces it. Whoever says it, what the bot is saying
+     * is cut off: see {@see stopAnswer()}. It holds the wake word, so without it Claude would answer
+     * "stop Claude". Empty when there is no wake word: everything is answered then.
      */
     public static function defaultStopPhrase(string $wakeWord): string
     {
@@ -585,8 +615,8 @@ final class VoiceSession
                 unset($session->audio[$userId]);
             }
 
-            // So are the clips of what they said that wait to be transcribed. One being transcribed
-            // is deleted once whisper is done with it, and what whisper heard is dropped.
+            // So are the clips of what they said that wait for whisper, behind what was said before them. One
+            // being transcribed is deleted once whisper is done with it, and what whisper heard is dropped.
             foreach (array_keys($session->clips, $userId, true) as $clip) {
                 unlink($clip);
                 unset($session->clips[$clip]);
@@ -1029,7 +1059,12 @@ final class VoiceSession
         $this->log('info', 'Utterance ended', ['user' => $userId, 'ms' => $ms]);
         $this->track(Usage::UTTERANCE, ['user' => $userId, 'duration_ms' => $ms]);
 
-        $this->inTurn($userId, fn () => $this->handleUtterance($userId, $wavPath, $endedAt, $people, $seconds, $forgotten, $from, $until));
+        // Transcribed now, or once what was said before it is: not when its turn comes, behind every answer before it.
+        $heard = $this->hearing->then(fn () => $this->hearUtterance($userId, $wavPath, $endedAt, $people, $seconds, $forgotten, $from, $until));
+        // What is said next is transcribed whatever became of this. Its own turn is told what did.
+        $this->hearing = $heard->catch(static fn () => null);
+
+        $this->inTurn($userId, fn () => $heard->then(fn (?array $question) => $question === null ? null : $this->answerUtterance($userId, $question, $endedAt, $forgotten)));
     }
 
     /**
@@ -1100,16 +1135,25 @@ final class VoiceSession
     }
 
     /**
-     * @param float $endedAt When the utterance ended, to time the answer from.
+     * Transcribes what someone said, adds it to the transcript, and decides what it is, as soon as everything
+     * said before it is transcribed: the leave phrase and the stop phrase are acted on at once, and a question
+     * replaces what the bot was going to say to whoever asks it. Answering the question waits for its turn:
+     * see {@see answerUtterance()}.
+     *
+     * Nothing here is in a turn, so nothing here may wait for one: see {@see leave()}.
+     *
+     * @param float $endedAt When the utterance ended, to time what stops the bot from.
      * @param list<string>|null $people Who was in the call then: see {@see group()}.
      * @param float $seconds How long it is: whisper has longer to transcribe a longer one.
      * @param array<string, int> $forgotten How often each memory had been forgotten when it was said.
      * @param float $from When they started saying it, by the clock that only goes forward: see {@see CALLED_SECONDS}.
      * @param float $until When they stopped, by the same clock.
+     * @return PromiseInterface<array{name: string, text: string, said: string, people: list<string>|null, replaced: int}|null>
+     *         The question in it, when it is one for the bot. It rejects when it can't be transcribed.
      */
-    private function handleUtterance(string $userId, string $wavPath, float $endedAt, ?array $people, float $seconds, array $forgotten, float $from, float $until): PromiseInterface
+    private function hearUtterance(string $userId, string $wavPath, float $endedAt, ?array $people, float $seconds, array $forgotten, float $from, float $until): PromiseInterface
     {
-        // They opted out while this waited for its turn, and it was deleted then.
+        // They opted out while this waited for whisper, and it was deleted then.
         if (! isset($this->clips[$wavPath])) {
             return resolve(null);
         }
@@ -1120,7 +1164,7 @@ final class VoiceSession
         return $this->transcriber->transcribe($wavPath, $seconds, $this->log(...))
             ->finally(fn () => unlink($wavPath))
             ->catch(fn (Throwable $e) => throw new FailedReply(FailedReply::WHISPER, $e))
-            ->then(function (string $text) use ($userId, $endedAt, $transcribing, $people, $forgotten, $from, $until) {
+            ->then(function (string $text) use ($userId, $endedAt, $transcribing, $people, $forgotten, $from, $until): ?array {
                 $this->log('info', 'Transcribed', ['user' => $userId, 'ms' => $this->msSince($transcribing), 'characters' => mb_strlen($text)]);
 
                 // Nothing was said, or they opted out while it was transcribed.
@@ -1128,12 +1172,13 @@ final class VoiceSession
                     return null;
                 }
 
-                // Someone else in the call may have opted out since it was said, while it waited for its turn.
+                // Someone else in the call may have opted out since it was said, while it waited for whisper.
                 $people = $this->unlessOptedOut($people);
                 $name = $this->nameOf($userId);
                 $said = $this->remember(Lookups::personLine($name, $text), $this->unlessForgotten($people, $forgotten));
 
-                if ($this->stopped) {
+                // Someone said the leave phrase, and the bot is saying okay: that is the end of the call too.
+                if ($this->stopped || $this->leaving) {
                     $this->log('debug', 'Not answering', ['user' => $userId, 'reason' => 'the session stopped']);
 
                     return null;
@@ -1147,12 +1192,18 @@ final class VoiceSession
                 // Before the stop phrase and the wake word: by default, it contains the wake word, and the
                 // stop phrase someone set could match it too.
                 if ($this->leavePhrase !== '' && self::mentions($text, $this->leavePhrase)) {
-                    return $this->leave($userId);
+                    $this->leave($userId, $endedAt);
+
+                    return null;
                 }
 
                 // Before the wake word: by default, the stop phrase contains it, and "stop Claude" is nothing to answer.
                 if ($this->stopPhrase !== '' && self::mentions($text, $this->stopPhrase)) {
                     $this->log('debug', 'Not answering', ['user' => $userId, 'reason' => 'the stop phrase']);
+                    // What they asked before it and still waits for its turn is not answered either.
+                    $this->replaced[$userId] = [($this->replaced[$userId][0] ?? 0) + 1, 'the stop phrase'];
+                    // Whoever the bot is answering: anyone in the call can make it stop.
+                    $this->stopAnswer($userId, 'the stop phrase', $endedAt);
 
                     return null;
                 }
@@ -1171,8 +1222,87 @@ final class VoiceSession
                     return null;
                 }
 
-                return $this->answer($userId, $name, $text, $endedAt, $people, forgotten: $forgotten, said: $said);
+                // They are asking something else: what the bot was going to say to them is skipped.
+                $this->replaced[$userId] = [($this->replaced[$userId][0] ?? 0) + 1, 'a new question'];
+
+                // Only their own answer: someone else's is stopped by the stop phrase, and by nothing else they say.
+                if (($this->answering['user'] ?? null) === $userId) {
+                    $this->stopAnswer($userId, 'a new question', $endedAt);
+                }
+
+                return ['name' => $name, 'text' => $text, 'said' => $said, 'people' => $people, 'replaced' => $this->replaced[$userId][0]];
             });
+    }
+
+    /**
+     * Answers a question when its turn has come, unless something changed while it waited behind the answers
+     * before it: it was transcribed, and decided to be a question, when it was said.
+     *
+     * @param array{name: string, text: string, said: string, people: list<string>|null, replaced: int} $question See {@see hearUtterance()}.
+     * @param float $endedAt When they stopped saying it, to time the answer from.
+     * @param array<string, int> $forgotten How often each memory had been forgotten when it was said.
+     */
+    private function answerUtterance(string $userId, array $question, float $endedAt, array $forgotten): ?PromiseInterface
+    {
+        $unanswered = match (true) {
+            $this->stopped || $this->leaving => 'the session stopped',
+            // What they said is in the transcript: Claude is not asked about it, and nothing is said to them.
+            isset($this->optedOut[$userId]) => 'they opted out',
+            // They said the stop phrase, or asked something else, since.
+            $this->replaced[$userId][0] !== $question['replaced'] => $this->replaced[$userId][1],
+            default => null,
+        };
+
+        if ($unanswered !== null) {
+            $this->log('debug', 'Not answering', ['user' => $userId, 'reason' => $unanswered]);
+
+            return null;
+        }
+
+        // Who was there when it was said: answer() takes who is there now, and uses no group's memory unless they are the same.
+        return $this->answer($userId, $question['name'], $question['text'], $endedAt, $question['people'], forgotten: $forgotten, said: $question['said']);
+    }
+
+    /**
+     * Stops the answer Claude is writing or the bot is speaking, whoever it is for, when there is one: the
+     * sentence being spoken is cut off, and the rest of it is neither given to Piper nor spoken.
+     *
+     * An answer of which something was heard is still posted and added to the transcript once Claude has
+     * written it, like one cut off by the end of the call: the call heard its start. An answer of which
+     * nothing was heard is nobody's any more: Claude Code is ended, and nothing is posted. Its turn is then
+     * over at once, and not when Claude would have finished writing, which whatever is asked next waits for.
+     *
+     * @param string $by Who stopped it.
+     * @param string $reason What with, for the log: "the stop phrase", "a new question" or "the leave phrase".
+     * @param float $endedAt When they stopped saying it.
+     */
+    private function stopAnswer(string $by, string $reason, float $endedAt): void
+    {
+        if ($this->answering === null || $this->answering['stopped']) {
+            return;
+        }
+
+        $this->log('info', 'Stopped answering', ['user' => $this->answering['user'], 'by' => $by, 'reason' => $reason, 'ms' => $this->msSince($endedAt), 'spoken' => $this->speaking !== null]);
+        $this->cutAnswer();
+    }
+
+    /**
+     * What stops an answer does: see {@see stopAnswer()} and {@see hear()}.
+     */
+    private function cutAnswer(): void
+    {
+        // Taken first: the answer may be over, and both gone, as soon as what it waited for is cut.
+        $heard = $this->speaking !== null;
+        $end = $this->answering['end'];
+        $this->answering['stopped'] = true;
+        // Before the player is stopped: its own promise for the sentence may be rejected then, which is no failure.
+        $this->answering['cut']->resolve(null);
+
+        if ($heard) {
+            $this->player->stop();
+        } else {
+            $end();
+        }
     }
 
     /**
@@ -1219,26 +1349,29 @@ final class VoiceSession
 
     /**
      * Says okay, then ends the call because someone said the leave phrase, as /stop would: the summary is
-     * posted, the memories are updated, and the text channel is told who ended it.
+     * posted, the memories are updated, and the text channel is told who ended it. What the bot was saying is
+     * cut off first, and nothing that waited for its turn is answered meanwhile.
      *
-     * @return PromiseInterface<null> Resolves once the call is stopped, not once it is summarized: the summary
-     *                                waits for this turn, which is on the call's queue like everything said.
+     * Nothing may wait for this: it is not in a turn, and stop() continues the call's queue, which a turn
+     * is part of. So it returns nothing, and what it starts is not handed on.
+     *
+     * @param float $endedAt When they stopped saying it.
      */
-    private function leave(string $userId): PromiseInterface
+    private function leave(string $userId, float $endedAt): void
     {
+        $this->leaving = true;
+        $this->stopAnswer($userId, 'the leave phrase', $endedAt);
+
         // Said to the end first: stop() ends Piper and cuts off what is being played. When it can't be said, it leaves all the same.
-        return $this->sayOkay($userId)->then(function () use ($userId) {
+        $this->sayOkay($userId)->then(function () use ($userId) {
             // /stop, or someone disconnecting the bot, ended the call while it said okay.
             if ($this->stopped) {
-                return null;
+                return;
             }
 
             $this->log('info', 'Ended by the leave phrase', ['user' => $userId]);
             $this->post("{$this->nameOf($userId)} ended the call by voice.");
-            // Not returned: it continues the queue, which holds this turn, so a turn that waited for it would wait for itself.
             $this->stop();
-
-            return null;
         });
     }
 
@@ -1333,14 +1466,14 @@ final class VoiceSession
                 $started = null;
 
                 if ($this->speaking === null) {
-                    $this->speaking = ['user' => $userId, 'since' => microtime(true), 'heard' => 0, 'heardAt' => 0.0, 'interrupted' => false, 'cut' => new Deferred()];
+                    $this->speaking = ['user' => $userId, 'since' => microtime(true), 'heard' => 0, 'heardFrom' => 0.0, 'heardAt' => 0.0];
                     // Logged when the first packet of the answer is sent: what someone in the call waits for, less the silence that ended their sentence.
                     $started = fn () => $this->log('info', 'Started speaking', ['user' => $userId, 'ms' => $this->msSince($endedAt)]);
                 }
 
                 // The player may say nothing more about a sentence once it is stopped, as the voice library
-                // doesn't when it is stopped or closed while speaking one: see hear().
-                return race([$this->player->play($made, $started)->catch($unspoken), $this->left->promise(), $this->speaking['cut']->promise()]);
+                // doesn't when it is stopped or closed while speaking one: see cutAnswer().
+                return race([$this->player->play($made, $started)->catch($unspoken), $this->left->promise(), $this->answering['cut']->promise()]);
             });
             // An answer that is held back comes all at once: there is no first sound to gain by cutting it.
         }, $full ? 0 : $this->firstWords);
@@ -1351,7 +1484,12 @@ final class VoiceSession
         $started = fn (array $timing) => $this->log('info', 'Claude started answering', ['user' => $userId, ...$timing, 'held' => $full]);
 
         return $this->ask($userId, $this->prompt($userId, $name, $said, $group, $sharers, $basis !== null, $lookedUp['text'] ?? null), $full ? static fn () => null : $handOff->push(...), $started)->then(
-            function (string $answer) use ($sentences, $handOff, $full, $lookedUp, $forgotten, &$spoken, $userId, $sharers, $depends, $basis, $among, $name, $question, $endedAt, $asking, $people) {
+            function (?string $answer) use ($sentences, $handOff, $full, $lookedUp, $forgotten, &$spoken, $userId, $sharers, $depends, $basis, $among, $name, $question, $endedAt, $asking, $people) {
+                // It was stopped before anything of it was heard, and Claude Code with it: there is no answer.
+                if ($answer === null) {
+                    return $spoken;
+                }
+
                 $this->log('info', 'Claude answered', ['user' => $userId, 'ms' => $this->msSince($asking), 'characters' => mb_strlen($answer)]);
                 $handOff->flush();
                 [$written] = HandOff::split($answer);
@@ -1437,8 +1575,9 @@ final class VoiceSession
             // stopped speaking, or the call would be told that it failed over the sentences still being spoken.
             return $spoken->finally(fn () => throw $e);
         })->finally(function () use (&$unplayed) {
-            // The bot is no longer speaking: nobody can talk over it.
+            // The bot is no longer speaking: nobody can talk over it, and there is nothing left to stop.
             $this->speaking = null;
+            $this->answering = null;
 
             // What Piper spoke and nobody heard is not kept: Piper can't be stopped in a sentence it has started,
             // but its file is not written, or deleted.
@@ -1450,8 +1589,8 @@ final class VoiceSession
 
     /**
      * Stops the answer the bot is speaking once the person it is for has talked over it for as long as it
-     * takes for what they say to be transcribed, in one go. Nobody else can stop it: people in a call talk
-     * to each other, and that would cut off every answer.
+     * takes for what they say to be transcribed, in one go. Nobody else can stop it that way: people in a call
+     * talk to each other, and that would cut off every answer. What anyone can stop it with is the stop phrase.
      *
      * The sentence being spoken is cut off, and the rest of the answer is neither synthesized nor spoken.
      * It is still posted and added to the transcript once Claude has written it, like an answer cut off
@@ -1460,13 +1599,14 @@ final class VoiceSession
      */
     private function hear(string $userId, string $pcm, float $now): void
     {
-        if ($this->speaking === null || $this->speaking['interrupted'] || $this->speaking['user'] !== $userId) {
+        if ($this->speaking === null || $this->answering['stopped'] || $this->speaking['user'] !== $userId) {
             return;
         }
 
         // A cough earlier in the answer doesn't count: after a pause, they start over.
         if ($now - $this->speaking['heardAt'] >= $this->pauseSeconds) {
             $this->speaking['heard'] = 0;
+            $this->speaking['heardFrom'] = $now;
         }
 
         $this->speaking['heard'] += strlen($pcm);
@@ -1476,12 +1616,10 @@ final class VoiceSession
             return;
         }
 
-        $this->speaking['interrupted'] = true;
-        $this->log('info', 'Interrupted', ['user' => $userId, 'ms' => $this->msSince($this->speaking['since'])]);
-        // First, as the player's own promise for the sentence may be rejected when it is stopped,
-        // which is no failure.
-        $this->speaking['cut']->resolve(null);
-        $this->player->stop();
+        // How far into the answer, and how long after they started talking over it: the half second it takes, and
+        // whatever the audio waited on its way here.
+        $this->log('info', 'Interrupted', ['user' => $userId, 'ms' => $this->msSince($this->speaking['since']), 'after_ms' => (int) round(($now - $this->speaking['heardFrom']) * 1000)]);
+        $this->cutAnswer();
     }
 
     /**
@@ -1525,7 +1663,8 @@ final class VoiceSession
      * @param callable(string $text): void $onText Called with each piece of the answer while Claude is writing it.
      * @param (callable(array{ms: int, init_ms: ?int, retries: int, rate_limits: int} $timing): void)|null $onStarted
      *        Called once, before the first piece, with how long Claude took to start answering.
-     * @return PromiseInterface<string> Claude's answer.
+     * @return PromiseInterface<string|null> Claude's answer, or null when it was stopped before anything of it was
+     *                                       heard, and Claude Code with it: see {@see stopAnswer()}.
      */
     private function ask(string $userId, string $prompt, callable $onText, ?callable $onStarted = null): PromiseInterface
     {
@@ -1536,23 +1675,39 @@ final class VoiceSession
         // And how much it was given: the whole call so far, which grows. Counts, never what was said.
         $this->log('info', 'Asked Claude', ['user' => $userId, 'waited_ms' => $waiting?->waitedMs(), 'lines' => count($this->transcript), 'characters' => mb_strlen($prompt)]);
 
+        // Resolved when the answer is stopped, and the process started for the question, when there is one.
+        $ended = new Deferred();
+        $started = null;
+        $stopped = false;
+
         if ($waiting === null) {
             $this->log('warning', 'No Claude Code process was waiting for the question', ['user' => $userId]);
-            $answer = $this->claude->ask($prompt, onText: $onText, thinks: false, onStarted: $onStarted);
+            $answer = $started = $this->claude->ask($prompt, onText: $onText, thinks: false, onStarted: $onStarted);
         } else {
-            $answer = $waiting->ask($prompt, $onText, $onStarted)->catch(function (Throwable $e) use ($waiting, $userId, $prompt, $onText, $onStarted) {
-                // Part of the answer was spoken, or Claude said why there is none: asking again would not help.
-                if ($waiting->answered()) {
+            $answer = $waiting->ask($prompt, $onText, $onStarted)->catch(function (Throwable $e) use ($waiting, $userId, $prompt, $onText, $onStarted, &$started, &$stopped) {
+                // Part of the answer was spoken, Claude said why there is none, or the answer was stopped: asking again would not help.
+                if ($waiting->answered() || $stopped) {
                     throw $e;
                 }
 
                 $this->log('warning', 'The waiting Claude Code process did not answer: ' . $e->getMessage(), ['user' => $userId]);
 
-                return $this->claude->ask($prompt, onText: $onText, thinks: false, onStarted: $onStarted);
+                return $started = $this->claude->ask($prompt, onText: $onText, thinks: false, onStarted: $onStarted);
             });
         }
 
-        return $answer->finally($this->wait(...));
+        // Not an arrow function: $started is only set when the waiting process did not answer.
+        $end = function () use ($ended, $waiting, &$started, &$stopped): void {
+            $stopped = true;
+            // First: Claude Code ending this way is no failure of the answer's.
+            $ended->resolve(null);
+            $waiting?->stop();
+            $started?->cancel();
+        };
+        // What can stop the answer, from when Claude is asked: see stopAnswer().
+        $this->answering = ['user' => $userId, 'stopped' => false, 'cut' => new Deferred(), 'end' => $end];
+
+        return race([$answer, $ended->promise()])->finally($this->wait(...));
     }
 
     /**
@@ -1585,7 +1740,7 @@ final class VoiceSession
      */
     private function stillAnswering(string $userId, array $sharers, ?string $basis, ?array $among): bool
     {
-        return ! $this->stopped && ! isset($this->optedOut[$userId]) && ! ($this->speaking['interrupted'] ?? false)
+        return ! $this->stopped && ! isset($this->optedOut[$userId]) && ! ($this->answering['stopped'] ?? false)
             && $this->stillSharing($sharers) && $this->stillAlone($userId, $basis) && $this->stillAmong($userId, $among);
     }
 

@@ -237,34 +237,32 @@ final class VoiceLeavePhraseTest extends VoiceTestCase
         $this->assertNotContains('Alice ended the call by voice.', $this->sent);
     }
 
-    public function testALeavePhraseSaidOverAnAnswerToSomeoneElseWaitsForItsTurn(): void
+    public function testALeavePhraseSaidOverAnAnswerToSomeoneElseCutsItAndEndsTheCallAtOnce(): void
     {
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
         $this->ask($vc, '666', 'Hey Claude, are you there?');
         $this->waitUntil(fn () => count($this->played) === 1, 'the answer to Bob to be spoken');
-        $speaking = new Deferred();
-        $this->playing = $speaking->promise();
+        // The sentence the bot speaks to Alice is a long one: it never ends by itself here.
+        $this->playing = (new Deferred())->promise();
         $this->ask($vc, '555', 'Hey Claude, what time is it?');
         $this->waitUntil(fn () => count($this->played) === 2, 'the answer to Alice to be spoken');
 
-        // Bob ends the call while the bot is answering Alice.
+        // Bob ends the call while the bot is answering Alice. Talking over it cuts nothing: it isn't his answer.
+        $this->playing = null;
         $this->says($vc, '666', 'Disconnect Claude.');
-        $this->waitUntil(fn () => count($this->logged('Utterance ended')) === 3, 'Bob to finish speaking');
-        $this->runFor(0.5);
-
-        // The answer to Alice is spoken to the end first, and the call goes on until then.
         $this->assertSame([], $this->cutOff);
-        $this->assertSame($session, VoiceSession::forGuild(self::GUILD_ID));
-        $this->assertCount(2, $this->played);
 
-        $speaking->resolve(null);
+        // The phrase does, as soon as it is transcribed: it doesn't wait behind the answer.
         $this->callEnds($session);
 
-        $this->assertSame([], $this->cutOff, 'Nothing was cut off.');
+        $this->assertSame([$this->played[1]], $this->cutOff, 'The answer to Alice was cut off.');
+        $this->assertSame([], $this->logged('Interrupted'));
         $this->assertCount(3, $this->played);
         $this->assertSame('Okay.', file_get_contents($this->played[2]));
         $this->assertSame([['user' => '666']], $this->contexts('Ended by the leave phrase'));
+        $this->assertSame(['user' => '555', 'by' => '666', 'reason' => 'the leave phrase'], array_slice($this->contexts('Stopped answering')[0], 0, 3));
         $this->assertSame('Bob ended the call by voice.', $this->sent[2]);
+        $this->assertSame([], $this->loggedProblems());
     }
 
     public function testALeavePhraseSaidOverTheirOwnAnswerStopsTheBotAndEndsTheCall(): void
