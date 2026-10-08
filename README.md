@@ -48,9 +48,9 @@ flowchart TD
     A["Someone speaks in the call"] --> R["Recorded to their own WAV file"]
     A --> B["whisper.cpp transcribes it on your machine"]
     B --> T["Added to transcript.txt"]
-    B --> C{"Wake word said, or a conversation open?"}
+    B --> C{"Does the sentence say the wake word?"}
     C -->|"No"| N["No answer"]
-    C -->|"Yes"| D["Claude Code CLI writes the answer"]
+    C -->|"Yes"| D["Claude Code CLI gets the whole call so far, and writes the answer"]
     D --> E["Piper speaks it in the call, sentence by sentence"]
     D --> F["Posted in the text channel"]
     D -.->|"Needs the web"| L["Looked up in the background"]
@@ -59,28 +59,15 @@ flowchart TD
 ```
 
 - **Recordings.** Each speaker gets their own WAV file in `recordings/<server id>/<date>/`, next to a `transcript.txt` of the call and, once it ends, its `summary.md`.
-- **Wake word.** Saying "Claude" opens a conversation for whoever said it, so there is no need to say it in every sentence. Other people open their own.
+- **Wake word.** The bot answers a sentence that says "Claude", and nothing else: people in a call talk to each other, so every question needs the name, also a follow-up. "Hey Claude." and then, within five seconds, the question works too.
+- **The whole call.** When it is asked, Claude gets everything said in the call so far, by everyone who is heard, so "Claude, who is right?" after ten minutes of talking among yourselves has an answer.
 - **Answers** are spoken while Claude is still writing them, and posted in the text channel once whole.
 - **Interrupting.** The bot stops speaking when the person it is answering starts talking.
 - **Leaving by voice.** Anyone in the call can say "disconnect Claude": the bot says "Okay.", then stops recording and leaves, as `/stop` does. "Disconnect" alone doesn't count.
 - **Summary.** When the call ends, Claude summarizes its whole transcript in the text channel where `/record` was used.
 - **When something fails.** What can't be transcribed, answered or spoken is said in the text channel, and the call hears "Sorry, something went wrong.", once for each thing that fails. The call goes on.
 
-A conversation belongs to one person:
-
-```mermaid
-stateDiagram-v2
-    direction LR
-    [*] --> Closed
-    Closed --> Open: says "Claude"
-    Open --> Open: everything they say is answered
-    Open --> Closed: says "stop Claude"
-    Open --> Closed: 60 seconds of quiet
-    Open --> Closed: uses /optout
-    Open --> [*]: the call ends
-```
-
-More in [docs/voice-calls.md](docs/voice-calls.md): conversations, interruptions, pauses, retention, how Claude Code and Piper are kept running during a call, and how to speak with Kokoro instead of Piper.
+More in [docs/voice-calls.md](docs/voice-calls.md): what is answered, what Claude is given, interruptions, pauses, retention, how Claude Code and Piper are kept running during a call, and how to speak with Kokoro instead of Piper.
 
 ## Looking things up
 
@@ -232,7 +219,7 @@ Set these in `.env`. The notes and measurements behind each one are in [docs/con
 | `RECORDINGS_PATH` | `recordings` | Where recordings, transcripts and summaries are saved. |
 | `RECORDINGS_RETENTION_DAYS` | | Calls older than this many days are deleted. Leave it empty to keep everything. |
 | `VOICE_WAKE_WORD` | `claude, claud` | Claude only answers what mentions it. List the spellings whisper writes for your voice, separated by commas: `claude, cloud, claud`. With `cloud` in the list, the bot also answers when people talk about the cloud, which is why the default has `claud` and not `cloud`. Leave it empty to answer everything. |
-| `VOICE_STOP_PHRASE` | `stop <wake word>` | What closes the conversation of whoever says it. |
+| `VOICE_STOP_PHRASE` | `stop <wake word>` | A sentence with it is never answered. It stops nothing by itself. |
 | `VOICE_LEAVE_PHRASE` | `disconnect <wake word>` | What ends the call when anyone in it says it. |
 | `VOICE_PAUSE_SECONDS` | `0.6` | How long someone has to be silent for what they said to be over. |
 | `VOICE_PLAYER` | `bot` | Who sends the bot's speech to Discord: the bot itself (`bot`), as soon as each sentence is ready, or the voice library (`library`), which waits half a second before every sentence. |
@@ -274,7 +261,7 @@ Every log message, and more queries, in [docs/logs-and-statistics.md](docs/logs-
 - The bot starts on its answer about two seconds after a short question, as measured on a 10-core desktop CPU with whisper `base`, `WHISPER_LANGUAGE=en`, 8 threads and `CLAUDE_MODEL=haiku`; the whisper server, with a GPU, takes about half a second off that, and the bot sending its speech itself (`VOICE_PLAYER=bot`) another half second. With the default `auto` language it takes a second or two longer.
 - Only the person the bot is answering can interrupt it.
 - Speech recognition sometimes mishears the wake word ("cloud" for "Claude"). The default wake word already has "Claud", which whisper also writes for it. List the spellings whisper writes for your voice in `VOICE_WAKE_WORD` or `/settings`.
-- The stop phrase and the leave phrase wait their turn behind what was said before them: a sentence is only known once it is transcribed, and sentences are handled one at a time.
+- The leave phrase waits its turn behind what was said before it: a sentence is only known once it is transcribed, and sentences are handled one at a time. The stop phrase stops nothing by itself: talking over an answer to you does, whatever you say.
 - The voice library keeps every decoded audio frame in memory until `/stop`, roughly 12 MB per speaker per minute of speech. For very long calls, `/stop` and `/record` again now and then.
 - Discord lets a bot be in one voice channel per server, and doesn't let bots join the calls of direct messages: use `/meet` for a private call.
 - The bot only remembers its meetings while it runs. Stopped with Ctrl+C or a signal, it ends them and deletes their channels. When it ends another way during a meeting made with `/meet`, the meeting's channel stays: delete it by hand.

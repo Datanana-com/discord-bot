@@ -162,7 +162,7 @@ final class VoiceOptOutTest extends VoiceTestCase
 
         $this->assertCount(1, $this->logged('Transcribed'));
         $this->assertStringNotContainsString('Bob', $this->transcript($session));
-        $this->assertStringContainsString('Alice is talking to you.', file_get_contents($this->claudeLog), 'Claude was only asked by Alice.');
+        $this->assertStringContainsString('Answer Alice.', file_get_contents($this->claudeLog), 'Claude was only asked by Alice.');
         $this->assertCount(1, $this->sent);
 
         // Only the answer is slow, not the call's summary.

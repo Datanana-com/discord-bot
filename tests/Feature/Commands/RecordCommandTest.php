@@ -45,7 +45,7 @@ final class RecordCommandTest extends CommandTestCase
         // Unmuted to speak answers, undeafened to hear the call.
         $this->assertSame([[$channel, false, false]], $this->joins);
         $this->assertTrue($this->acknowledged, 'Discord got a response within 3 seconds.');
-        $this->assertSame(['🔴 Recording <#200>. Say "claude" to talk to me, and "stop claude" when you\'re done. Say "disconnect claude" to make me leave. Use /stop to end the recording, or /optout if you don\'t want to be recorded. I remember each group\'s calls: see what I remember with /memory, and delete it with /forget.'], $this->updates);
+        $this->assertSame(['🔴 Recording <#200>. I only answer what is said with "claude" in it: say it with every question. Say "disconnect claude" to make me leave. Use /stop to end the recording, or /optout if you don\'t want to be recorded. I remember each group\'s calls: see what I remember with /memory, and delete it with /forget.'], $this->updates);
         $this->assertNotNull($session = VoiceSession::forGuild(self::GUILD_ID));
         $this->assertDirectoryExists($session->directory);
         $this->assertStringStartsWith("{$this->recordings}/" . self::GUILD_ID . '/', $session->directory);
@@ -60,20 +60,22 @@ final class RecordCommandTest extends CommandTestCase
         $this->record($this->interaction($channel));
 
         // The stop phrase has a spelling for each of the wake word's, and people are told the first.
-        $this->assertStringContainsString('Say "claude" to talk to me, and "stop claude" when you\'re done. Say "disconnect claude" to make me leave. Use /stop', $this->updates[0]);
+        $this->assertStringContainsString('I only answer what is said with "claude" in it: say it with every question. Say "disconnect claude" to make me leave. Use /stop', $this->updates[0]);
         $this->assertStringNotContainsString('cloud', $this->updates[0]);
     }
 
-    public function testAnnouncesTheStopPhraseThatReplacesTheDefault(): void
+    public function testNeverAnnouncesTheStopPhraseWhichStopsNothingByItself(): void
     {
-        // Its first spelling is the one people are told.
+        // It only keeps a sentence from Claude: saying it is no way to stop the bot, so people aren't told it is.
         $this->setEnv(['VOICE_STOP_PHRASE' => 'para claude, parar claude']);
         $channel = $this->voiceChannel();
         $this->joinsWith(resolve($this->voiceClient($channel)));
 
         $this->record($this->interaction($channel));
 
-        $this->assertSame(['🔴 Recording <#200>. Say "claude" to talk to me, and "para claude" when you\'re done. Say "disconnect claude" to make me leave. Use /stop to end the recording, or /optout if you don\'t want to be recorded. I remember each group\'s calls: see what I remember with /memory, and delete it with /forget.'], $this->updates);
+        $this->assertSame(['🔴 Recording <#200>. I only answer what is said with "claude" in it: say it with every question. Say "disconnect claude" to make me leave. Use /stop to end the recording, or /optout if you don\'t want to be recorded. I remember each group\'s calls: see what I remember with /memory, and delete it with /forget.'], $this->updates);
+        $this->assertStringNotContainsString('para', $this->updates[0]);
+        $this->assertStringNotContainsString('stop claude', $this->updates[0]);
     }
 
     public function testAnnouncesTheLeavePhraseThatReplacesTheDefault(): void
@@ -85,7 +87,7 @@ final class RecordCommandTest extends CommandTestCase
 
         $this->record($this->interaction($channel));
 
-        $this->assertStringContainsString('"stop claude" when you\'re done. Say "hang up claude" to make me leave. Use /stop', $this->updates[0]);
+        $this->assertStringContainsString('say it with every question. Say "hang up claude" to make me leave. Use /stop', $this->updates[0]);
         $this->assertStringNotContainsString('hang up on claude', $this->updates[0]);
     }
 
@@ -127,7 +129,7 @@ final class RecordCommandTest extends CommandTestCase
 
         $this->record($this->interaction($channel, channel: $thread));
 
-        $this->assertSame(['🔴 Recording <#200>. Say "claude" to talk to me, and "stop claude" when you\'re done. Say "disconnect claude" to make me leave. Use /stop to end the recording, or /optout if you don\'t want to be recorded. I remember each group\'s calls: see what I remember with /memory, and delete it with /forget.'], $this->updates);
+        $this->assertSame(['🔴 Recording <#200>. I only answer what is said with "claude" in it: say it with every question. Say "disconnect claude" to make me leave. Use /stop to end the recording, or /optout if you don\'t want to be recorded. I remember each group\'s calls: see what I remember with /memory, and delete it with /forget.'], $this->updates);
 
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
         // By reference: an arrow function would keep the list as it is now.
@@ -159,7 +161,7 @@ final class RecordCommandTest extends CommandTestCase
         $this->record($this->interaction($channel));
 
         // The announcement tells the call the server's wake word, not the one in .env ("claude").
-        $this->assertSame(['🔴 Recording <#200>. Say "jarvis" to talk to me, and "stop jarvis" when you\'re done. Say "disconnect jarvis" to make me leave. Use /stop to end the recording, or /optout if you don\'t want to be recorded. I remember each group\'s calls: see what I remember with /memory, and delete it with /forget.'], $this->updates);
+        $this->assertSame(['🔴 Recording <#200>. I only answer what is said with "jarvis" in it: say it with every question. Say "disconnect jarvis" to make me leave. Use /stop to end the recording, or /optout if you don\'t want to be recorded. I remember each group\'s calls: see what I remember with /memory, and delete it with /forget.'], $this->updates);
 
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
         $this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');
@@ -192,7 +194,7 @@ final class RecordCommandTest extends CommandTestCase
 
         // Settings never stop a call from starting.
         $this->assertNotNull(VoiceSession::forGuild(self::GUILD_ID));
-        $this->assertSame(['🔴 Recording <#200>. Say "computer" to talk to me, and "stop computer" when you\'re done. Say "disconnect computer" to make me leave. Use /stop to end the recording, or /optout if you don\'t want to be recorded. I remember each group\'s calls: see what I remember with /memory, and delete it with /forget.'], $this->updates);
+        $this->assertSame(['🔴 Recording <#200>. I only answer what is said with "computer" in it: say it with every question. Say "disconnect computer" to make me leave. Use /stop to end the recording, or /optout if you don\'t want to be recorded. I remember each group\'s calls: see what I remember with /memory, and delete it with /forget.'], $this->updates);
 
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
         $this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');

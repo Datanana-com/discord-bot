@@ -249,13 +249,12 @@ final class VoiceLookupTest extends VoiceTestCase
     {
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
         $lines = array_map(fn (int $line) => sprintf('[10:00:00] Bob: This is line %05d of a very long call.', $line), range(1, 3500));
-        file_put_contents("{$session->directory}/transcript.txt", implode("\n", $lines) . "\n");
+        $this->saidEarlier($session, $lines);
 
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
         $this->waitUntil(fn () => count($this->claudeCalls()) === 2, 'the lookup to start');
 
-        // The whole call is read from its file, not only the last lines an answer gets. Of a call that is too
-        // long, the lookup gets the end, from the start of a line, and is told so.
+        // Of a call that is too long, the lookup gets the end, from the start of something said, and is told so.
         $prompt = $this->claudeCalls()[1]['prompt'];
         $this->assertStringStartsWith("Transcript of the voice call so far:\n\n(Its beginning is left out: it is too long.)\n[10:00:00] Bob: This is line 0", $prompt);
         $this->assertStringContainsString("Bob: This is line 03500 of a very long call.\n", $prompt);
@@ -263,8 +262,9 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->assertStringNotContainsString('line 00001 ', $prompt);
         $this->assertLessThan(150_200, mb_strlen($prompt));
         $this->assertGreaterThan(149_900, mb_strlen($prompt));
-        // An answer only gets the call's last lines.
-        $this->assertLessThan(2_000, mb_strlen($this->claudeCalls()[0]['prompt']));
+        // The answer that handed it off was given the same: one rule for both.
+        $this->assertStringStartsWith("Transcript of the voice call so far:\n\n(Its beginning is left out: it is too long.)\n[10:00:00] Bob: This is line 0", $this->claudeCalls()[0]['prompt']);
+        $this->assertSame(explode("\n", $prompt)[3], explode("\n", $this->claudeCalls()[0]['prompt'])[4], 'The lookup has two lines more at its end, so one less at its start.');
 
         $this->finishLookups($session);
     }

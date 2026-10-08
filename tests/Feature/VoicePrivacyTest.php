@@ -54,13 +54,13 @@ final class VoicePrivacyTest extends CommandTestCase
         // Alice gets the memory of her group with Bob, which isn't hers alone. Bob chose nothing: he still gets his own.
         $this->assertSame(
             "What you remember about Alice and Bob together:\n\n" . self::TRIP . "\n\n"
-            . "Transcript of the voice call so far:\n\nAlice: " . self::QUESTION . "\n\nAlice is talking to you. Reply to their last message.",
-            $this->claudeCalls()[0]['prompt'],
+            . "Transcript of the voice call so far:\n\nAlice: " . self::QUESTION . "\n\n" . $this->asking('Alice', self::QUESTION),
+            $this->untimed($this->claudeCalls()[0]['prompt']),
         );
         $this->assertSame(
             "What you remember about Bob:\n\n" . self::BOB . "\n\n"
             . "What you remember about Alice and Bob together:\n\n" . self::TRIP . "\n\n"
-            . "Transcript of the voice call so far:\n\nAlice: " . self::QUESTION . "\nClaude: It is a quarter past four.\nBob: " . self::QUESTION . "\n\nBob is talking to you. Reply to their last message.",
+            . "Transcript of the voice call so far:\n\nAlice: " . self::QUESTION . "\nClaude: It is a quarter past four.\nBob: " . self::QUESTION . "\n\n" . $this->asking('Bob', self::QUESTION),
             $this->untimed($this->claudeCalls()[1]['prompt']),
         );
         $this->assertStringNotContainsString('Bananas', $this->claudeCalls()[1]['prompt']);
@@ -98,8 +98,8 @@ final class VoicePrivacyTest extends CommandTestCase
         // Nobody else is there to hear it.
         $this->assertSame(
             "What you remember about Alice:\n\n" . self::ALICE . "\n\n"
-            . "Transcript of the voice call so far:\n\nAlice: " . self::QUESTION . "\n\nAlice is talking to you. Reply to their last message.",
-            $this->claudeCalls()[0]['prompt'],
+            . "Transcript of the voice call so far:\n\nAlice: " . self::QUESTION . "\n\n" . $this->asking('Alice', self::QUESTION),
+            $this->untimed($this->claudeCalls()[0]['prompt']),
         );
         $this->assertSame([], $this->loggedProblems());
         await($session->stop());
