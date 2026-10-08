@@ -4,8 +4,11 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\EventAbstract;
+use App\Events\VoiceStateUpdate;
 use App\Settings\UserSettings;
 use App\Voice\VoiceSession;
+use Discord\Parts\Channel\Message;
 use Discord\Voice\VoiceClient;
 use React\Promise\Deferred;
 use ReflectionProperty;
@@ -47,6 +50,8 @@ final class VoiceLookupTest extends VoiceTestCase
     protected function setUp(): void
     {
         parent::setUp();
+        // Each question ends after this much real silence: these tests ask more than a hundred.
+        $this->setEnv(['VOICE_PAUSE_SECONDS' => '0.2']);
         $this->go = "{$this->recordings}/lookup.go";
         $this->setProcessEnv([
             'FAKE_CLAUDE_OUTPUT' => self::handsOff(self::TASK),
@@ -112,12 +117,13 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->assertSame(self::QUOTE . "\n" . self::TOLD, $this->sent[2]);
         $this->assertSame(self::TOLD, file_get_contents($this->played[1]));
         $this->assertStringEndsWith('] Claude: ' . self::TOLD . "\n", $this->transcript($session));
-        $this->assertSame(2, $this->usage()['answers']);
+        // One question, one answer: telling what was found is the end of it, and counts as what was looked up.
+        $this->assertSame([1, 1], [$this->usage()['answers'], $this->usage()['lookups']]);
 
         // Logged with who asked, the call, the models and lengths: never the task, the call or the answer.
         $looking = $this->logged('Looking something up');
         $this->assertSame(
-            [['guild' => self::GUILD_ID, 'session' => $session->id, 'user' => '555', 'model' => 'sonnet', 'advisor' => 'opus', 'characters' => mb_strlen(self::TASK)]],
+            [['guild' => self::GUILD_ID, 'session' => $session->id, 'user' => '555', 'model' => 'sonnet', 'advisor' => null, 'characters' => mb_strlen(self::TASK)]],
             $looking,
         );
         $lookedUp = $this->logged('Looked something up');
@@ -414,7 +420,7 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->assertCount(1, $this->logged('Dropped what was handed off to be looked up'));
     }
 
-    public function testUpdatesNoMemoryFromWhatWasLookedUpWhenItWasForgottenWhileClaudeAnswered(): void
+    public function testNeverLooksUpWhatClaudeHandedOffFromAMemoryThatWasForgottenWhileClaudeAnswered(): void
     {
         $this->memory()->save('555', '- Lives in Lisbon.');
         $this->inCall('555');
@@ -428,19 +434,17 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->memory()->forget('555');
         VoiceSession::forget('555');
         touch($this->claudeResume);
-        $this->waitUntil(fn () => count($this->lookups()) === 1, 'the lookup to start');
+        $this->waitUntil(fn () => $this->logged('Dropped what was handed off to be looked up') !== [], 'the task to be dropped');
+        $this->runFor(0.4);
 
-        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream(self::TOLD)]);
-        touch($this->go);
-        $this->waitUntil(fn () => count($this->sent) === 3 && count($this->played) === 2, 'what was looked up to be told');
+        // The task may be made of what her memory said: nothing is looked up, posted, told or remembered.
+        $this->assertSame([], $this->lookups());
+        $this->assertCount(1, $this->sent);
+        $this->assertStringNotContainsString('Looked up for', $this->transcript($session));
         $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeResult('They talked about PHP.'), 'FAKE_CLAUDE_OUTPUT_MEMORY' => self::claudeResult('- Asked about PHP.')]);
         await($session->stop());
-
-        // What it found, and Claude telling it, can say what her memory said: neither is remembered.
-        $updates = array_values(array_filter($this->claudeCalls(), fn (array $call) => str_starts_with($call['system'], "You keep a Discord bot's memory")));
-        $this->assertStringNotContainsString('Looked up for', json_encode(array_column($updates, 'prompt')));
-        $this->assertStringNotContainsString('late September', json_encode(array_column($updates, 'prompt')));
-        $this->assertStringContainsString(self::LOOKED_UP, $this->transcript($session));
+        $this->assertSame([], $this->logged('Looking something up'));
+        $this->assertSame([], $this->loggedProblems());
     }
 
     public function testDropsTheTellingOnceSomeoneJoinsACallItsAnswerWasMadeForSomeoneAloneInWhileItWaitsForItsTurn(): void
@@ -600,7 +604,7 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->assertStringNotContainsString('Claude: ' . self::TOLD, $memory);
     }
 
-    public function testTellsButDoesNotRememberWhatWasLookedUpOnceTheMemoryWasForgottenWhileItWaitedForItsTurn(): void
+    public function testDoesNotTellWhatWasLookedUpOnceTheMemoryWasForgottenWhileItWaitedForItsTurn(): void
     {
         $this->memory()->save('555', '- Lives in Lisbon.');
         $this->inCall('555');
@@ -612,8 +616,11 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream(self::TOLD)]);
         $this->memory()->forget('555');
         VoiceSession::forget('555');
-        $this->waitUntil(fn () => count($this->answersToAlice()) === 4, 'what was looked up to be told');
-        $this->assertSame(self::QUOTE . "\n" . self::TOLD, $this->answersToAlice()[3]);
+        $this->runFor(0.8);
+
+        // What was found is already posted, and /forget takes it out of the transcript: only telling it is dropped.
+        $this->assertCount(3, $this->answersToAlice(), 'Nothing is told.');
+        $this->assertStringNotContainsString('Looked up for', $this->transcript($session));
 
         $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeResult('They talked about PHP.'), 'FAKE_CLAUDE_OUTPUT_MEMORY' => self::claudeResult('- Lives in Lisbon, again.')]);
         await($session->stop());
@@ -775,6 +782,8 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->waitUntil(fn () => count($this->played) === $spoken + 2, 'both of its sentences');
         $this->assertSame(self::BUSY, implode(' ', array_map(file_get_contents(...), array_slice($this->played, $spoken))), 'Not what Claude wrote before the line.');
         $this->assertStringEndsWith('] Claude: ' . self::BUSY . "\n", $this->transcript($session));
+        // Which the log says: that answer was held back until it was whole, unlike the four before it.
+        $this->assertSame([false, false, false, false, true], array_column($this->logged('Claude started answering'), 'held'));
 
         // Meanwhile, an answer that hands nothing off is still given as it is.
         $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is a quarter past four.')]);
@@ -839,10 +848,13 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->ask($vc, '555', self::QUESTION);
         $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 2, 'the lookup to start');
         $transcript = $this->transcript($session);
+        $pid = $this->lookups()[0]['pid'];
+        $this->assertTrue(posix_kill($pid, 0), 'Claude Code is searching.');
 
         VoiceSession::optOut('555');
-        touch($this->go);
-        $this->waitUntil(fn () => $this->logged('Looked something up') !== [], 'the lookup to end');
+
+        // The search is stopped, not left to finish for nobody.
+        $this->waitUntil(fn () => ! posix_kill($pid, 0), 'Claude Code to be stopped');
         $this->runFor(0.4);
 
         // Not posted, spoken or added to the transcript: it answers what they said.
@@ -854,8 +866,11 @@ final class VoiceLookupTest extends VoiceTestCase
         // What they had waiting is never looked up: the task is made of what they said.
         $this->assertCount(1, $this->lookups());
         $this->assertCount(1, $this->logged('Looking something up'));
+        $this->assertSame([], $this->logged('Looked something up'));
+        // The one that waited may only be handed off after they opted out: it is then dropped before it is stopped.
+        $this->assertNotSame([], $this->logged('Stopped looking something up'));
         $this->assertCount(3, $this->claudeCalls());
-        $this->assertFileDoesNotExist($this->go, 'Only the first lookup took it.');
+        $this->assertFileDoesNotExist($this->go, 'Neither was let go on.');
         $this->assertSame([['guild' => self::GUILD_ID, 'session' => $session->id, 'user' => '555']], array_unique($this->logged('Dropped what was handed off to be looked up'), SORT_REGULAR));
         $this->assertCount(2, $this->logged('Dropped what was handed off to be looked up'));
         $this->assertSame([], $this->loggedProblems());
@@ -875,11 +890,12 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->assertStringContainsString('learning to sail', $this->claudeCalls()[0]['prompt']);
         $transcript = $this->transcript($session);
 
-        // Bob takes his memory back: like an answer made from it, what is looked up from it is dropped.
-        $session->unshare('666');
+        $pid = $this->lookups()[0]['pid'];
+
+        // Bob takes his memory back: like an answer made from it, what is looked up from it is dropped, and stopped.
+        $this->assertTrue(VoiceSession::unshareEverywhere('666'));
         $posted = count($this->sent);
-        touch($this->go);
-        $this->waitUntil(fn () => $this->logged('Looked something up') !== [], 'the lookup to end');
+        $this->waitUntil(fn () => ! posix_kill($pid, 0), 'Claude Code to be stopped');
         $this->runFor(0.4);
 
         $this->assertCount($posted, $this->sent);
@@ -888,8 +904,229 @@ final class VoiceLookupTest extends VoiceTestCase
 
         // And what was waiting is not looked up.
         $this->assertCount(1, $this->lookups());
+        $this->assertSame([], $this->logged('Looked something up'));
         $this->assertCount(2, $this->logged('Dropped what was handed off to be looked up'));
         $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testPostsWhatWasLookedUpForSomeoneAloneWhenWhoJoinedHasLeftAgainByThen(): void
+    {
+        // Alice keeps her memory out of calls with others (/privacy): it is used while she is alone with the bot.
+        $this->memory()->save('555', '- Is building a game called Bananas.');
+        (new UserSettings($this->discord->getLogger()))->save('555', ['personal_memory_in_calls' => UserSettings::AFTER_SHARE]);
+        $this->inCall('555');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 1, 'the lookup to start');
+        $pid = $this->lookups()[0]['pid'];
+
+        // Bob joins and leaves again: what is looked up is not stopped, and is only dropped if he is there when it is found.
+        $this->joins('666');
+        // Not by what Discord says, nor by something that has nothing to do with her: Bob's presence is only looked at when it is found.
+        VoiceSession::forget('777');
+        VoiceSession::optOut('888');
+        $this->runFor(0.4);
+        $this->assertTrue(posix_kill($pid, 0), 'It is still being looked up.');
+        $this->assertSame([], $this->logged('Stopped looking something up'));
+        $this->assertSame(['followMeetings'], array_values(array_diff(get_class_methods(VoiceStateUpdate::class), get_class_methods(EventAbstract::class))), 'Nothing the event does stops lookups.');
+        $this->leaves('666');
+
+        $this->finishLookups($session);
+        $this->assertSame(self::QUOTE . "\n" . self::FOUND, $this->sent[1]);
+    }
+
+    public function testStopsWhatIsLookedUpWhenTheMemoryItWasMadeFromIsForgotten(): void
+    {
+        $this->memory()->save('555', '- Lives in Lisbon.');
+        $this->inCall('555');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', self::QUESTION);
+        // A second task of theirs waits for the first.
+        $this->ask($vc, '555', self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 2, 'the lookup to start');
+        $this->assertStringContainsString('Lisbon', $this->claudeCalls()[0]['prompt']);
+        $transcript = $this->transcript($session);
+        $pid = $this->lookups()[0]['pid'];
+
+        // The task may hold what the memory said: it is stopped, and what waits is never started.
+        VoiceSession::forget('555');
+
+        $this->waitUntil(fn () => ! posix_kill($pid, 0), 'Claude Code to be stopped');
+        $this->runFor(0.4);
+        $this->assertCount(2, $this->sent, 'Nothing was posted.');
+        $this->assertCount(2, $this->played, 'Nothing was told.');
+        $this->assertNotSame('', $transcript);
+        $this->assertSame('', $this->transcript($session), 'What was said alone with the bot is taken out of it, and nothing looked up was added.');
+        $this->assertCount(1, $this->lookups());
+        $this->assertSame([], $this->logged('Looked something up'));
+        $this->assertCount(2, $this->logged('Dropped what was handed off to be looked up'));
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testStopsWhatWasHandedOffFromAForgottenMemoryAtOnceEvenWhenItWaitsForAnotherLookup(): void
+    {
+        $this->memory()->save('555', '- Lives in Lisbon.');
+        $this->inCall('555', '666');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        // Bob's lookup is running, so what Alice hands off waits for it.
+        $this->ask($vc, '666', self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 1, "Bob's lookup to start");
+        $this->setProcessEnv(['FAKE_CLAUDE_PAUSE' => '10']);
+        $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => count($this->played) === 2, "Alice's sentence to be spoken");
+
+        // She uses /forget while Claude is still writing the answer that hands it off.
+        VoiceSession::forget('555');
+        touch($this->claudeResume);
+
+        // It is stopped as soon as it is handed off, not left to wait for its turn, and Bob's goes on.
+        $this->waitUntil(fn () => $this->logged('Stopped looking something up') !== [], 'the task to be stopped');
+        $this->assertCount(1, $this->lookups());
+        $this->assertSame([], $this->logged('Looked something up'));
+        $this->finishLookups($session);
+        $this->assertCount(1, $this->lookups(), "Alice's task never started.");
+    }
+
+    public function testStopsWhatIsLookedUpWhenTheMemoryAGroupSharedOrTheGroupHasIsForgotten(): void
+    {
+        // Alice's answer is made with her group's memory with Bob, and with what Carol shared.
+        $this->memory()->save(['555', '666'], '- They ship the beta on Friday.');
+        $this->memory()->save('777', '- Carol is learning to sail.');
+        $this->inCall('555', '666');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $session->share('777');
+        $posted = count($this->sent);
+
+        foreach ([1 => ['555', '666'], 2 => '777'] as $number => $forgotten) {
+            $this->ask($vc, '555', self::QUESTION);
+            $this->waitUntil(fn () => count($this->lookups()) === $number, "lookup {$number} to start");
+            $pid = $this->lookups()[$number - 1]['pid'];
+            $this->assertTrue(posix_kill($pid, 0));
+
+            // Only that memory was forgotten, and the task may be made of it.
+            VoiceSession::forget($forgotten);
+
+            $this->waitUntil(fn () => ! posix_kill($pid, 0), "Claude Code to be stopped for lookup {$number}");
+        }
+
+        $this->assertSame([], $this->logged('Looked something up'));
+        $this->assertCount($posted + 2, $this->sent, 'Nothing was posted but the two answers that handed it off.');
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testKeepsNoTrackOfATaskOnceItIsOver(): void
+    {
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1, 'the lookup to start');
+        $lookingUp = new ReflectionProperty(VoiceSession::class, 'lookingUp');
+        $this->assertCount(1, $lookingUp->getValue($session));
+
+        $this->finishLookups($session);
+
+        $this->assertSame([], $lookingUp->getValue($session));
+    }
+
+    public function testALookupIsNotGivenWhatWasSaidBeforeTheMemoryItWasMadeFromWasForgotten(): void
+    {
+        $this->memory()->save('555', '- Lives in Lisbon.');
+        $this->inCall('555');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', 'Hey Claude, my PIN is 1234, which PHP version is the latest?');
+        $this->waitUntil(fn () => count($this->lookups()) === 1, 'the first lookup to start');
+
+        VoiceSession::forget('555');
+        $this->ask($vc, '555', 'Hey Claude, which Node version is the latest?');
+        $this->waitUntil(fn () => count($this->lookups()) === 2, 'the second lookup to start');
+
+        // /forget takes what was said out of the transcript, which is what the lookup is given.
+        $given = $this->lookups()[1]['prompt'];
+        $this->assertStringNotContainsString('1234', $given);
+        $this->assertStringContainsString('Alice: Hey Claude, which Node version is the latest?', $given);
+        $this->finishLookups($session);
+    }
+
+    public function testStartsALookupWhoseTranscriptWasTakenOutByForgetOnceNothingIsLeftOfIt(): void
+    {
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        // Alice's lookup runs, and Bob's waits for it.
+        $this->ask($vc, '555', self::QUESTION);
+        $this->ask($vc, '666', self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 2, "Alice's lookup to start");
+
+        // Nothing wanted by Bob is in a transcript file that is gone by the time it is his turn.
+        unlink("{$session->directory}/transcript.txt");
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream(self::TOLD)]);
+        touch($this->go);
+        $this->waitUntil(fn () => count($this->lookups()) === 2, "Bob's lookup to start");
+        touch($this->go);
+        $this->waitUntil(fn () => count($this->logged('Claude answered')) === 4, 'both to be found and told');
+
+        // It started with what there was: an empty transcript, and no failure to tell anyone about.
+        $this->assertStringStartsWith("Transcript of the voice call so far:\n\n", $this->lookups()[1]['prompt']);
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testKeepsLookingSomethingUpWhenAMemoryItWasNotMadeFromIsForgotten(): void
+    {
+        $this->memory()->save('666', '- Is learning to sail.');
+        $this->inCall('555');
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 1, 'the lookup to start');
+        $pid = $this->lookups()[0]['pid'];
+
+        // Bob's memory, and a group of Bob and Carol's: nothing of Alice's answer, nor of the task, was made from them.
+        VoiceSession::forget('666');
+        VoiceSession::forget(['666', '777']);
+        $this->runFor(0.4);
+
+        $this->assertTrue(posix_kill($pid, 0), 'It is still being looked up.');
+        $this->assertSame([], $this->logged('Stopped looking something up'));
+        $this->finishLookups($session);
+        $this->assertSame(self::QUOTE . "\n" . self::FOUND, $this->sent[1]);
+    }
+
+    public function testConsultsTheAdvisorOnlyForATaskClaudeHandedOffAsHard(): void
+    {
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1, 'the lookup to start');
+        $this->finishLookups($session);
+
+        // The mark follows the line's start: it is held back with the rest of the line while Claude is writing it.
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream(self::LOOKING . "\n", 'LOOK UP: [ha', 'rd] ', self::TASK)]);
+        $this->ask($vc, '555', self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 2, 'the second lookup to start');
+        $this->finishLookups($session);
+
+        [$simple, $hard] = $this->lookups();
+        $this->assertStringNotContainsString('--advisor', $simple['arguments']);
+        $this->assertStringNotContainsStringIgnoringCase('advisor', $simple['system']);
+        $this->assertStringContainsString("arg=--advisor\narg=opus\n", $hard['arguments']);
+        $this->assertStringContainsString('You must consult it once before you answer, with what you found so far', $hard['system']);
+        $this->assertStringEndsWith("\n\nThe task:\n\n" . self::TASK, $hard['prompt']);
+        // Nothing of the mark is spoken or posted.
+        $this->assertStringNotContainsString('hard', implode("\n", $this->sent));
+        $this->assertStringNotContainsString('hard', implode("\n", array_map(file_get_contents(...), $this->played)));
+        $this->assertSame([null, 'opus'], array_column($this->logged('Looking something up'), 'advisor'));
+        $this->assertStringContainsString('write [hard] right after LOOK UP:', $this->claudeCalls()[0]['system']);
+    }
+
+    public function testPostsWhatWasLookedUpWithoutLinkPreviews(): void
+    {
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT_LOOKUP' => self::claudeResult('See https://www.php.net/releases/8.5/ and https://github.com/php/php-src.')]);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', self::QUESTION);
+        $this->finishLookups($session);
+
+        // The answer has links from the web: Discord shows a preview for each, unless the message says not to.
+        $this->assertSame(
+            [0, Message::FLAG_SUPPRESS_EMBEDS, 0],
+            $this->sentFlags,
+            'What Claude said, what was looked up, and what it told: only the second comes from the web.',
+        );
     }
 
     public function testDropsWhatWasLookedUpOnceSomeoneJoinsACallItsAnswerWasMadeForSomeoneAloneIn(): void
@@ -955,10 +1192,10 @@ final class VoiceLookupTest extends VoiceTestCase
         await($session->stop());
         $posted = count($this->sent);
 
-        // The call is over, so it is told nothing. What is still looked up from Bob's memory is dropped all the same.
+        // The call is over, so it is told nothing. What is still looked up from Bob's memory is dropped all the same, and stopped.
+        $pid = $this->lookups()[0]['pid'];
         $this->assertFalse(VoiceSession::unshareEverywhere('666'));
-        touch($this->go);
-        $this->waitUntil(fn () => $this->logged('Looked something up') !== [], 'the lookup to end');
+        $this->waitUntil(fn () => ! posix_kill($pid, 0), 'Claude Code to be stopped');
         $this->waitUntil(fn () => VoiceSession::unfinished() === [], 'the call to be over');
 
         $this->assertCount($posted, $this->sent);
@@ -997,25 +1234,24 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->ask($vc, '555', self::QUESTION);
         $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 1, 'the lookup to start');
         $this->assertStringContainsString('Lives in Lisbon', $this->claudeCalls()[0]['prompt']);
+        $pid = $this->lookups()[0]['pid'];
 
         // She uses /forget: the task was written from her memory, so what it finds can say what she wants forgotten.
         $this->memory()->forget('555');
         VoiceSession::forget('555');
-        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream(self::TOLD)]);
-        touch($this->go);
-        $this->waitUntil(fn () => count($this->sent) === 3 && count($this->played) === 2, 'what was looked up to be told');
+        $this->waitUntil(fn () => ! posix_kill($pid, 0), 'Claude Code to be stopped');
+        $this->runFor(0.4);
 
-        // She asked for it, so it is still posted, told and in the transcript.
-        $this->assertSame([self::QUOTE . "\n" . self::FOUND, self::QUOTE . "\n" . self::TOLD], array_slice($this->sent, 1));
-        $this->assertStringContainsString(self::LOOKED_UP, $this->transcript($session));
-
-        // But no memory is made from it, nor from Claude telling it.
+        // It is not posted, told or in the transcript, and no memory is made from what was said in the meantime.
+        $this->assertCount(1, $this->sent);
+        $this->assertCount(1, $this->played);
+        $this->assertStringNotContainsString('Looked up for', $this->transcript($session));
         $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeResult('They talked about PHP.'), 'FAKE_CLAUDE_OUTPUT_MEMORY' => self::claudeResult('- Lives in Lisbon, again.')]);
         await($session->stop());
 
         $this->assertSame('', $this->memory()->read('555'));
         $this->assertSame([], $this->logged('Updated memory'));
-        $this->assertCount(4, $this->claudeCalls(), 'An answer, a lookup, what was found and the summary: no memory update.');
+        $this->assertCount(2, $this->claudeCalls(), 'An answer and a lookup: nothing left to summarize or remember, nothing told.');
     }
 
     public function testTellsWhatWasLookedUpWhileItIsWrittenEvenWhenNothingMoreCanWait(): void
@@ -1061,14 +1297,19 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->assertSame([], $this->loggedProblems());
     }
 
-    public function testSaysNothingAboutAFailedLookupToSomeoneWhoOptedOutMeanwhile(): void
+    public function testSaysNothingAboutAFailedLookupOnceItsAnswerIsNoLongerForWhoIsInTheCall(): void
     {
+        // Alice keeps her memory out of calls with others (/privacy): it is used while she is alone with the bot.
+        $this->memory()->save('555', '- Is building a game called Bananas.');
+        (new UserSettings($this->discord->getLogger()))->save('555', ['personal_memory_in_calls' => UserSettings::AFTER_SHARE]);
+        $this->inCall('555');
         $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT_LOOKUP' => self::claudeResult('Usage limit reached', isError: true)]);
         VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
         $this->ask($vc, '555', self::QUESTION);
         $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 1, 'the lookup to start');
 
-        VoiceSession::optOut('555');
+        // Nothing says that Bob joined, so the search is not stopped: it fails, and nobody is told.
+        $this->joins('666');
         touch($this->go);
         $this->waitUntil(fn () => $this->loggedProblems() !== [], 'the lookup to fail');
         $this->runFor(0.4);
@@ -1101,6 +1342,26 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->assertCount(2, $this->played);
         $this->assertCount(3, $this->claudeCalls(), 'Claude was not asked to tell her.');
         $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testPostsThatASentenceOfItsOwnCouldNotBeSpoken(): void
+    {
+        // Piper fails on the sentence that says so.
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT_LOOKUP' => self::claudeResult('Usage limit reached', isError: true), 'FAKE_PIPER_FAILS_ON' => 'look that up']);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 1, 'the lookup to start');
+
+        touch($this->go);
+        $this->waitUntil(fn () => count($this->sent) === 3, 'both failures to be posted');
+
+        // Like a sentence of an answer: the channel is told, and the call isn't told that it wasn't.
+        $this->assertSame("Sorry, I couldn't say that out loud. The bot's logs say why.", $this->sent[2]);
+        $this->assertCount(1, $this->played);
+        $failure = array_values(preg_grep('/^Voice reply failed: /', $this->loggedProblems()));
+        $this->assertCount(1, $failure);
+        $this->assertSame('speech', $this->logged($failure[0])[0]['step']);
+        $this->assertSame(1, $this->usage()['failures']);
     }
 
     public function testPostsAndSaysThatSomethingCouldNotBeLookedUp(): void

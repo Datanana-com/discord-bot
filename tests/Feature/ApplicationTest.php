@@ -8,24 +8,33 @@ use App\Application;
 use App\Commands\Global\RecallCommand;
 use App\Commands\Global\SettingsCommand;
 use App\Exceptions\EventNotFoundException;
+use App\Logs\Failures;
+use App\Support\GuardedLoop;
+use BadMethodCallException;
 use Closure;
+use Discord\Builders\MessageBuilder;
 use Discord\Discord;
 use Discord\Parts\Application\Command\Command;
 use Discord\Parts\Application\Command\Option;
 use Discord\Parts\Channel\Message;
 use Discord\Parts\Interactions\Interaction;
+use Discord\Parts\Interactions\Request\Option as RequestOption;
 use Discord\Helpers\RegisteredCommand;
 use Discord\WebSockets\Event;
 use Monolog\Handler\TestHandler;
+use Monolog\Level;
 use Monolog\Logger;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use React\EventLoop\Loop;
 use React\EventLoop\LoopInterface;
 use React\EventLoop\StreamSelectLoop;
 use React\Promise\PromiseInterface;
 use ReflectionClass;
+use ReflectionProperty;
 use RuntimeException;
 use Tests\Fixtures\Events\RecordingEvent;
+use TypeError;
 
 use function React\Promise\reject;
 use function React\Promise\resolve;
@@ -42,8 +51,19 @@ final class ApplicationTest extends TestCase
 
     private ?string $originalRecordingsPath = null;
 
+    /** @var list<array{string, bool}> What was replied to the slash commands used: the text, and whether only whoever used it sees it. */
+    private array $replies = [];
+
+    /** @var list<string> What a reply to a slash command was changed to. */
+    private array $edits = [];
+
+    /** The event loop the tests run on. */
+    private LoopInterface $loop;
+
     protected function setUp(): void
     {
+        // Running the bot makes its own loop the one everything uses.
+        $this->loop = Loop::get();
         $this->logs = new TestHandler();
         RecordingEvent::$calls = [];
         RecordingEvent::$before = null;
@@ -56,6 +76,7 @@ final class ApplicationTest extends TestCase
 
     protected function tearDown(): void
     {
+        Loop::set($this->loop);
         unset($_ENV['BOT_SLASH_COMMANDS'], $_ENV['BOT_REMOVE_OLD_COMMANDS'], $_ENV['RECORDINGS_RETENTION_DAYS'], $_ENV['RECORDINGS_PATH']);
 
         if ($this->originalRecordingsPath !== null) {
@@ -116,6 +137,21 @@ final class ApplicationTest extends TestCase
 
         $this->assertSame(['before', 'after'], RecordingEvent::$calls);
         $this->assertContains('Error while handling event: Something broke', $this->logged());
+    }
+
+    public function testLogsAnErrorInAnEventWithTheEventsNameAndStillRunsAfter(): void
+    {
+        // An \Error is no \Exception: thrown on, DiscordPHP would throw it again, into PHP's own error log.
+        RecordingEvent::$before = $e = new TypeError('Something broke');
+
+        $this->emitRecordingEvent();
+
+        $this->assertSame(['before', 'after'], RecordingEvent::$calls);
+        // One line, with what called what: not PHP's stack trace, which holds what the event's methods were given.
+        $this->assertSame(
+            [['Error while handling event: Something broke', ['event' => 'TEST_EVENT', 'exception' => $e, 'trace' => Failures::trace($e)]]],
+            array_values(array_filter($this->loggedWithContext(), fn (array $line) => str_contains($line[0], 'Something broke') || str_starts_with($line[0], 'Trace'))),
+        );
     }
 
     public function testRunsTheReadyCallbackWhenTheBotIsReady(): void
@@ -212,7 +248,7 @@ final class ApplicationTest extends TestCase
 
     public function testHandsACommandsInteractionsToItsClassAndLogsThem(): void
     {
-        $this->addAppFile('Commands/Global/PingCommand.php', "<?php\n\nnamespace App\\Commands\\Global;\n\nuse App\\CommandAbstract;\nuse Discord\\Parts\\Interactions\\Interaction;\n\nfinal class PingCommand extends CommandAbstract\n{\n    public string \$description = 'Answers with a pong';\n\n    public function handle(Interaction \$interaction): void\n    {\n        \$this->log->info('Pong!');\n    }\n}\n");
+        $this->addAppFile('Commands/Global/PingCommand.php', "<?php\n\nnamespace App\\Commands\\Global;\n\nuse App\\CommandAbstract;\nuse Discord\\Parts\\Interactions\\Interaction;\n\nfinal class PingCommand extends CommandAbstract\n{\n    public string \$description = 'Answers with a pong';\n\n    public function handle(Interaction \$interaction): ?\\React\\Promise\\PromiseInterface\n    {\n        \$this->log->info('Pong!');\n\n        return null;\n    }\n}\n");
         [$app, $commands] = $this->appWithCommands();
 
         $app->prepareCommandClasses();
@@ -221,6 +257,41 @@ final class ApplicationTest extends TestCase
         ($commands->listeners['ping'])(new Interaction($app->discord, ['guild_id' => '100', 'channel_id' => '200', 'user' => ['id' => '555', 'username' => 'alice']], true));
         $this->assertContains(['/ping used', ['guild' => '100', 'channel' => '200', 'user' => '555']], $this->loggedWithContext());
         $this->assertContains('Pong!', $this->logged());
+    }
+
+    public function testOnlyRegistersSuggestionsForCommandsThatMakeThem(): void
+    {
+        [$app, $commands] = $this->appWithCommands();
+
+        $app->prepareCommandClasses();
+
+        $this->assertSame(['settings'], array_keys($commands->suggesters), 'The others have nothing to complete.');
+    }
+
+    public function testHandsWhatIsTypedToTheCommandAndReturnsItsSuggestions(): void
+    {
+        $this->addAppFile('Commands/Global/ColorCommand.php', "<?php\n\nnamespace App\\Commands\\Global;\n\nuse App\\CommandAbstract;\nuse App\\Commands\\SuggestsOptions;\nuse Discord\\Parts\\Interactions\\Interaction;\nuse Discord\\Parts\\Interactions\\Request\\Option;\n\nfinal class ColorCommand extends CommandAbstract implements SuggestsOptions\n{\n    public string \$description = 'Picks a color';\n\n    public function handle(Interaction \$interaction): ?\\React\\Promise\\PromiseInterface\n    {\n        return null;\n    }\n\n    public function suggest(Interaction \$interaction, ?Option \$focused): array\n    {\n        if (\$focused?->value === 'boom') {\n            throw new \\RuntimeException('Nope');\n        }\n\n        if (\$focused?->value === 'error') {\n            throw new \\TypeError('Bad');\n        }\n\n        return [['name' => 'Red (' . \$focused?->value . ')', 'value' => 'red']];\n    }\n}\n");
+        [$app, $commands] = $this->appWithCommands();
+
+        $app->prepareCommandClasses();
+
+        $interaction = new Interaction($app->discord, ['guild_id' => '100', 'channel_id' => '200', 'user' => ['id' => '555', 'username' => 'alice']], true);
+        $focused = fn (string $value) => new RequestOption($app->discord, ['name' => 'color', 'type' => Option::STRING, 'value' => $value, 'focused' => true], true);
+
+        $this->assertSame([['name' => 'Red (re)', 'value' => 'red']], ($commands->suggesters['color'])($interaction, $focused('re')));
+        $this->assertNotContains('/color used', $this->logged(), 'Each keystroke would be logged.');
+        $this->assertSame([], array_filter($this->logged(), fn (string $message) => str_contains($message, 'could not suggest')));
+
+        // Nothing to suggest is better than an option that can't be typed, so it is logged and nobody is told.
+        $this->assertSame([], ($commands->suggesters['color'])($interaction, $focused('boom')));
+        $this->assertSame([Level::Warning], array_map(fn ($record) => $record->level, array_values(array_filter($this->logs->getRecords(), fn ($record) => str_contains($record->message, 'could not suggest')))), 'A warning: the command works without it.');
+        // Not only exceptions: a wrong type in the command is an Error.
+        $this->assertSame([], ($commands->suggesters['color'])($interaction, $focused('error')));
+        $this->assertContains('/color could not suggest: Bad', $this->logged());
+        $this->assertContains(['/color could not suggest: Nope', ['guild' => '100', 'user' => '555']], array_map(
+            fn (array $record) => [$record[0], array_intersect_key($record[1], ['guild' => 1, 'user' => 1])],
+            $this->loggedWithContext(),
+        ));
     }
 
     public function testOnlyRegistersGlobalCommands(): void
@@ -279,6 +350,7 @@ final class ApplicationTest extends TestCase
             [['name' => 'haiku', 'value' => 'haiku'], ['name' => 'sonnet', 'value' => 'sonnet'], ['name' => 'opus', 'value' => 'opus']],
             $settings['options'][3]['choices'],
         );
+        $this->assertSame([false, true, false], array_map(fn (array $option) => $option['autocomplete'] ?? false, [$settings['options'][0], $settings['options'][2], $settings['options'][3]]), 'Only the voice is completed while it is typed.');
         $this->assertSame('32', $settings['default_member_permissions']);
         $this->assertSame(200, $settings['options'][0]['max_length'], 'Discord stops a wake word that is too long from being typed: five spellings of 32, with their commas.');
 
@@ -529,7 +601,7 @@ final class ApplicationTest extends TestCase
     {
         $_ENV['BOT_REMOVE_OLD_COMMANDS'] = 'true';
         // A class that makes a user command, as CommandAbstract::$type allows.
-        $this->addAppFile('Commands/Global/WaveCommand.php', "<?php\n\nnamespace App\Commands\Global;\n\nuse App\CommandAbstract;\nuse Discord\Parts\Interactions\Interaction;\n\nfinal class WaveCommand extends CommandAbstract\n{\n    public string \$description = 'Waves.';\n\n    public ?int \$type = 2;\n\n    public function handle(Interaction \$interaction): void\n    {\n    }\n}\n");
+        $this->addAppFile('Commands/Global/WaveCommand.php', "<?php\n\nnamespace App\Commands\Global;\n\nuse App\CommandAbstract;\nuse Discord\Parts\Interactions\Interaction;\n\nfinal class WaveCommand extends CommandAbstract\n{\n    public string \$description = 'Waves.';\n\n    public ?int \$type = 2;\n\n    public function handle(Interaction \$interaction): ?\React\Promise\PromiseInterface\n    {\n        return null;\n    }\n}\n");
         [$app, $commands] = $this->appWithCommands(registered: [
             ['id' => '4', 'name' => 'wave', 'description' => '', 'type' => Command::USER],
             // Discord always says the type; one that is missing is a slash command, as it is when the bot makes one.
@@ -601,15 +673,169 @@ final class ApplicationTest extends TestCase
         $client->emit('init', [$client]);
 
         $this->assertContains('Error while preparing command classes: Discord API unavailable', $this->logged());
+        // Once, with what called what: not PHP's stack trace.
+        $failures = array_values(array_filter($this->loggedWithContext(), fn (array $line) => str_starts_with($line[0], 'Error while preparing')));
+        $this->assertCount(1, $failures);
+        $this->assertSame(['exception', 'trace'], array_keys($failures[0][1]));
+        // The bot didn't just stop: whatever runs it can tell.
+        $this->assertSame(1, (new ReflectionProperty(Application::class, 'exitCode'))->getValue($app));
     }
 
-    public function testRunStartsTheBot(): void
+    /**
+     * @param Closure(): mixed $fails What the command's reply does, the first time.
+     * @param list<array{string, bool}> $replies What they are replied.
+     * @param list<string> $edits What the command's own reply is changed to.
+     */
+    #[DataProvider('failingReplies')]
+    public function testTellsWhoeverUsedACommandThatItFailed(Closure $fails, string $message, array $replies, array $edits): void
     {
-        $app = $this->app();
+        [$app, $commands] = $this->appWithCommands();
+        $app->prepareCommandClasses();
+        $interaction = $this->interaction($fails);
+
+        // /unshare replies that there is nothing to take back, which fails.
+        ($commands->listeners['unshare'])($interaction);
+
+        // It doesn't say what failed: that is in the log, with the command's name.
+        $this->assertSame($replies, $this->replies);
+        $this->assertSame($edits, $this->edits);
+        $failure = array_values(array_filter($this->logs->getRecords(), fn ($record) => $record->level === Level::Error));
+        $this->assertCount(1, $failure);
+        $this->assertSame("/unshare failed: {$message}", $failure[0]->message);
+        $this->assertSame(['guild', 'channel', 'user', 'exception', 'trace'], array_keys($failure[0]->context));
+        $this->assertSame(['100', '200', '555'], array_slice(array_values($failure[0]->context), 0, 3));
+        $this->assertSame($message, $failure[0]->context['exception']->getMessage());
+        $this->assertSame(Failures::trace($failure[0]->context['exception']), $failure[0]->context['trace']);
+
+        // The bot goes on: the next command is handled.
+        $this->replies = [];
+        ($commands->listeners['unshare'])($this->interaction());
+        $this->assertSame([['You are not sharing your memory with a call I am recording.', true]], $this->replies);
+    }
+
+    /**
+     * @return iterable<string, array{Closure(): mixed, string, list<array{string, bool}>, list<string>}>
+     */
+    public static function failingReplies(): iterable
+    {
+        $told = 'Something went wrong with /unshare. The bot\'s logs say what.';
+
+        // Before it replied anything: they are replied to, which only they see.
+        yield 'the command throws an exception' => [fn () => throw new RuntimeException('Discord is unavailable'), 'Discord is unavailable', [[$told, true]], []];
+        // What DiscordPHP throws on, from inside a rejected promise nothing handles.
+        yield 'the command throws an error' => [fn () => strlen([]), 'strlen(): Argument #1 ($string) must be of type string, array given', [[$told, true]], []];
+        // Its reply was tried, so it is that reply that is changed: Discord takes one reply to a command.
+        yield 'the promise the command works with is rejected' => [fn () => reject(new RuntimeException('Service unavailable')), 'Service unavailable', [], [$told]];
+    }
+
+    public function testChangesTheReplyOfACommandThatHadRepliedBeforeItFailed(): void
+    {
+        [$app, $commands] = $this->appWithCommands();
+        $app->prepareCommandClasses();
+
+        // Discord takes one reply to a command: a second one is refused.
+        ($commands->listeners['unshare'])($this->interaction(fn () => throw new RuntimeException('Something broke'), responded: true));
+
+        $this->assertSame(['Something went wrong with /unshare. The bot\'s logs say what.'], $this->edits);
+        $this->assertSame([], $this->replies);
+    }
+
+    public function testLogsWhenWhoeverUsedACommandCannotBeToldThatItFailed(): void
+    {
+        [$app, $commands] = $this->appWithCommands();
+        $app->prepareCommandClasses();
+
+        // Discord no longer knows the interaction: neither the reply nor what it is changed to arrives.
+        ($commands->listeners['unshare'])($this->interaction(fn () => reject(new RuntimeException('Unknown interaction')), fn () => reject(new RuntimeException('Unknown interaction, still'))));
+
+        $this->assertContains(['Could not tell that /unshare failed: Unknown interaction, still', ['guild' => '100']], $this->loggedWithContext());
+        $this->assertContains('/unshare failed: Unknown interaction', $this->logged());
+    }
+
+    public function testRunStartsTheBotAndListensForTheSignalsItIsStoppedWith(): void
+    {
+        $signals = ['added' => [], 'removed' => []];
+        $loop = static::createStub(LoopInterface::class);
+        $loop->method('addSignal')->willReturnCallback(function (int $signal) use (&$signals) {
+            $signals['added'][] = $signal;
+        });
+        $loop->method('removeSignal')->willReturnCallback(function (int $signal) use (&$signals) {
+            $signals['removed'][] = $signal;
+        });
+        $app = $this->app(loop: $loop);
+        $app->discord = $this->getMockBuilder(Discord::class)->disableOriginalConstructor()->onlyMethods(['run'])->getMock();
+        $app->discord->expects($this->once())->method('run')->willReturnCallback(function () use (&$signals) {
+            // SIGINT, which Ctrl+C sends, and SIGTERM.
+            $this->assertSame([2, 15], $signals['added']);
+            $this->assertSame([], $signals['removed']);
+            // What the programs the bot runs are started on catches what their callbacks throw too.
+            $this->assertInstanceOf(GuardedLoop::class, Loop::get());
+        });
+
+        $this->assertSame(0, $app->run());
+
+        // Once the bot is over, the signals end PHP again.
+        $this->assertSame([2, 15], $signals['removed']);
+        $this->assertSame([], array_filter($this->logs->getRecords(), fn ($record) => $record->level->value >= Level::Warning->value));
+    }
+
+    public function testRunsWithoutLeavingItsCallsOnCtrlCWhereTheLoopCannotListenForSignals(): void
+    {
+        // What the loop does without the pcntl extension.
+        $loop = static::createStub(LoopInterface::class);
+        $loop->method('addSignal')->willThrowException(new BadMethodCallException('Event loop feature "signals" isn\'t supported by the "StreamSelectLoop"'));
+        $app = $this->app(loop: $loop);
         $app->discord = $this->getMockBuilder(Discord::class)->disableOriginalConstructor()->onlyMethods(['run'])->getMock();
         $app->discord->expects($this->once())->method('run');
 
-        $app->run();
+        $this->assertSame(0, $app->run());
+
+        $this->assertContains('The pcntl extension is not loaded: stopped with Ctrl+C, the bot ends without leaving its calls, and the programs it runs go on without it.', $this->logged());
+    }
+
+    /**
+     * A slash command someone used, whose replies do what they are told to.
+     *
+     * @param (Closure(): mixed)|null $first  What its first reply does, when that isn't to arrive.
+     * @param (Closure(): mixed)|null $second What the next one does, likewise.
+     * @param bool $responded Whether Discord already has a reply to it.
+     */
+    private function interaction(?Closure $first = null, ?Closure $second = null, bool $responded = false): Interaction
+    {
+        $interaction = static::getStubBuilder(Interaction::class)
+            ->disableOriginalConstructor()
+            ->onlyMethods(['__get', 'isResponded', 'respondWithMessage', 'updateOriginalResponse'])
+            ->getStub();
+        $interaction->method('__get')->willReturnCallback(fn (string $name) => match ($name) {
+            'guild_id' => '100',
+            'channel_id' => '200',
+            'user' => (object) ['id' => '555'],
+            default => null,
+        });
+        $interaction->method('isResponded')->willReturnCallback(function () use (&$responded) {
+            return $responded;
+        });
+        $outcomes = [$first, $second];
+        $reply = function (array &$sent, MessageBuilder $message, ?bool $ephemeral = null) use (&$outcomes, &$responded): PromiseInterface {
+            $outcome = array_shift($outcomes);
+            $result = $outcome === null ? null : $outcome();
+            // Like DiscordPHP, which takes a reply for sent as soon as it tries to send it, also when Discord then refuses it.
+            $responded = true;
+
+            if ($result !== null) {
+                return $result;
+            }
+
+            $sent[] = $ephemeral === null ? $message->getContent() : [$message->getContent(), $ephemeral];
+
+            return resolve(null);
+        };
+        $interaction->method('respondWithMessage')->willReturnCallback(
+            fn (MessageBuilder $message, bool $ephemeral = false) => $reply($this->replies, $message, $ephemeral),
+        );
+        $interaction->method('updateOriginalResponse')->willReturnCallback(fn (MessageBuilder $message) => $reply($this->edits, $message));
+
+        return $interaction;
     }
 
     /**
@@ -680,6 +906,9 @@ final class ApplicationTest extends TestCase
             /** @var array<string, callable> Interaction handlers by command name. */
             public array $listeners = [];
 
+            /** @var array<string, callable> What fills in an option while it is typed, by command name. */
+            public array $suggesters = [];
+
             /** @var array<string, string> The commands removed from Discord: name => the ID that was sent. */
             public array $removed = [];
 
@@ -740,7 +969,7 @@ final class ApplicationTest extends TestCase
                 return resolve($command);
             }
         };
-        $app->discord = $this->discordStub($client, ['application' => (object) ['commands' => $commands]], $commands->listeners);
+        $app->discord = $this->discordStub($client, ['application' => (object) ['commands' => $commands]], $commands->listeners, suggesters: $commands->suggesters);
 
         return [$app, $commands];
     }
@@ -834,8 +1063,9 @@ final class ApplicationTest extends TestCase
      *
      * @param array<string, mixed>     $properties
      * @param array<string, callable> &$listeners  Collects the handlers passed to listenCommand().
+     * @param array<string, callable> &$suggesters Collects the ones that fill in an option while it is typed.
      */
-    private function discordStub(Discord $client, array $properties, array &$listeners, bool $expectClose = false): Discord
+    private function discordStub(Discord $client, array $properties, array &$listeners, bool $expectClose = false, array &$suggesters = []): Discord
     {
         $methods = ['__get', 'getLogger', 'getHttpClient', 'getFactory', 'listenCommand', 'close'];
         $discord = $expectClose
@@ -854,8 +1084,12 @@ final class ApplicationTest extends TestCase
         $discord->method('getLogger')->willReturn($client->getLogger());
         $discord->method('getHttpClient')->willReturn($client->getHttpClient());
         $discord->method('getFactory')->willReturn($client->getFactory());
-        $discord->method('listenCommand')->willReturnCallback(function (string $name, callable $callback) use (&$listeners): RegisteredCommand {
+        $discord->method('listenCommand')->willReturnCallback(function (string $name, callable $callback, ?callable $suggest = null) use (&$listeners, &$suggesters): RegisteredCommand {
             $listeners[$name] = $callback;
+
+            if ($suggest !== null) {
+                $suggesters[$name] = $suggest;
+            }
 
             return (new ReflectionClass(RegisteredCommand::class))->newInstanceWithoutConstructor();
         });

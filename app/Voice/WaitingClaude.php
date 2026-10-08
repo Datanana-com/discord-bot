@@ -22,6 +22,9 @@ final class WaitingClaude
 
     private readonly Program $program;
 
+    /** When it was started, by the clock that only goes forward: the wall clock steps on some machines. */
+    private readonly float $startedAt;
+
     /** What it answers, once it was asked. */
     private ?ClaudeAnswer $answer = null;
 
@@ -31,6 +34,7 @@ final class WaitingClaude
      */
     public function __construct(array $command, string $directory, array $env)
     {
+        $this->startedAt = hrtime(true) / 1e9;
         $this->program = Shell::open($command, fn (string $line) => $this->answer?->read($line), cwd: $directory, env: $env);
     }
 
@@ -39,11 +43,13 @@ final class WaitingClaude
      *
      * @param (callable(string $text): void)|null $onText Called with each piece of the answer while Claude is
      *                                                    writing it. Together, the pieces are the whole answer.
+     * @param (callable(array{ms: int, init_ms: ?int, retries: int, rate_limits: int} $timing): void)|null $onStarted
+     *        Called once, before the first piece, with how long Claude took to start answering: see {@see ClaudeAnswer::timing()}.
      * @return PromiseInterface<string> Claude's answer.
      */
-    public function ask(string $prompt, ?callable $onText = null): PromiseInterface
+    public function ask(string $prompt, ?callable $onText = null, ?callable $onStarted = null): PromiseInterface
     {
-        $this->answer = new ClaudeAnswer($onText === null ? null : $onText(...));
+        $this->answer = new ClaudeAnswer($onText === null ? null : $onText(...), $onStarted === null ? null : $onStarted(...));
 
         // With --input-format stream-json a prompt is a message: a JSON object on one line. Nothing follows this
         // one, so stdin is closed, and Claude Code ends once it has answered, like one started for the prompt.
@@ -51,6 +57,14 @@ final class WaitingClaude
         $this->program->end(json_encode($message, JSON_INVALID_UTF8_SUBSTITUTE) . "\n", self::TIMEOUT);
 
         return $this->answer->after($this->program->done());
+    }
+
+    /**
+     * How long it has been running, in milliseconds: a process asked soon after it started may still be starting.
+     */
+    public function waitedMs(): int
+    {
+        return (int) round((hrtime(true) / 1e9 - $this->startedAt) * 1000);
     }
 
     /**

@@ -6,11 +6,13 @@ namespace Tests\Unit;
 
 use App\EventAbstract;
 use App\Exceptions\EventFunctionNotFoundException;
+use App\Logs\Failures;
 use Discord\Discord;
 use Monolog\Handler\TestHandler;
 use Monolog\Logger;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
+use TypeError;
 
 final class EventAbstractTest extends TestCase
 {
@@ -80,7 +82,24 @@ final class EventAbstractTest extends TestCase
 
         $this->assertFalse($event->handle());
         $this->assertSame([['fail']], $event->calls);
-        $this->assertSame('Event "fail" failed with the following error: Something broke', $this->logged()[0]);
+        $this->assertSame(['Event "fail" failed with the following error: Something broke'], $this->logged());
+
+        // With the event's class, and what called what: not PHP's stack trace, which holds what the methods were given.
+        $context = $this->logs->getRecords()[0]->context;
+        $this->assertSame($event::class, $context['event']);
+        $this->assertInstanceOf(RuntimeException::class, $context['exception']);
+        $this->assertSame(Failures::trace($context['exception']), $context['trace']);
+    }
+
+    public function testLogsAMethodThatFailsWithAnErrorAndStops(): void
+    {
+        // An \Error is no \Exception: thrown on, DiscordPHP would throw it again, into PHP's own error log.
+        $event = $this->event((object) [], ['mistake', 'first']);
+
+        $this->assertFalse($event->handle());
+        $this->assertSame([['mistake']], $event->calls);
+        $this->assertSame(['Event "mistake" failed with the following error: strlen(): Argument #1 ($string) must be of type string, array given'], $this->logged());
+        $this->assertInstanceOf(TypeError::class, $this->logs->getRecords()[0]->context['exception']);
     }
 
     public function testFailsForMethodsThatDoNotExist(): void
@@ -126,6 +145,13 @@ final class EventAbstractTest extends TestCase
                 $this->calls[] = ['fail'];
 
                 throw new RuntimeException('Something broke');
+            }
+
+            public function mistake(): int
+            {
+                $this->calls[] = ['mistake'];
+
+                return strlen([]);
             }
         };
     }

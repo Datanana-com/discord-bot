@@ -8,14 +8,15 @@ use App\Analytics\Usage;
 use App\CommandAbstract;
 use Discord\Builders\MessageBuilder;
 use Discord\Parts\Interactions\Interaction;
+use React\Promise\PromiseInterface;
 
 final class StatsCommand extends CommandAbstract
 {
     public string $description = 'Shows how this server has used the bot.';
 
-    public function handle(Interaction $interaction): void
+    public function handle(Interaction $interaction): ?PromiseInterface
     {
-        $interaction->respondWithMessage(MessageBuilder::new()->setContent($this->report($interaction->guild_id)), ephemeral: true);
+        return $interaction->respondWithMessage(MessageBuilder::new()->setContent($this->report($interaction->guild_id)), ephemeral: true);
     }
 
     private function report(?string $guildId): string
@@ -41,6 +42,7 @@ final class StatsCommand extends CommandAbstract
             sprintf('Speech: %d utterances from %d people (%s)', $usage['utterances'], $usage['speakers'], self::duration($usage['speech_ms'])),
             sprintf('Questions answered: %d', $usage['answers'])
                 . ($usage['answer_ms'] === null ? '' : sprintf(', in %.1f s on average', $usage['answer_ms'] / 1000)),
+            sprintf('Looked up: %d', $usage['lookups']),
             sprintf('Failures: %d', $usage['failures']),
         ]);
     }

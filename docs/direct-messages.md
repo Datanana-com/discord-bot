@@ -13,7 +13,7 @@ Send the bot a direct message, and Claude answers it there, in text, as your per
 
 ## Looking things up in direct messages
 
-Claude answers a DM at once too, without tools. A question that needs current or checked information, or more careful work than a quick reply allows, is handed off and looked up as in calls (see [Looking things up](lookups.md#looking-things-up)): by the same model, with the same advisor, with web search as its only tool, and with the same limits of one task at a time, 3 more waiting, and 5 minutes for each.
+Claude answers a DM at once too, without tools. A question that needs current or checked information, or more careful work than a quick reply allows, is handed off and looked up as in calls (see [Looking things up](lookups.md#looking-things-up)): by the same model, with the same advisor for a task that is hard, with web search as its only tool, and with the same limits of one task at a time, 3 more waiting, and 5 minutes for each. What was found is sent with no preview of its links. When you use `/forget` while something is looked up for you, or is waiting, it is stopped and nothing is sent: see [Looking things up](lookups.md#looking-things-up).
 
 - Claude's reply is one short sentence, such as "Let me look into that.". The bot shows it's typing while it looks something up, and the chat goes on meanwhile: your messages are answered as usual.
 - The model that looks it up gets the DM's last 100 messages and the task. It isn't given your memory, though those messages and the task can hold what Claude said from it.

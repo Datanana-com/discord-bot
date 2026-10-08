@@ -9,6 +9,7 @@ use App\Settings\UserSettings;
 use Discord\Builders\MessageBuilder;
 use Discord\Parts\Application\Command\Option;
 use Discord\Parts\Interactions\Interaction;
+use React\Promise\PromiseInterface;
 
 final class PrivacyCommand extends CommandAbstract
 {
@@ -32,9 +33,9 @@ final class PrivacyCommand extends CommandAbstract
         ],
     ];
 
-    public function handle(Interaction $interaction): void
+    public function handle(Interaction $interaction): ?PromiseInterface
     {
-        $interaction->respondWithMessage(MessageBuilder::new()->setContent($this->reply($interaction)), ephemeral: true);
+        return $interaction->respondWithMessage(MessageBuilder::new()->setContent($this->reply($interaction)), ephemeral: true);
     }
 
     private function reply(Interaction $interaction): string

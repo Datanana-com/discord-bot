@@ -1,7 +1,7 @@
 # Runs the unit and feature tests (composer test), with code coverage, and checks the code style (Pint).
 #
-# Only when something they depend on changed: PHP code, the tests and their fixtures,
-# the dependencies, PHPUnit's configuration or Pint's. Not on draft pull requests: they run once
+# Only when something they depend on changed: PHP code, the tests and their fixtures, the program that
+# speaks with Kokoro (kokoro/, which KokoroProgramTest runs), the dependencies, PHPUnit's configuration or Pint's. Not on draft pull requests: they run once
 # marked ready for review.
 name: Tests
 
@@ -11,6 +11,7 @@ on:
     paths:
       - '**.php'
       - 'tests/**'
+      - 'kokoro/**'
       - 'composer.json'
       - 'composer.lock'
       - 'phpunit.xml'
@@ -21,6 +22,7 @@ on:
     paths:
       - '**.php'
       - 'tests/**'
+      - 'kokoro/**'
       - 'composer.json'
       - 'composer.lock'
       - 'phpunit.xml'

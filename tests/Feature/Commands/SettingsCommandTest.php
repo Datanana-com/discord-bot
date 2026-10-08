@@ -15,6 +15,7 @@ use Discord\Parts\Application\Command\Command;
 use Discord\Parts\Application\Command\Option;
 use Discord\Parts\Interactions\ApplicationCommand;
 use Discord\Parts\Interactions\Interaction;
+use Discord\Parts\Interactions\Request\Option as RequestOption;
 use Illuminate\Database\Capsule\Manager as DB;
 use Monolog\Handler\NullHandler;
 use Monolog\Logger;
@@ -434,6 +435,87 @@ Wake word: `claude`, `cloud`, `claud` (default)
 
         $this->assertSame(2000, mb_strlen($reply));
         $this->assertStringStartsWith('The voice must be one of the installed Piper voices: `en_US-voice-number-100-medium`, ', $reply);
+    }
+
+    public function testSuggestsTheInstalledVoicesByTheirSimpleNames(): void
+    {
+        $this->assertSame(
+            [['name' => 'Faber (pt_BR, medium)', 'value' => 'pt_BR-faber-medium'], ['name' => 'voice', 'value' => 'voice']],
+            $this->suggestions('voice', ''),
+        );
+    }
+
+    public function testSuggestsTheVoicesThatHaveWhatIsTypedInTheirNameOrTheirSimpleName(): void
+    {
+        $this->assertSame([['name' => 'Faber (pt_BR, medium)', 'value' => 'pt_BR-faber-medium']], $this->suggestions('voice', 'pt_br-fa'), 'In the name of the file, whatever the case.');
+        $this->assertSame([['name' => 'Faber (pt_BR, medium)', 'value' => 'pt_BR-faber-medium']], $this->suggestions('voice', '  FABER (pt_BR, med'), 'In the name that is shown, and the spaces around it are not typed.');
+        $this->assertSame([['name' => 'Faber (pt_BR, medium)', 'value' => 'pt_BR-faber-medium']], $this->suggestions('voice', 'pt_br-faber-medium  '), 'Nor the spaces after it.');
+        $this->assertSame([['name' => 'voice', 'value' => 'voice']], $this->suggestions('voice', 'voi'));
+        $this->assertSame([], $this->suggestions('voice', 'nothing like it'));
+    }
+
+    public function testFindsAVoiceWhoseNameHasAccentsWhateverTheCaseTyped(): void
+    {
+        touch("{$this->recordings}/models/pt_PT-édson-medium.onnx");
+
+        $this->assertSame([['name' => 'Édson (pt_PT, medium)', 'value' => 'pt_PT-édson-medium']], $this->suggestions('voice', 'ÉDS'));
+        $this->assertSame([['name' => 'Édson (pt_PT, medium)', 'value' => 'pt_PT-édson-medium']], $this->suggestions('voice', 'édson'));
+    }
+
+    public function testSuggestsNothingForAnOptionThatIsNotTheVoice(): void
+    {
+        $this->assertSame([], $this->suggestions('language', ''));
+        $this->assertSame([], $this->suggestions(null, ''), 'Discord can name no option.');
+    }
+
+    public function testSuggestsNoMoreThanDiscordTakesAndNothingItWouldRefuse(): void
+    {
+        for ($i = 10; $i < 40; $i++) {
+            touch("{$this->recordings}/models/en_US-person{$i}-medium.onnx");
+        }
+
+        // Its value is over 100 characters: Discord would refuse every suggestion with it.
+        touch("{$this->recordings}/models/" . str_repeat('a', 101) . '.onnx');
+        // Its simple name is over 100 characters, its value is not: the name is cut.
+        $long = 'en_US-' . str_repeat('b', 85) . '-medium';
+        touch("{$this->recordings}/models/{$long}.onnx");
+        // Its value is 100 characters, which Discord takes.
+        $exact = 'en_US-' . str_repeat('c', 87) . '-medium';
+        touch("{$this->recordings}/models/{$exact}.onnx");
+
+        $all = $this->suggestions('voice', '');
+
+        $this->assertSame(
+            [$long, $exact, ...array_map(fn (int $i) => "en_US-person{$i}-medium", range(10, 32))],
+            array_column($all, 'value'),
+            'The first 25, in the order of the folder.',
+        );
+        $this->assertSame([$exact], array_column($this->suggestions('voice', 'cccc'), 'value'));
+        $this->assertNotContains(str_repeat('a', 101), array_column($this->suggestions('voice', 'aaaa'), 'value'));
+        $this->assertSame([], $this->suggestions('voice', 'aaaa'), 'The only one that has it is left out.');
+
+        $suggested = $this->suggestions('voice', 'bbbb');
+        $this->assertSame([$long], array_column($suggested, 'value'));
+        $this->assertSame(100, mb_strlen($suggested[0]['name']));
+    }
+
+    public function testSuggestsNothingWhenNoVoiceIsInstalled(): void
+    {
+        $this->setEnv(['PIPER_MODEL' => "{$this->recordings}/nowhere/voice.onnx"]);
+
+        $this->assertSame([], $this->suggestions('voice', ''));
+    }
+
+    /**
+     * What /settings offers while someone types an option.
+     *
+     * @return list<array{name: string, value: string}>
+     */
+    private function suggestions(?string $option, string $typed): array
+    {
+        $focused = $option === null ? null : new RequestOption($this->client(), ['name' => $option, 'type' => Option::STRING, 'value' => $typed, 'focused' => true], true);
+
+        return (new SettingsCommand($this->discord))->suggest($this->interaction(null), $focused);
     }
 
     /**

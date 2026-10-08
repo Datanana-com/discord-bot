@@ -6,16 +6,145 @@ namespace Tests\Unit\Voice;
 
 use App\Support\CommandFailedException;
 use App\Voice\Transcriber;
+use App\Voice\WhisperServer;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use React\EventLoop\Loop;
+use React\Promise\Deferred;
+use Tests\Wav;
 
 use function React\Async\await;
 
 final class TranscriberTest extends TestCase
 {
+    /** @var list<WhisperServer> The servers a call took, in the tests that have one. */
+    private array $servers = [];
+
+    private string $folder = '';
+
     protected function tearDown(): void
     {
-        unset($_ENV['WHISPER_LANGUAGE'], $_ENV['WHISPER_PROMPT'], $_ENV['WHISPER_THREADS']);
+        foreach ($this->servers as $server) {
+            await($server->release());
+        }
+
+        $this->servers = [];
+
+        foreach (['FAKE_WHISPER_LOG', 'FAKE_WHISPER_SERVER_LOG', 'FAKE_WHISPER_SERVER_LOAD', 'FAKE_WHISPER_SERVER_STATUS', 'FAKE_WHISPER_SERVER_DIE_AT', 'FAKE_ENV'] as $name) {
+            putenv($name);
+        }
+
+        if ($this->folder !== '') {
+            exec('rm -rf ' . escapeshellarg($this->folder));
+        }
+
+        unset($_ENV['WHISPER_LANGUAGE'], $_ENV['WHISPER_PROMPT'], $_ENV['WHISPER_THREADS'], $_ENV['WHISPER_BINARY'], $_ENV['WHISPER_SERVER_BINARY'], $_ENV['WHISPER_MODEL']);
+    }
+
+    public function testHasNoServerUnlessThereIsOneNextToWhisperCli(): void
+    {
+        $this->assertNull(Transcriber::fromEnv()->server);
+
+        $this->folder = sys_get_temp_dir() . '/transcriber-' . uniqid();
+        mkdir($this->folder);
+        $_ENV['WHISPER_BINARY'] = "{$this->folder}/whisper-cli";
+        $_ENV['WHISPER_MODEL'] = '/models/ggml-base.bin';
+        $_ENV['WHISPER_THREADS'] = '6';
+        touch("{$this->folder}/whisper-server");
+        chmod("{$this->folder}/whisper-server", 0755);
+
+        $server = Transcriber::fromEnv('pt')->server;
+
+        $this->assertSame("{$this->folder}/whisper-server", $server->binary);
+        $this->assertSame('/models/ggml-base.bin', $server->model);
+        $this->assertSame(6, $server->threads);
+        $this->assertSame($server, Transcriber::fromEnv()->server, 'The same server whatever language a call speaks: it is told with each utterance.');
+    }
+
+    public function testAServerThatIsReadyTranscribesInsteadOfWhisperCli(): void
+    {
+        $transcriber = $this->transcriberWithServer(language: 'pt', prompt: 'A voice call with Claude.');
+
+        $text = await($transcriber->transcribe($this->wav(), seconds: 2.0));
+
+        $this->assertSame('Hey Claude, what time is it?', $text, 'Without the annotations, like whisper-cli\'s.');
+        $this->assertSame('untouched', file_get_contents("{$this->folder}/cli.log"), 'whisper-cli did not run.');
+        $this->assertStringContainsString('request language=pt prompt=A voice call with Claude. format=json', file_get_contents("{$this->folder}/server.log"));
+    }
+
+    public function testWhisperCliTranscribesWhileTheServerLoads(): void
+    {
+        putenv('FAKE_WHISPER_SERVER_LOAD=5');
+        $transcriber = $this->transcriberWithServer(ready: false);
+        $said = [];
+
+        $text = await($transcriber->transcribe($this->wav(), log: function (string $level, string $message) use (&$said) {
+            $said[] = $message;
+        }));
+
+        $this->assertSame('Hey Claude, what time is it?', $text);
+        $this->assertSame([], $said, 'The server was not asked, so it did not fail.');
+        $this->assertStringContainsString("arg=--file\narg={$this->wav()}", file_get_contents("{$this->folder}/cli.log"));
+    }
+
+    public function testWhisperCliTranscribesWhatIsTooLongForTheServer(): void
+    {
+        $transcriber = $this->transcriberWithServer();
+        $said = [];
+        $log = function (string $level, string $message) use (&$said) {
+            $said[] = $message;
+        };
+
+        await($transcriber->transcribe($this->wav(), seconds: 30.5, log: $log));
+
+        $this->assertStringContainsString("arg=--file\narg={$this->wav()}", file_get_contents("{$this->folder}/cli.log"), 'Longer than an utterance in a call can be.');
+        $this->assertSame([], $said, 'The server was not asked.');
+
+        file_put_contents("{$this->folder}/cli.log", 'untouched');
+        await($transcriber->transcribe($this->wav(), seconds: 30.0, log: $log));
+
+        $this->assertSame('untouched', file_get_contents("{$this->folder}/cli.log"), 'As long as an utterance can be, it is the server\'s.');
+    }
+
+    public function testWhisperCliTranscribesWhenTheServerFails(): void
+    {
+        $transcriber = $this->transcriberWithServer();
+        $this->serverSays("FAKE_WHISPER_SERVER_STATUS='500'");
+        $said = [];
+
+        $text = await($transcriber->transcribe($this->wav(), log: function (string $level, string $message) use (&$said) {
+            $said[] = [$level, $message];
+        }));
+
+        $this->assertSame('Hey Claude, what time is it?', $text, 'The utterance is not lost.');
+        $this->assertStringContainsString("arg=--file\narg={$this->wav()}", file_get_contents("{$this->folder}/cli.log"));
+        $this->assertCount(1, $said);
+        $this->assertSame(['warning', 'The whisper server could not transcribe, whisper-cli does: HTTP status code 500 (Fake)'], $said[0], 'Without what anyone said: the logs never hold that.');
+    }
+
+    public function testWhisperCliTranscribesWhenTheServerDoesNotAnswer(): void
+    {
+        // The warm-up is its first request, and it dies on the next, without a word.
+        putenv('FAKE_WHISPER_SERVER_DIE_AT=2');
+        $transcriber = $this->transcriberWithServer();
+        $said = [];
+
+        $text = await($transcriber->transcribe($this->wav(), log: function (string $level, string $message) use (&$said) {
+            $said[] = [$level, $message];
+        }));
+
+        $this->assertSame('Hey Claude, what time is it?', $text, 'Not a server that is there, and says no: one that is gone.');
+        $this->assertStringContainsString('arg=--file', file_get_contents("{$this->folder}/cli.log"));
+        $this->assertCount(1, $said);
+        $this->assertStringStartsWith('The whisper server could not transcribe, whisper-cli does: ', $said[0][1]);
+    }
+
+    public function testWhisperCliTranscribesWhenTheServerFailsWithoutAnyoneToTell(): void
+    {
+        $transcriber = $this->transcriberWithServer();
+        $this->serverSays("FAKE_WHISPER_SERVER_STATUS='500'");
+
+        $this->assertSame('Hey Claude, what time is it?', await($transcriber->transcribe($this->wav())));
     }
 
     public function testUsesAsManyThreadsAsEnvSays(): void
@@ -164,6 +293,55 @@ final class TranscriberTest extends TestCase
         yield 'sounds only' => [' (keyboard clicking) [MUSIC]', ''];
         yield 'speech over lines' => [" Hello there.\n How are you?\n", 'Hello there. How are you?'];
         yield 'speech with annotations' => [' [laughs] That is funny (coughs) indeed.', 'That is funny indeed.'];
+    }
+
+    /**
+     * What the stand-in of the server reads again with each request: it has answered the warm-up, and says it from now on.
+     */
+    private function serverSays(string $setting): void
+    {
+        file_put_contents("{$this->folder}/fake.env", $setting . PHP_EOL);
+    }
+
+    private function wav(): string
+    {
+        return "{$this->folder}/utterance.wav";
+    }
+
+    /**
+     * A transcriber with a server that a call took. Its whisper-cli and its server log to files of their own,
+     * so that a test can tell which of them ran.
+     */
+    private function transcriberWithServer(string $language = 'en', string $prompt = '', bool $ready = true): Transcriber
+    {
+        $this->folder = sys_get_temp_dir() . '/transcriber-' . uniqid();
+        mkdir($this->folder);
+        file_put_contents("{$this->folder}/cli.log", 'untouched');
+        file_put_contents($this->wav(), Wav::silence(0.1));
+        putenv("FAKE_WHISPER_LOG={$this->folder}/cli.log");
+        putenv("FAKE_WHISPER_SERVER_LOG={$this->folder}/server.log");
+        putenv("FAKE_ENV={$this->folder}/fake.env");
+
+        $server = new WhisperServer(__DIR__ . '/../../Fixtures/fake-whisper-server', '/models/ggml-base.bin');
+        $this->servers[] = $server;
+        $server->acquire(static function (): void {
+        });
+
+        if ($ready) {
+            $done = new Deferred();
+            $check = Loop::addPeriodicTimer(0.05, function () use ($server, $done) {
+                if ($server->isReady()) {
+                    $done->resolve(null);
+                }
+            });
+            $deadline = Loop::addTimer(10.0, fn () => $done->resolve(null));
+            await($done->promise());
+            Loop::cancelTimer($check);
+            Loop::cancelTimer($deadline);
+            $this->assertTrue($server->isReady(), 'The server should have been ready.');
+        }
+
+        return new Transcriber(__DIR__ . '/../../Fixtures/fake-whisper', '/models/ggml-base.bin', $language, $prompt, server: $server);
     }
 
     private function slowTranscriber(): Transcriber
