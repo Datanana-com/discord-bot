@@ -197,10 +197,26 @@ final class UsageTest extends TestCase
 
     public function testASummaryOfWhatIsOnlyHeldStartsAtTheFirstOfThem(): void
     {
+        $before = gmdate('Y-m-d H:i:s');
         $this->usage->record(Usage::CALL_STARTED, '100');
+        $after = gmdate('Y-m-d H:i:s');
 
-        $this->assertMatchesRegularExpression('/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/', $this->usage->summary('100')['since']);
-        $this->assertSame(1, $this->usage->summary('100')['calls']);
+        $summary = $this->usage->summary('100');
+
+        $this->assertGreaterThanOrEqual($before, $summary['since']);
+        $this->assertLessThanOrEqual($after, $summary['since']);
+        $this->assertSame(1, $summary['calls']);
+    }
+
+    public function testDoesNotTouchTheDatabaseWhenNothingIsHeld(): void
+    {
+        $this->usage->flush();
+        $this->assertSame([], $this->writtenEvents());
+        $this->assertFalse(DB::connection(Usage::CONNECTION)->getSchemaBuilder()->hasTable('events'), 'Not even the table is made.');
+
+        $this->breakStatsDatabase();
+        $this->usage->flush();
+        $this->assertSame([], $this->logs->getRecords());
     }
 
     public function testForgetsWhatIsHeldWhenToldToReset(): void
