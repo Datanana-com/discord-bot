@@ -16,7 +16,6 @@ final class VoiceClaudeTest extends VoiceTestCase
 {
     private const string QUESTION = 'Hey Claude, what time is it?';
 
-    private const string PROMPT = "Transcript of the voice call so far:\n\nAlice: Hey Claude, what time is it?\n\nAlice is talking to you. Reply to their last message.";
 
     public function testOnlyTheAnswersOfACallAreWrittenWithoutThinking(): void
     {
@@ -60,7 +59,7 @@ final class VoiceClaudeTest extends VoiceTestCase
         // It got the same prompt as a process started for the question would.
         $calls = $this->claudeCalls();
         $this->assertCount(1, $calls);
-        $this->assertSame([true, $waiting, self::PROMPT], [$calls[0]['waited'], $calls[0]['pid'], $calls[0]['prompt']]);
+        $this->assertSame([true, $waiting, $this->prompt()], [$calls[0]['waited'], $calls[0]['pid'], $this->untimed($calls[0]['prompt'])]);
         $this->assertSame(['> **Alice:** ' . self::QUESTION . "\nIt is a quarter past four."], $this->sent);
 
         // It has ended, having answered its one question, and another one waits for the next.
@@ -89,8 +88,8 @@ final class VoiceClaudeTest extends VoiceTestCase
         $this->assertStringContainsString('Bananas', $calls[0]['prompt']);
         $this->assertSame(
             "Transcript of the voice call so far:\n\nAlice: Hey Claude, my dog is called Rex.\nClaude: It is a quarter past four.\nBob: Claude, what time is it?\n\n"
-            . 'Bob is talking to you. Reply to their last message.',
-            $calls[1]['prompt'],
+            . $this->asking('Bob', 'Claude, what time is it?'),
+            $this->untimed($calls[1]['prompt']),
         );
         $this->assertSame([], $this->loggedProblems());
     }
@@ -112,7 +111,7 @@ final class VoiceClaudeTest extends VoiceTestCase
         $this->ask($vc, '555', self::QUESTION);
 
         $calls = $this->claudeCalls();
-        $this->assertSame([[true, $this->waitingClaudes()[1], self::PROMPT]], [[$calls[0]['waited'], $calls[0]['pid'], $calls[0]['prompt']]]);
+        $this->assertSame([[true, $this->waitingClaudes()[1], $this->prompt()]], [[$calls[0]['waited'], $calls[0]['pid'], $this->untimed($calls[0]['prompt'])]]);
         $this->assertSame([], $this->loggedProblems());
 
         // Having answered, it is replaced once: by the process that waits for the next question.
@@ -137,7 +136,7 @@ final class VoiceClaudeTest extends VoiceTestCase
         // The question is asked the way it was before: a process is started for it, which doesn't think either.
         $calls = $this->claudeCalls();
         $this->assertCount(1, $calls);
-        $this->assertSame([false, self::PROMPT, '0'], [$calls[0]['waited'], $calls[0]['prompt'], $calls[0]['thinking']]);
+        $this->assertSame([false, $this->prompt(), '0'], [$calls[0]['waited'], $this->untimed($calls[0]['prompt']), $calls[0]['thinking']]);
         $this->assertSame(['> **Alice:** ' . self::QUESTION . "\nIt is a quarter past four."], $this->sent);
         $this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');
         $this->assertSame(['No Claude Code process was waiting for the question'], $this->loggedProblems());
@@ -161,7 +160,7 @@ final class VoiceClaudeTest extends VoiceTestCase
         // The process that was waiting was given the question and ended. Another one was started for it.
         $calls = $this->claudeCalls();
         $this->assertCount(1, $calls);
-        $this->assertSame([false, self::PROMPT, '0'], [$calls[0]['waited'], $calls[0]['prompt'], $calls[0]['thinking']]);
+        $this->assertSame([false, $this->prompt(), '0'], [$calls[0]['waited'], $this->untimed($calls[0]['prompt']), $calls[0]['thinking']]);
         $this->assertSame(['> **Alice:** ' . self::QUESTION . "\nIt is a quarter past four."], $this->sent);
         $this->waitUntil(fn () => $this->played !== [], 'the answer to be spoken');
         $this->runFor(0.3);
@@ -259,5 +258,13 @@ final class VoiceClaudeTest extends VoiceTestCase
         $this->assertFalse($this->isRunning($answering));
         $this->assertCount(1, $this->waitingClaudes(), 'No process waits for a question after the call.');
         $this->assertSame([], $this->loggedProblems());
+    }
+
+    /**
+     * What Claude is asked when Alice asks the question, without the time of her line.
+     */
+    private function prompt(): string
+    {
+        return "Transcript of the voice call so far:\n\nAlice: " . self::QUESTION . "\n\n" . $this->asking('Alice', self::QUESTION);
     }
 }

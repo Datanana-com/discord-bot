@@ -50,11 +50,11 @@ final class VoiceMemoryTest extends VoiceTestCase
         $answering = $this->claudeCalls()[0];
         $this->assertSame(
             "What you remember about Alice:\n\n" . self::ALICE . "\n\n"
-            . "Transcript of the voice call so far:\n\nAlice: Hey Claude, what time is it?\n\nAlice is talking to you. Reply to their last message.",
-            $answering['prompt'],
+            . "Transcript of the voice call so far:\n\nAlice: Hey Claude, what time is it?\n\n" . $this->asking('Alice', 'Hey Claude, what time is it?'),
+            $this->untimed($answering['prompt']),
         );
         // It is told whose memory is whose, and that the whole call hears its answer.
-        $this->assertStringContainsString('what you remember about the person talking to you, and what you remember about everyone in the call together', $answering['system']);
+        $this->assertStringContainsString('what you remember about the person you are answering, and what you remember about everyone in the call together', $answering['system']);
         $this->assertStringContainsString('other people in the call have memories of their own, which you only get when they shared them with the call', $answering['system']);
         $this->assertStringContainsString('Everyone in the call hears your answer, so only bring up from a memory what the question needs', $answering['system']);
         $this->assertSame(self::ALICE, $this->memory()->read('555'), 'Nothing is remembered while the call goes on.');
@@ -99,8 +99,8 @@ final class VoiceMemoryTest extends VoiceTestCase
         $this->assertSame(
             "What you remember about Alice:\n\n" . self::ALICE . "\n\n"
             . "What you remember about Alice and Bob together:\n\n" . self::TRIP . "\n\n"
-            . "Transcript of the voice call so far:\n\nAlice: Hey Claude, what time is it?\n\nAlice is talking to you. Reply to their last message.",
-            $answering,
+            . "Transcript of the voice call so far:\n\nAlice: Hey Claude, what time is it?\n\n" . $this->asking('Alice', 'Hey Claude, what time is it?'),
+            $this->untimed($answering),
         );
         $this->assertStringNotContainsString('sail', $answering);
 
@@ -508,8 +508,8 @@ final class VoiceMemoryTest extends VoiceTestCase
         // A group's memory is for a call of exactly its people: not the three's, as Carol left, and not
         // the one of Alice and Bob, as the question was asked with Carol there and is kept with the three.
         $this->assertSame(
-            "Transcript of the voice call so far:\n\nAlice: Hey Claude, what time is it?\n\nAlice is talking to you. Reply to their last message.",
-            $this->claudeCalls()[0]['prompt'],
+            "Transcript of the voice call so far:\n\nAlice: Hey Claude, what time is it?\n\n" . $this->asking('Alice', 'Hey Claude, what time is it?'),
+            $this->untimed($this->claudeCalls()[0]['prompt']),
         );
 
         await($session->stop());
@@ -534,8 +534,8 @@ final class VoiceMemoryTest extends VoiceTestCase
 
         $this->assertSame(
             "What you remember about Bob, who shared their memory with this call:\n\n" . self::BOB . "\n\n"
-            . "Transcript of the voice call so far:\n\nAlice: Hey Claude, what time is it?\n\nAlice is talking to you. Reply to their last message.",
-            $this->claudeCalls()[0]['prompt'],
+            . "Transcript of the voice call so far:\n\nAlice: Hey Claude, what time is it?\n\n" . $this->asking('Alice', 'Hey Claude, what time is it?'),
+            $this->untimed($this->claudeCalls()[0]['prompt']),
         );
 
         await($session->stop());
@@ -856,8 +856,8 @@ final class VoiceMemoryTest extends VoiceTestCase
         // As far as memories go, Alice is alone with the bot: her personal memory is used, and updated.
         $this->assertSame(
             "What you remember about Alice:\n\n" . self::ALICE . "\n\n"
-            . "Transcript of the voice call so far:\n\nAlice: Hey Claude, what time is it?\n\nAlice is talking to you. Reply to their last message.",
-            $this->claudeCalls()[0]['prompt'],
+            . "Transcript of the voice call so far:\n\nAlice: Hey Claude, what time is it?\n\n" . $this->asking('Alice', 'Hey Claude, what time is it?'),
+            $this->untimed($this->claudeCalls()[0]['prompt']),
         );
 
         await($session->stop());
@@ -882,8 +882,8 @@ final class VoiceMemoryTest extends VoiceTestCase
         $this->assertSame(
             "What you remember about Alice and Bob together:\n\n" . self::TRIP . "\n\n"
             . "What you remember about Bob, who shared their memory with this call:\n\n" . self::BOB . "\n\n"
-            . "Transcript of the voice call so far:\n\nAlice: Hey Claude, what time is it?\n\nAlice is talking to you. Reply to their last message.",
-            $this->claudeCalls()[0]['prompt'],
+            . "Transcript of the voice call so far:\n\nAlice: Hey Claude, what time is it?\n\n" . $this->asking('Alice', 'Hey Claude, what time is it?'),
+            $this->untimed($this->claudeCalls()[0]['prompt']),
         );
 
         await($session->stop());
@@ -920,8 +920,8 @@ final class VoiceMemoryTest extends VoiceTestCase
         $this->ask($vc, '1234', 'Hey Claude, what time is it?');
 
         $this->assertSame(
-            "Transcript of the voice call so far:\n\nJukebox: Hey Claude, what time is it?\n\nJukebox is talking to you. Reply to their last message.",
-            $this->claudeCalls()[0]['prompt'],
+            "Transcript of the voice call so far:\n\nJukebox: Hey Claude, what time is it?\n\n" . $this->asking('Jukebox', 'Hey Claude, what time is it?'),
+            $this->untimed($this->claudeCalls()[0]['prompt']),
         );
         $this->assertSame(["> **Jukebox:** Hey Claude, what time is it?\n" . self::ANSWER], $this->sent);
 

@@ -773,6 +773,65 @@ abstract class VoiceTestCase extends TestCase
     }
 
     /**
+     * Someone says something, without waiting for what happens.
+     */
+    protected function says(VoiceClient $vc, string $userId, string $text, float $seconds = 1.0): void
+    {
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => $text]);
+        $this->speak($vc, ssrc: (int) $userId, userId: $userId, seconds: $seconds);
+    }
+
+    /**
+     * Someone says something that the bot hears, and doesn't answer.
+     */
+    protected function hearsNoAnswer(VoiceClient $vc, VoiceSession $session, string $userId, string $text): void
+    {
+        $sent = $this->sent;
+        $asked = count($this->claudeCalls());
+
+        $this->says($vc, $userId, $text);
+        $this->waitUntil(fn () => str_contains($this->transcript($session), '] ' . self::MEMBERS[$userId] . ": {$text}\n"), 'it to be transcribed');
+        // Only now: it waited its turn behind the answer before it, whose last sentence may still have been spoken.
+        $played = $this->played;
+        $this->runFor(0.5);
+
+        $this->assertSame($sent, $this->sent, 'Nothing was posted.');
+        $this->assertSame($played, $this->played, 'Nothing was said.');
+        $this->assertSame($asked, count($this->claudeCalls()), 'Claude was not asked.');
+    }
+
+    /**
+     * @return list<array<string, mixed>> What each time the message was logged says, beyond the guild and session.
+     */
+    protected function contexts(string $message): array
+    {
+        return array_map(fn (array $context) => array_slice($context, 2), $this->logged($message));
+    }
+
+    /**
+     * Puts lines into a call's transcript as if they had been said earlier in it, each with its time: in what
+     * the call keeps of it, and in its file.
+     *
+     * @param list<string> $lines
+     */
+    protected function saidEarlier(VoiceSession $session, array $lines): void
+    {
+        $entries = array_combine(range(1, count($lines)), $lines);
+        $this->setProperty($session, VoiceSession::class, 'transcript', $entries);
+        $this->setProperty($session, VoiceSession::class, 'entries', count($lines));
+        file_put_contents("{$session->directory}/transcript.txt", implode("\n", $lines) . "\n");
+    }
+
+    /**
+     * How the prompt of a question ends, after the call so far: the line that is answered, without its time, and who said it.
+     */
+    protected function asking(string $name, string $text): string
+    {
+        return "{$name} said this to you just now, and everyone in the call hears your answer:\n\n{$name}: {$text}\n\n"
+            . "Answer {$name}. What they ask is often about what was said in the call before, by anyone in it.";
+    }
+
+    /**
      * A prompt without the time of each line of the transcript, which is the time of the test.
      */
     protected function untimed(string $prompt): string

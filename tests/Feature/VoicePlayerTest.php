@@ -76,18 +76,19 @@ final class VoicePlayerTest extends VoiceTestCase
         $this->setEnv(['VOICE_PLAYER' => 'bot']);
         VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
 
-        // The stop phrase: "Okay." can't be played from these tests' files either, which is logged, and nothing
-        // goes to the library.
+        // "Sorry, something went wrong.", which the bot says on its own when whisper fails, can't be played from
+        // these tests' files either, which is logged, and nothing goes to the library.
         $this->ask($vc, '555', 'Hey Claude, what time is it?');
         $this->waitUntil(fn () => count($this->sent) === 2, 'the channel to be told the answer could not be spoken');
-        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => 'Stop, Claude.']);
-        $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
-        $this->waitUntil(fn () => preg_grep('/^Could not say okay: /', $this->loggedProblems()) !== [], 'okay to fail');
-
-        // Nor can "Sorry, something went wrong.", which the bot says on its own when whisper fails.
         $this->setProcessEnv(['FAKE_WHISPER_EXIT' => '1']);
         $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
         $this->waitUntil(fn () => preg_grep('/^Could not say sorry: /', $this->loggedProblems()) !== [], 'sorry to fail');
+
+        // Nor can the "Okay." of the leave phrase: the bot leaves all the same.
+        $this->setProcessEnv(['FAKE_WHISPER_EXIT' => '0', 'FAKE_WHISPER_OUTPUT' => 'Disconnect, Claude.']);
+        $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => preg_grep('/^Could not say okay: /', $this->loggedProblems()) !== [], 'okay to fail');
+        $this->waitUntil(fn () => VoiceSession::forGuild(self::GUILD_ID) === null, 'the bot to leave');
 
         $this->assertSame([], $this->played, 'Nothing was handed to the library.');
         $problems = implode("\n", $this->loggedProblems());

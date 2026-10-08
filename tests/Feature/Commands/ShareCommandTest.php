@@ -53,8 +53,8 @@ final class ShareCommandTest extends CommandTestCase
         $this->assertSame(
             "What you remember about Bob:\n\n" . self::BOB . "\n\n"
             . "What you remember about Alice and Bob together:\n\n" . self::TRIP . "\n\n"
-            . "Transcript of the voice call so far:\n\nBob: " . self::QUESTION . "\n\nBob is talking to you. Reply to their last message.",
-            $before,
+            . "Transcript of the voice call so far:\n\nBob: " . self::QUESTION . "\n\n" . $this->asking('Bob', self::QUESTION),
+            $this->untimed($before),
         );
         $this->assertStringNotContainsString('Bananas', $before);
 
@@ -72,7 +72,7 @@ final class ShareCommandTest extends CommandTestCase
             "What you remember about Bob:\n\n" . self::BOB . "\n\n"
             . "What you remember about Alice and Bob together:\n\n" . self::TRIP . "\n\n"
             . "What you remember about Alice, who shared their memory with this call:\n\n" . self::ALICE . "\n\n"
-            . "Transcript of the voice call so far:\n\nBob: " . self::QUESTION . "\nClaude: It is a quarter past four.\nBob: " . self::QUESTION . "\n\nBob is talking to you. Reply to their last message.",
+            . "Transcript of the voice call so far:\n\nBob: " . self::QUESTION . "\nClaude: It is a quarter past four.\nBob: " . self::QUESTION . "\n\n" . $this->asking('Bob', self::QUESTION),
             $this->untimed($after),
         );
 
@@ -109,8 +109,8 @@ final class ShareCommandTest extends CommandTestCase
         // No group memory is used while Carol, who opted out, is there, but Alice chose to share hers.
         $this->assertSame(
             "What you remember about Alice, who shared their memory with this call:\n\n" . self::ALICE . "\n\n"
-            . "Transcript of the voice call so far:\n\nBob: " . self::QUESTION . "\n\nBob is talking to you. Reply to their last message.",
-            $this->claudeCalls()[0]['prompt'],
+            . "Transcript of the voice call so far:\n\nBob: " . self::QUESTION . "\n\n" . $this->asking('Bob', self::QUESTION),
+            $this->untimed($this->claudeCalls()[0]['prompt']),
         );
         await($session->stop());
     }
@@ -127,8 +127,8 @@ final class ShareCommandTest extends CommandTestCase
         // Bob has no memory yet, and the call has none as a group.
         $this->assertSame(
             "What you remember about Alice, who shared their memory with this call:\n\n" . self::ALICE . "\n\n"
-            . "Transcript of the voice call so far:\n\nBob: " . self::QUESTION . "\n\nBob is talking to you. Reply to their last message.",
-            $this->claudeCalls()[0]['prompt'],
+            . "Transcript of the voice call so far:\n\nBob: " . self::QUESTION . "\n\n" . $this->asking('Bob', self::QUESTION),
+            $this->untimed($this->claudeCalls()[0]['prompt']),
         );
         await($session->stop());
     }
