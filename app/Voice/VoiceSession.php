@@ -767,6 +767,8 @@ final class VoiceSession
         $ms = $this->msSince($this->startedAt);
         $this->log('info', 'Voice session stopped', ['ms' => $ms, 'speakers' => count($this->speakers), ...$this->counts]);
         $this->track(Usage::CALL_ENDED, ['duration_ms' => $ms]);
+        // Now, unless this or another call is answering or speaking: then when its turn is over.
+        $this->saveUsage();
 
         // The queue gets here once everything said is transcribed, so the summary includes the last thing said.
         return $this->queue = $this->queue
@@ -1001,6 +1003,7 @@ final class VoiceSession
                 // Answered and spoken, or not answered at all: their conversation is quiet from now on.
                 $this->waiting[$userId]--;
                 $this->startQuiet($userId);
+                $this->saveUsage();
             });
     }
 
@@ -2041,13 +2044,32 @@ final class VoiceSession
     }
 
     /**
-     * Records something that happened in the call, for /stats.
+     * Records something that happened in the call, for /stats. It is only kept: see {@see saveUsage()}.
      *
      * @param array{channel?: string, user?: string, duration_ms?: int} $details
      */
     private function track(string $type, array $details = []): void
     {
         $this->usage->record($type, (string) $this->vc->channel->guild_id, ['session' => $this->id, ...$details]);
+    }
+
+    /**
+     * Writes what {@see track()} kept, when nobody waits for the bot: in no call is something said waiting for
+     * its turn or being answered, which includes the bot speaking. A write blocks the event loop, which
+     * sends the next packet of a sentence every 20 ms and starts the next step of an answer.
+     *
+     * Called at the end of every turn, and when a call ends, so what is kept waits for the end of the
+     * turn that is going on and no longer. The bot's exit writes the rest: see {@see Application::run()}.
+     */
+    private function saveUsage(): void
+    {
+        foreach (self::$unfinished as $call) {
+            if (array_sum($call->waiting) > 0) {
+                return;
+            }
+        }
+
+        $this->usage->flush();
     }
 
     private function msSince(float $time): int

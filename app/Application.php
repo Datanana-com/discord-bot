@@ -12,6 +12,7 @@ use ReflectionClass;
 use App\Logs\Failures;
 use App\Voice\Meeting;
 use App\Voice\Retention;
+use App\Analytics\Usage;
 use BadMethodCallException;
 use React\EventLoop\Loop;
 use App\Voice\VoiceSession;
@@ -159,6 +160,10 @@ final class Application
             foreach (array_keys(self::SIGNALS) as $signal) {
                 $this->loop->removeSignal($signal, $stop);
             }
+
+            // The statistics still held are written however the bot ends: when the calls were summarized, when it was
+            // told to stop twice, and when it failed to start. Nobody waits for the bot any more.
+            (new Usage($this->log))->flush();
 
             // What is still running ends with the bot, like a summary it no longer waited for: in a session of
             // their own, the programs would go on without it.

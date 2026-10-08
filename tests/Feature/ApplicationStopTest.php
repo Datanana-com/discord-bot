@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Analytics\Usage;
 use App\Application;
 use App\Voice\VoiceSession;
 use Closure;
@@ -128,6 +129,18 @@ final class ApplicationStopTest extends VoiceTestCase
         await($session->stop());
         $this->assertStringStartsWith("Sorry, I couldn't summarize the call. (", end($this->sent));
         $this->assertStringContainsString('fake-claude was killed by signal 15', end($this->sent));
+    }
+
+    public function testWritesTheStatisticsItStillHoldsWhenItEnds(): void
+    {
+        // What a call tracked after it was left, or while the bot was told to stop for the second time.
+        (new Usage(new Logger('test')))->record(Usage::UTTERANCE, self::GUILD_ID, ['user' => '555', 'duration_ms' => 1000]);
+        $this->assertSame([], $this->writtenEvents());
+
+        $code = $this->runBot(fn () => Loop::addTimer(0.1, fn () => posix_kill(getmypid(), SIGINT)));
+
+        $this->assertSame(0, $code);
+        $this->assertSame(['utterance'], $this->writtenEvents());
     }
 
     public function testGoesOnAfterWhatACallbackOfTheLoopThrew(): void
