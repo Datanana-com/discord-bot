@@ -2059,7 +2059,7 @@ final class VoiceSession
      * sends the next packet of a sentence every 20 ms and starts the next step of an answer.
      *
      * Called at the end of every turn, and when a call ends, so what is kept waits for the end of the
-     * turn that is going on and no longer. The bot's exit writes the rest: see {@see Application::run()}.
+     * turn that is going on and no longer. The bot's exit writes the rest: see {@see \App\Application::run()}.
      */
     private function saveUsage(): void
     {

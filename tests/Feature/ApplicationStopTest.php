@@ -143,6 +143,40 @@ final class ApplicationStopTest extends VoiceTestCase
         $this->assertSame(['utterance'], $this->writtenEvents());
     }
 
+    public function testWritesTheStatisticsItStillHoldsWhenItIsToldToStopAgain(): void
+    {
+        VoiceSession::start($this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);
+        // Claude takes its time with the summary: the bot is still waiting for it when it is told to stop again.
+        $this->setProcessEnv(['FAKE_CLAUDE_PAUSE' => '10']);
+
+        $this->runBot(function () {
+            Loop::addTimer(0.1, fn () => posix_kill(getmypid(), SIGINT));
+            // What the call tracked since its end was written; this is something it tracked after.
+            Loop::addTimer(0.3, fn () => (new Usage(new Logger('test')))->record(Usage::LOOKED_UP, self::GUILD_ID, ['user' => '555']));
+            Loop::addTimer(0.5, fn () => posix_kill(getmypid(), SIGINT));
+        });
+
+        $this->assertSame(['call_started', 'call_ended', 'looked_up'], $this->writtenEvents());
+    }
+
+    public function testWritesTheStatisticsItStillHoldsWhenDiscordFailsToRun(): void
+    {
+        (new Usage(new Logger('test')))->record(Usage::CALL_STARTED, self::GUILD_ID, ['channel' => '200']);
+        $app = $this->app();
+        $app->discord->method('run')->willThrowException(new RuntimeException('Could not connect'));
+
+        try {
+            $app->run();
+            $this->fail('The bot should not have ended as if nothing had happened.');
+        } catch (RuntimeException $e) {
+            $this->assertSame('Could not connect', $e->getMessage());
+        } finally {
+            Loop::set($this->loop);
+        }
+
+        $this->assertSame(['call_started'], $this->writtenEvents());
+    }
+
     public function testGoesOnAfterWhatACallbackOfTheLoopThrew(): void
     {
         VoiceSession::start($this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);

@@ -151,7 +151,7 @@ final class Application
             }
         } catch (BadMethodCallException) {
             // The event loop can only be told about signals with the pcntl extension.
-            $this->log->warning('The pcntl extension is not loaded: stopped with Ctrl+C, the bot ends without leaving its calls, and the programs it runs go on without it.');
+            $this->log->warning('The pcntl extension is not loaded: stopped with Ctrl+C, the bot ends without leaving its calls, the statistics it still held are lost, and the programs it runs go on without it.');
         }
 
         try {
@@ -161,8 +161,9 @@ final class Application
                 $this->loop->removeSignal($signal, $stop);
             }
 
-            // The statistics still held are written however the bot ends: when the calls were summarized, when it was
-            // told to stop twice, and when it failed to start. Nobody waits for the bot any more.
+            // The statistics still held are written when the bot ends: when the calls were summarized, when it was
+            // told to stop twice, and when it failed to start. Nobody waits for the bot any more. (Not when PHP is
+            // ended by a signal, as without pcntl.)
             (new Usage($this->log))->flush();
 
             // What is still running ends with the bot, like a summary it no longer waited for: in a session of

@@ -120,20 +120,28 @@ final class Usage
      */
     public function summary(string $guildId): ?array
     {
-        $seen = 'SELECT type, user_id, duration_ms, created_at FROM events WHERE guild_id = ?';
-        $bindings = [$guildId];
-        $held = array_values(array_filter(self::$held, fn (array $row) => $row['guild_id'] === $guildId));
-
-        if ($held !== []) {
-            $seen .= ' UNION ALL VALUES ' . implode(', ', array_fill(0, count($held), '(?, ?, ?, ?)'));
-
-            foreach ($held as $row) {
-                array_push($bindings, $row['type'], $row['user_id'], $row['duration_ms'], $row['created_at']);
-            }
-        }
-
         try {
-            $row = $this->connection()->selectOne(
+            $connection = DB::connection(self::CONNECTION);
+            $parts = $bindings = [];
+
+            // The table is made when the first rows are written, not by someone reading: that would be a write too.
+            if ($this->tableExists || $connection->getSchemaBuilder()->hasTable('events')) {
+                $parts[] = 'SELECT type, user_id, duration_ms, created_at FROM events WHERE guild_id = ?';
+                $bindings[] = $guildId;
+            }
+
+            $held = array_values(array_filter(self::$held, fn (array $row) => $row['guild_id'] === $guildId));
+
+            if ($held !== []) {
+                $parts[] = 'VALUES ' . implode(', ', array_fill(0, count($held), '(?, ?, ?, ?)'));
+
+                foreach ($held as $row) {
+                    array_push($bindings, $row['type'], $row['user_id'], $row['duration_ms'], $row['created_at']);
+                }
+            }
+
+            $seen = $parts === [] ? 'SELECT NULL, NULL, NULL, NULL WHERE 0' : implode(' UNION ALL ', $parts);
+            $row = $connection->selectOne(
                 "WITH seen (type, user_id, duration_ms, created_at) AS ({$seen})
                 SELECT MIN(created_at) AS since,
                     SUM(CASE WHEN type = ? THEN 1 ELSE 0 END) AS calls,

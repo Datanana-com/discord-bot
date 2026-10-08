@@ -68,6 +68,8 @@ final class UsageTest extends TestCase
             ['since' => null, 'calls' => 0, 'call_ms' => 0, 'speakers' => 0, 'utterances' => 0, 'speech_ms' => 0, 'answers' => 0, 'answer_ms' => null, 'lookups' => 0, 'failures' => 0],
             $this->usage->summary('100'),
         );
+        // Reading is not writing: the table is made by the first write, not by /stats on a new database.
+        $this->assertFalse(DB::connection(Usage::CONNECTION)->getSchemaBuilder()->hasTable('events'));
     }
 
     public function testWritesNothingUntilItIsToldToAndThenEverythingInTheOrderItHappened(): void
@@ -108,7 +110,6 @@ final class UsageTest extends TestCase
     public function testWritesALongListInOrderInStatementsThatFit(): void
     {
         // SQLite refuses a statement with more than 999 values, in the versions of it that PHP may come with: 100 rows of 7.
-        $this->usage->summary('100');
         DB::connection(Usage::CONNECTION)->enableQueryLog();
 
         for ($i = 0; $i < 250; $i++) {
@@ -129,7 +130,8 @@ final class UsageTest extends TestCase
     public function testWritesNothingOfAListThatFailsHalfWay(): void
     {
         // The table exists, with a rule that refuses the last row, which is in the second INSERT.
-        $this->usage->summary('100');
+        $this->usage->record(Usage::CALL_STARTED, '100');
+        $this->usage->flush();
         DB::connection(Usage::CONNECTION)->statement("CREATE TRIGGER refuses BEFORE INSERT ON events WHEN NEW.duration_ms = 999 BEGIN SELECT RAISE(ABORT, 'refused'); END");
 
         for ($i = 0; $i < 100; $i++) {
@@ -141,7 +143,7 @@ final class UsageTest extends TestCase
         // And not again: what couldn't be written is let go.
         $this->usage->flush();
 
-        $this->assertSame([], $this->writtenEvents(), 'Either all of them are written or none.');
+        $this->assertSame(['call_started'], $this->writtenEvents(), 'Either all of them are written or none: only the one before is.');
         $records = $this->logs->getRecords();
         $this->assertCount(1, $records);
         $this->assertStringStartsWith('Could not save usage statistics: ', $records[0]->message);
