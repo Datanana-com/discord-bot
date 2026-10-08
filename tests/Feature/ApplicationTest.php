@@ -790,7 +790,7 @@ final class ApplicationTest extends TestCase
 
         $this->assertSame(0, $app->run());
 
-        $this->assertContains('The pcntl extension is not loaded: stopped with Ctrl+C, the bot ends without leaving its calls, and the programs it runs go on without it.', $this->logged());
+        $this->assertContains('The pcntl extension is not loaded: stopped with Ctrl+C, the bot ends without leaving its calls, the statistics it still held are lost, and the programs it runs go on without it.', $this->logged());
     }
 
     /**

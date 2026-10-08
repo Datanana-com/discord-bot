@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Analytics\Usage;
 use App\Application;
 use App\Voice\VoiceSession;
 use Closure;
@@ -128,6 +129,52 @@ final class ApplicationStopTest extends VoiceTestCase
         await($session->stop());
         $this->assertStringStartsWith("Sorry, I couldn't summarize the call. (", end($this->sent));
         $this->assertStringContainsString('fake-claude was killed by signal 15', end($this->sent));
+    }
+
+    public function testWritesTheStatisticsItStillHoldsWhenItEnds(): void
+    {
+        // What a call tracked after it was left, or while the bot was told to stop for the second time.
+        (new Usage(new Logger('test')))->record(Usage::UTTERANCE, self::GUILD_ID, ['user' => '555', 'duration_ms' => 1000]);
+        $this->assertSame([], $this->writtenEvents());
+
+        $code = $this->runBot(fn () => Loop::addTimer(0.1, fn () => posix_kill(getmypid(), SIGINT)));
+
+        $this->assertSame(0, $code);
+        $this->assertSame(['utterance'], $this->writtenEvents());
+    }
+
+    public function testWritesTheStatisticsItStillHoldsWhenItIsToldToStopAgain(): void
+    {
+        VoiceSession::start($this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);
+        // Claude takes its time with the summary: the bot is still waiting for it when it is told to stop again.
+        $this->setProcessEnv(['FAKE_CLAUDE_PAUSE' => '10']);
+
+        $this->runBot(function () {
+            Loop::addTimer(0.1, fn () => posix_kill(getmypid(), SIGINT));
+            // What the call tracked since its end was written; this is something it tracked after.
+            Loop::addTimer(0.3, fn () => (new Usage(new Logger('test')))->record(Usage::LOOKED_UP, self::GUILD_ID, ['user' => '555']));
+            Loop::addTimer(0.5, fn () => posix_kill(getmypid(), SIGINT));
+        });
+
+        $this->assertSame(['call_started', 'call_ended', 'looked_up'], $this->writtenEvents());
+    }
+
+    public function testWritesTheStatisticsItStillHoldsWhenDiscordFailsToRun(): void
+    {
+        (new Usage(new Logger('test')))->record(Usage::CALL_STARTED, self::GUILD_ID, ['channel' => '200']);
+        $app = $this->app();
+        $app->discord->method('run')->willThrowException(new RuntimeException('Could not connect'));
+
+        try {
+            $app->run();
+            $this->fail('The bot should not have ended as if nothing had happened.');
+        } catch (RuntimeException $e) {
+            $this->assertSame('Could not connect', $e->getMessage());
+        } finally {
+            Loop::set($this->loop);
+        }
+
+        $this->assertSame(['call_started'], $this->writtenEvents());
     }
 
     public function testGoesOnAfterWhatACallbackOfTheLoopThrew(): void

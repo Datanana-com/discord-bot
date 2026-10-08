@@ -261,7 +261,7 @@ Set these in `.env`. The notes and measurements behind each one are in [docs/con
 Neither the logs nor the statistics contain what anyone said or what Claude answered.
 
 - **Logs** are printed to the console and written to `logs/<date>.log`, one JSON object per line. Each step of a call is logged with the server, the call's `session` ID, the `user` it concerns, and how long it took.
-- **Statistics** are kept in `STATS_DATABASE`, one row per event. `/stats` shows a server its totals.
+- **Statistics** are kept in `STATS_DATABASE`, one row per event. `/stats` shows a server its totals. The rows of a call are kept in memory and written together when nobody is waiting for an answer, so a crash of the bot loses the rows it still held (only statistics: opt-outs and settings are written at once).
 
 ```bash
 # Everything that happened in one call
