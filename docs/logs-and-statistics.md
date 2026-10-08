@@ -24,6 +24,7 @@ A call also logs `Interrupted` when the person the bot is answering talks over i
 **Errors** are logged with the `exception` (its class, message, file and line) and a `trace`: what called what, each with its file and line, and never what it was called with. PHP's own stack traces show the start of every text a function was given, which in a call is what someone said, so none is logged or printed.
 
 - `/<name> failed`: a slash command threw, or the promise it worked with was rejected. With the `guild`, the `channel` and the `user`. `Could not tell that /<name> failed` is the warning for a reply that couldn't be sent either.
+- `/<name> could not suggest`: the command that completes an option while it is typed (`/settings voice:`) threw, with the `guild` and the `user`. Nobody is told, the option is listed without suggestions. Nothing is logged when it works: that is once for each key pressed.
 - `Error while handling event` and `Event "<method>" failed with the following error`: a class of `app/Events` threw, with the `event`.
 - `Error while preparing command classes`: the bot's slash commands couldn't be set up when it started, and it ends.
 - `Voice reply failed`: something said in a call couldn't be transcribed or answered, or the answer couldn't be spoken, with the `user` and the `step` that failed: `whisper`, `claude`, `speech`, or `other` for what the bot doesn't expect to fail.
