@@ -121,7 +121,7 @@ final class RecallCommandTest extends CommandTestCase
         // What Claude is asked to do changes nothing about what it can do: no tools, no MCP servers, an empty directory.
         $this->assertStringContainsString("arg=--tools\narg=\narg=--strict-mcp-config\narg=--no-session-persistence\n", $claudeCall);
         $this->assertStringContainsString('cwd=' . sys_get_temp_dir() . "/discord-bot-claude\n", $claudeCall);
-        $this->assertStringContainsString("arg=--model\narg=haiku\n", $claudeCall);
+        $this->assertStringContainsString("arg=--model\narg=claude-haiku-5-5\n", $claudeCall);
     }
 
     public function testAcknowledgesFirstThenUpdatesTheResponse(): void

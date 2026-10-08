@@ -185,7 +185,7 @@ arg=A voice call with the assistant Claude.
 
         // The call still answers to "Claude", with the model it started with.
         $this->assertSame(["> **Alice:** Hey Claude, what time is it?\nIt is a quarter past four."], $this->sent);
-        $this->assertStringContainsString("arg=--model\narg=haiku\n", file_get_contents($this->claudeLog));
+        $this->assertStringContainsString("arg=--model\narg=claude-haiku-5-5\n", file_get_contents($this->claudeLog));
     }
 
     public function testIgnoresSpeechThatIsTooShort(): void

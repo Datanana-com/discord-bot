@@ -230,7 +230,7 @@ Set these in `.env`. The notes and measurements behind each one are in [docs/con
 | `WHISPER_THREADS` | | How many threads whisper uses. Empty leaves it to whisper, which takes 4. |
 | `WHISPER_PROMPT` | | Text whisper takes as what was said just before. It helps whisper write the wake word as it is. |
 | `CLAUDE_BINARY` | `claude` | Path to the Claude Code CLI. |
-| `CLAUDE_MODEL` | `haiku` | `haiku` answers fastest; `sonnet` or `opus` answer better, but slower. |
+| `CLAUDE_MODEL` | `haiku` | `haiku` (Haiku 5.5) answers fastest; `sonnet` or `opus` answer better, but slower. |
 | `CLAUDE_LOOKUP_MODEL` | `sonnet` | The model that looks things up in the background. |
 | `CLAUDE_LOOKUP_ADVISOR` | `opus` | The model it must consult for a hard task. Leave it empty for no advisor. |
 | `CLAUDE_LOOKUP_AT_ONCE` | `2` | How many tasks are looked up at once, in all calls and chats together. |
