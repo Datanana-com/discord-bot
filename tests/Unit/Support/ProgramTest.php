@@ -175,6 +175,50 @@ final class ProgramTest extends TestCase
         $this->assertSame(['INFO: wrote a file', 'WARNING: cannot say @', 'INFO: wrote another', 'WARNING: cannot say #', 'bang'], $this->errorLines, 'It was handed all of it.');
     }
 
+    public function testHandsOverWhatIsNotLinesOfTextAsItComes(): void
+    {
+        $bytes = '';
+        $lines = [];
+        // Like an encoder: bytes of any kind, with line endings anywhere and none at the end.
+        $program = $this->programs[] = Shell::open(
+            ['cat'],
+            function (string $line) use (&$lines) {
+                $lines[] = $line;
+            },
+            onBytes: function (string $piece) use (&$bytes) {
+                $bytes .= $piece;
+            },
+        );
+
+        $program->write("Ogg\nS\x00\xff\n\n");
+        for ($i = 0; $i < 100 && $bytes === ''; $i++) {
+            delay(0.02);
+        }
+
+        $this->assertSame("Ogg\nS\x00\xff\n\n", $bytes, 'Before the program has ended, and with its line endings.');
+
+        $program->end('last');
+        await($program->done());
+
+        $this->assertSame("Ogg\nS\x00\xff\n\nlast", $bytes);
+        $this->assertSame([], $lines, 'Nothing is handed over as lines as well.');
+    }
+
+    public function testStopsTheProgramWhenWhoeverGetsItsBytesThrows(): void
+    {
+        $program = $this->programs[] = Shell::open(['sh', '-c', 'echo first; exec sleep 10'], onBytes: fn (string $piece) => throw new RuntimeException('Cannot take this.'));
+        $started = microtime(true);
+
+        try {
+            await($program->done());
+            $this->fail('The program should have been stopped.');
+        } catch (RuntimeException $e) {
+            $this->assertSame('Cannot take this.', $e->getMessage());
+        }
+
+        $this->assertLessThan(5, microtime(true) - $started);
+    }
+
     public function testAProgramThatCannotBeStartedHasEndedAtOnce(): void
     {
         // Like when the bot has no file descriptors or processes left for another program: here, nowhere to run it.

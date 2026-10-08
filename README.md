@@ -236,6 +236,7 @@ Set these in `.env`. The notes and measurements behind each one are in [docs/con
 | `VOICE_LEAVE_PHRASE` | `disconnect <wake word>` | What ends the call when anyone in it says it. |
 | `VOICE_PAUSE_SECONDS` | `0.6` | How long someone has to be silent for what they said to be over. |
 | `VOICE_PLAYER` | `bot` | Who sends the bot's speech to Discord: the bot itself (`bot`), as soon as each sentence is ready, or the voice library (`library`), which waits half a second before every sentence. |
+| `VOICE_FIRST_WORDS` | `0` | How many words of an answer are spoken before their sentence is whole, so that its first sound comes sooner. `0` for none. |
 | `WHISPER_BINARY` | `whisper-cli` | Path to whisper.cpp's `whisper-cli`. |
 | `WHISPER_SERVER_BINARY` | `whisper-server` next to `WHISPER_BINARY`, if it is there | Path to whisper.cpp's `whisper-server`, which a call keeps running with the model loaded: with a GPU, a short question is transcribed in about 0.1 to 0.3 s instead of the 0.5 to 0.9 s that starting `whisper-cli` takes. It has no password, so leave it empty on a machine shared with people you don't trust. |
 | `WHISPER_MODEL` | | Path to the whisper model, e.g. `~/whisper.cpp/models/ggml-base.bin`. |
@@ -243,7 +244,7 @@ Set these in `.env`. The notes and measurements behind each one are in [docs/con
 | `WHISPER_THREADS` | | How many threads whisper uses. Empty leaves it to whisper, which takes 4. |
 | `WHISPER_PROMPT` | | Text whisper takes as what was said just before. It helps whisper write the wake word as it is. |
 | `CLAUDE_BINARY` | `claude` | Path to the Claude Code CLI. |
-| `CLAUDE_MODEL` | `haiku` | `haiku` answers fastest; `sonnet` or `opus` answer better, but slower. |
+| `CLAUDE_MODEL` | `haiku` | `haiku` (Haiku 5.5) answers fastest; `sonnet` or `opus` answer better, but slower. |
 | `CLAUDE_LOOKUP_MODEL` | `sonnet` | The model that looks things up in the background. |
 | `CLAUDE_LOOKUP_ADVISOR` | `opus` | The model it must consult for a hard task. Leave it empty for no advisor. |
 | `CLAUDE_LOOKUP_AT_ONCE` | `2` | How many tasks are looked up at once, in all calls and chats together. |

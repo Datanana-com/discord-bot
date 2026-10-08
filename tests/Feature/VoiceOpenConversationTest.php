@@ -462,11 +462,31 @@ final class VoiceOpenConversationTest extends VoiceTestCase
         // The call ends while "Okay." is being made.
         $this->setProcessEnv(['FAKE_PIPER_DELAY' => '0.5']);
         $this->say($vc, '555', 'Stop, Claude.');
-        $this->waitUntil(fn () => $this->logged('Conversation closed') !== [], 'the conversation to be closed');
+        $this->waitUntil(fn () => $this->logged('Conversation closed') !== [] && count($this->givenToPiper()) === 2, 'the conversation to be closed, and okay to be with Piper');
         await($session->stop());
 
         $this->assertCount(1, $this->played);
+        $this->assertSame($this->played, glob("{$session->directory}/claude-*"), 'An okay nobody heard is not kept.');
         $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testDoesNotSayOkayToSomeoneWhoOptedOutWhileItWasStillEncoded(): void
+    {
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', 'Hey Claude, what time is it?');
+        $this->waitUntil(fn () => count($this->played) === 1, 'the answer to be spoken');
+
+        // The ffmpeg of "Okay." has written the first of it, and takes its time over the rest: the voice library can't start yet.
+        touch($hold = "{$this->recordings}/ffmpeg.hold");
+        $this->setProcessEnv(['FAKE_FFMPEG_HOLD' => $hold, 'FAKE_FFMPEG_STARTS' => '1']);
+        $this->say($vc, '555', 'Stop, Claude.');
+        $this->waitUntil(fn () => count($this->givenToPiper()) === 2, 'okay to be with Piper');
+        $this->runFor(0.3);
+        VoiceSession::optOut('555');
+        unlink($hold);
+        $this->runFor(0.5);
+
+        $this->assertCount(1, $this->played);
     }
 
     public function testTheCallCanEndWhileOkayIsBeingSpoken(): void

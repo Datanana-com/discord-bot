@@ -98,7 +98,8 @@ final class SpeechTrimTest extends TestCase
         putenv('FAKE_PIPER_WAV=' . $this->wav(Wav::silence(0.1, 22050)));
         $speech = $this->start();
 
-        $ogg = $this->within(10.0, $speech->synthesize('...', "{$this->directory}/claude-1.ogg"), 'the voice');
+        $ogg = "{$this->directory}/claude-1.ogg";
+        $this->within(10.0, $speech->synthesize('...', $ogg)->whole(), 'the voice');
 
         $packets = count(OggOpus::packets((string) file_get_contents($ogg)));
         $this->assertGreaterThanOrEqual(2, $packets);
@@ -122,7 +123,8 @@ final class SpeechTrimTest extends TestCase
     private function spoken(array $parts): array
     {
         putenv('FAKE_PIPER_WAV=' . $this->wav(Wav::sounds($parts)));
-        $ogg = $this->within(10.0, $this->start()->synthesize('Sure, the meeting starts at five.', "{$this->directory}/claude-1.ogg"), 'the voice');
+        $ogg = "{$this->directory}/claude-1.ogg";
+        $this->within(10.0, $this->start()->synthesize('Sure, the meeting starts at five.', $ogg)->whole(), 'the voice');
 
         $pcm = (string) shell_exec('ffmpeg -loglevel error -i ' . escapeshellarg($ogg) . ' -f s16le -ac 1 -ar ' . self::RATE . ' -');
         $this->assertNotSame('', $pcm, 'The file does not decode.');

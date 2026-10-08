@@ -8,6 +8,8 @@ use App\Support\CommandFailedException;
 use App\Voice\Speech;
 use PHPUnit\Framework\TestCase;
 use React\Promise\PromiseInterface;
+use ReflectionClassConstant;
+use ReflectionProperty;
 use RuntimeException;
 use Tests\RunsOutOfFileDescriptors;
 use Tests\WaitsWithin;
@@ -38,6 +40,8 @@ final class SpeechTest extends TestCase
         $this->voices = sys_get_temp_dir() . '/speech-test-voices [' . uniqid() . ']';
         putenv("FAKE_PIPER_LOG={$this->directory}/piper.log");
         putenv("FAKE_PIPER_RUNNING={$this->directory}/piper.running");
+        putenv("FAKE_FFMPEG_RUNNING={$this->directory}/ffmpeg.running");
+        putenv("FAKE_FFMPEG_LOG={$this->directory}/ffmpeg.log");
     }
 
     protected function tearDown(): void
@@ -48,9 +52,13 @@ final class SpeechTest extends TestCase
             }
         } finally {
             // One that is still there would keep the tests from ever ending, without a word about which test left it.
-            foreach ($this->pipers() as $pid) {
+            foreach ([...$this->pipers(), ...$this->ffmpegs()] as $pid) {
                 posix_kill($pid, SIGKILL);
             }
+        }
+
+        foreach (['RUNNING', 'LOG', 'HOLD', 'HOLD_ON', 'FAILS_ON'] as $variable) {
+            putenv("FAKE_FFMPEG_{$variable}");
         }
 
         unset($_ENV['PIPER_MODEL']);
@@ -129,13 +137,13 @@ final class SpeechTest extends TestCase
         $speech->start("{$this->directory}/piper");
 
         $first = "{$this->directory}/claude-1.ogg";
-        $this->assertSame($first, $this->settled($speech->synthesize('Paris is the capital of France.', $first)));
+        $this->assertSame($first, $this->settled($this->spoken($speech, 'Paris is the capital of France.', $first)));
         $this->assertSame('Paris is the capital of France.', file_get_contents($first), "Piper's file was converted into it.");
 
         // Piper is still running for the next sentence, whenever it comes.
         delay(0.2);
         $second = "{$this->directory}/claude-2.ogg";
-        $this->assertSame($second, $this->settled($speech->synthesize('It has two million people.', $second)));
+        $this->assertSame($second, $this->settled($this->spoken($speech, 'It has two million people.', $second)));
         $this->assertSame('It has two million people.', file_get_contents($second));
 
         $this->assertCount(1, $this->pipers(), 'The voice was loaded once.');
@@ -154,7 +162,7 @@ final class SpeechTest extends TestCase
         $sentences = ['It is a quarter past four.', 'Time for a cup of tea.', 'The kettle is already on.'];
 
         $paths = $this->settled(all(array_map(
-            fn (int $number) => $speech->synthesize($sentences[$number], "{$this->directory}/claude-{$number}.ogg"),
+            fn (int $number) => $this->spoken($speech, $sentences[$number], "{$this->directory}/claude-{$number}.ogg"),
             array_keys($sentences),
         )));
 
@@ -169,8 +177,8 @@ final class SpeechTest extends TestCase
 
         // Piper speaks every line it reads into a file of its own: the next sentence would get the second line's.
         $speaking = [
-            $speech->synthesize("  Sure.\n\nIt is a quarter\r\npast\tfour. \n", "{$this->directory}/claude-1.ogg"),
-            $speech->synthesize('Time for a cup of tea.', "{$this->directory}/claude-2.ogg"),
+            $this->spoken($speech, "  Sure.\n\nIt is a quarter\r\npast\tfour. \n", "{$this->directory}/claude-1.ogg"),
+            $this->spoken($speech, 'Time for a cup of tea.', "{$this->directory}/claude-2.ogg"),
         ];
 
         $this->assertSame(
@@ -186,8 +194,8 @@ final class SpeechTest extends TestCase
 
         // Piper says nothing about a line that holds nothing but whitespace, here no-break spaces: given one, it
         // would speak the next sentence into what the bot takes for this one's file, and so on for the rest of the call.
-        $nothing = $speech->synthesize("\xC2\xA0\xC2\xA0 \t\xC2\xA0", "{$this->directory}/claude-1.ogg");
-        $next = $speech->synthesize('It is a quarter past four.', "{$this->directory}/claude-2.ogg");
+        $nothing = $this->spoken($speech, "\xC2\xA0\xC2\xA0 \t\xC2\xA0", "{$this->directory}/claude-1.ogg");
+        $next = $this->spoken($speech, 'It is a quarter past four.', "{$this->directory}/claude-2.ogg");
 
         try {
             $this->settled($nothing);
@@ -203,7 +211,7 @@ final class SpeechTest extends TestCase
         // separator, a next-line or a file separator character, and so on.
         foreach (["\xE3\x80\x80", "\xE2\x80\xA8\xE2\x80\xA9", "\xC2\x85", "\x1C\x1D\x1E\x1F", "\x0B\x0C", '', "\n\r\n", " \xE1\x9A\x80\xE2\x80\x8A\xE2\x80\xAF\xE2\x81\x9F "] as $whitespace) {
             try {
-                $this->settled($speech->synthesize($whitespace, "{$this->directory}/claude-3.ogg"));
+                $this->settled($this->spoken($speech, $whitespace, "{$this->directory}/claude-3.ogg"));
                 $this->fail('There was nothing to synthesize in ' . bin2hex($whitespace) . '.');
             } catch (RuntimeException $e) {
                 $this->assertSame('There is nothing to say in the sentence.', $e->getMessage());
@@ -212,7 +220,7 @@ final class SpeechTest extends TestCase
 
         // Inside a sentence, they are the spaces between its words: Piper gets one line. A byte that is no text
         // would end Piper, which can't read it, and becomes a question mark.
-        $path = $this->settled($speech->synthesize("Time\xE2\x80\xA8for\x1Ca\xC2\x85cup\xE3\x80\x80of\xC2\xA0tea\xFF.", "{$this->directory}/claude-4.ogg"));
+        $path = $this->settled($this->spoken($speech, "Time\xE2\x80\xA8for\x1Ca\xC2\x85cup\xE3\x80\x80of\xC2\xA0tea\xFF.", "{$this->directory}/claude-4.ogg"));
 
         $this->assertSame('Time for a cup of tea?.', file_get_contents($path));
         $this->assertTrue($speech->isRunning());
@@ -224,11 +232,11 @@ final class SpeechTest extends TestCase
         putenv('FAKE_PIPER_FAILS_ON=cup of tea');
         $speech = $this->speech();
         $speech->start("{$this->directory}/piper");
-        $this->settled($speech->synthesize('It is a quarter past four.', "{$this->directory}/claude-1.ogg"));
+        $this->settled($this->spoken($speech, 'It is a quarter past four.', "{$this->directory}/claude-1.ogg"));
 
         // Piper fails on a sentence, which ends it. The one it got after that is never spoken either.
-        $failing = $speech->synthesize('Time for a cup of tea.', "{$this->directory}/claude-2.ogg");
-        $waiting = $speech->synthesize('The kettle is already on.', "{$this->directory}/claude-3.ogg");
+        $failing = $this->spoken($speech, 'Time for a cup of tea.', "{$this->directory}/claude-2.ogg");
+        $waiting = $this->spoken($speech, 'The kettle is already on.', "{$this->directory}/claude-3.ogg");
 
         foreach ([$failing, $waiting] as $sentence) {
             try {
@@ -247,12 +255,15 @@ final class SpeechTest extends TestCase
 
         // The next sentence starts it again, where it was.
         putenv('FAKE_PIPER_FAILS_ON');
-        $path = $this->settled($speech->synthesize('The kettle is already on.', "{$this->directory}/claude-4.ogg"));
+        $path = $this->settled($this->spoken($speech, 'The kettle is already on.', "{$this->directory}/claude-4.ogg"));
 
         $this->assertSame('The kettle is already on.', file_get_contents($path));
         $this->assertTrue($speech->isRunning());
         $this->assertCount(2, $this->pipers());
         $this->assertStringContainsString("arg=--output-dir\narg={$this->directory}/piper\n", file_get_contents("{$this->directory}/piper.log"));
+        // The ffmpeg that waited is still the one that waits: one for each of the two sentences that got to one, and it.
+        delay(0.2);
+        $this->assertCount(3, $this->ffmpegs());
     }
 
     public function testWhatPiperSaidOfASentenceItSpokeIsNotWhyALaterOneFails(): void
@@ -263,10 +274,10 @@ final class SpeechTest extends TestCase
         putenv('FAKE_PIPER_FAILS_ON=cup of tea');
         $speech = $this->speech();
         $speech->start("{$this->directory}/piper");
-        $this->settled($speech->synthesize('Alice is building a game called Bananas.', "{$this->directory}/claude-1.ogg"));
+        $this->settled($this->spoken($speech, 'Alice is building a game called Bananas.', "{$this->directory}/claude-1.ogg"));
 
         try {
-            $this->settled($speech->synthesize('Time for a cup of tea.', "{$this->directory}/claude-2.ogg"));
+            $this->settled($this->spoken($speech, 'Time for a cup of tea.', "{$this->directory}/claude-2.ogg"));
             $this->fail('Synthesizing should have failed.');
         } catch (CommandFailedException $e) {
             $this->assertSame(self::FIXTURES . '/fake-piper exited with code 1: The voice model could not be loaded.', $e->getMessage());
@@ -277,12 +288,12 @@ final class SpeechTest extends TestCase
     {
         $speech = $this->speech();
         $speech->start("{$this->directory}/piper");
-        $this->settled($speech->synthesize('It is a quarter past four.', "{$this->directory}/claude-1.ogg"));
+        $this->settled($this->spoken($speech, 'It is a quarter past four.', "{$this->directory}/claude-1.ogg"));
         posix_kill($this->pipers()[0], SIGTERM);
         $this->waitUntil(fn () => ! $speech->isRunning());
 
         // Piper stopped, and the bot has no file descriptors left to start it again with.
-        $failing = $this->withoutFileDescriptors(fn () => $speech->synthesize('Time for a cup of tea.', "{$this->directory}/claude-2.ogg"));
+        $failing = $this->withoutFileDescriptors(fn () => $this->spoken($speech, 'Time for a cup of tea.', "{$this->directory}/claude-2.ogg"));
 
         try {
             $this->settled($failing);
@@ -294,7 +305,7 @@ final class SpeechTest extends TestCase
         $this->assertFalse($speech->isRunning());
 
         // The sentence after it starts Piper, now that it can be.
-        $path = $this->settled($speech->synthesize('The kettle is already on.', "{$this->directory}/claude-3.ogg"));
+        $path = $this->settled($this->spoken($speech, 'The kettle is already on.', "{$this->directory}/claude-3.ogg"));
 
         $this->assertSame('The kettle is already on.', file_get_contents($path));
         $this->assertCount(2, $this->pipers());
@@ -308,16 +319,20 @@ final class SpeechTest extends TestCase
         $this->waitUntil(fn () => count($this->pipers()) === 1);
 
         // The call ends while Piper is working on a sentence.
-        $speaking = $speech->synthesize('It is a quarter past four.', "{$this->directory}/claude-1.ogg");
+        $speaking = $this->spoken($speech, 'It is a quarter past four.', "{$this->directory}/claude-1.ogg");
         $ended = $speech->stop();
 
         $this->assertSame('It is a quarter past four.', file_get_contents($this->settled($speaking)));
 
-        // Once it has ended, nothing is left of it.
+        // Once it has ended, nothing is left of it: nor an ffmpeg waiting for a sentence that isn't coming.
         $this->assertNull($this->settled($ended));
         $this->assertFalse($speech->isRunning());
         $this->assertFalse(posix_kill($this->pipers()[0], 0));
         $this->assertDirectoryDoesNotExist("{$this->directory}/piper");
+        delay(0.2);
+        $this->assertCount(2, $this->ffmpegs(), 'The one that waited, and the one started for the sentence.');
+        $this->assertSame([false, false], array_map(fn (int $pid) => posix_kill($pid, 0), $this->ffmpegs()));
+        $this->assertFalse($speech->isReadyToEncode());
 
         // Stopping it again does nothing.
         $this->assertNull($this->settled($speech->stop()));
@@ -330,7 +345,7 @@ final class SpeechTest extends TestCase
         $speech = $this->speech();
         $speech->start("{$this->directory}/piper");
 
-        $speaking = $speech->synthesize('Time for a cup of tea.', "{$this->directory}/claude-1.ogg");
+        $speaking = $this->spoken($speech, 'Time for a cup of tea.', "{$this->directory}/claude-1.ogg");
         $ended = $speech->stop();
 
         // The sentence fails. Whoever waits for Piper to end only needs to know that it has.
@@ -349,7 +364,7 @@ final class SpeechTest extends TestCase
         $speech->start("{$this->directory}/piper");
 
         try {
-            $this->settled($speech->synthesize('It is a quarter past four.', "{$this->directory}/claude-1.ogg"));
+            $this->settled($this->spoken($speech, 'It is a quarter past four.', "{$this->directory}/claude-1.ogg"));
             $this->fail('Synthesizing should have timed out.');
         } catch (CommandFailedException $e) {
             $this->assertSame(self::FIXTURES . '/fake-piper timed out after 0.3s', $e->getMessage());
@@ -364,11 +379,11 @@ final class SpeechTest extends TestCase
         $speech = $this->speech(timeout: 0.3);
         $speech->start("{$this->directory}/piper");
 
-        $this->settled($speech->synthesize('It is a quarter past four.', "{$this->directory}/claude-1.ogg"));
+        $this->settled($this->spoken($speech, 'It is a quarter past four.', "{$this->directory}/claude-1.ogg"));
         delay(0.5);
 
         $this->assertTrue($speech->isRunning(), 'The sentence was spoken in time.');
-        $this->assertSame('Time for a cup of tea.', file_get_contents($this->settled($speech->synthesize('Time for a cup of tea.', "{$this->directory}/claude-2.ogg"))));
+        $this->assertSame('Time for a cup of tea.', file_get_contents($this->settled($this->spoken($speech, 'Time for a cup of tea.', "{$this->directory}/claude-2.ogg"))));
         $this->assertCount(1, $this->pipers());
     }
 
@@ -379,7 +394,7 @@ final class SpeechTest extends TestCase
         $speech->start("{$this->directory}/piper");
 
         try {
-            $this->settled($speech->synthesize('It is a quarter past four.', "{$this->directory}/claude-1.ogg"));
+            $this->settled($this->spoken($speech, 'It is a quarter past four.', "{$this->directory}/claude-1.ogg"));
             $this->fail('Synthesizing should have failed.');
         } catch (CommandFailedException $e) {
             $this->assertSame('true ended before it spoke the sentence', $e->getMessage());
@@ -394,7 +409,7 @@ final class SpeechTest extends TestCase
         $speech->start("{$this->directory}/piper");
 
         try {
-            $this->settled($speech->synthesize('It is a quarter past four.', "{$this->directory}/claude-1.ogg"));
+            $this->settled($this->spoken($speech, 'It is a quarter past four.', "{$this->directory}/claude-1.ogg"));
             $this->fail('Synthesizing should have failed.');
         } catch (CommandFailedException $e) {
             $this->assertStringStartsWith('/nowhere/piper exited with code 127: ', $e->getMessage());
@@ -403,13 +418,187 @@ final class SpeechTest extends TestCase
         }
     }
 
+    public function testAnFfmpegWaitsForEachSentenceBeforeTheSentenceIsThere(): void
+    {
+        $speech = $this->speech();
+        $this->assertFalse($speech->isReadyToEncode());
+
+        // Started with the call, like Piper: the first sentence of an answer doesn't wait for an ffmpeg to start.
+        $speech->start("{$this->directory}/piper");
+        $this->assertTrue($speech->isReadyToEncode());
+        $this->waitUntil(fn () => count($this->ffmpegs()) === 1);
+        $this->assertSame(
+            [
+                '-loglevel', 'error', '-probesize', '32', '-analyzeduration', '0', '-f', 'wav', '-i', 'pipe:0',
+                '-af', (new ReflectionClassConstant(Speech::class, 'TRIM'))->getValue(), '-c:a', 'libopus',
+                '-page_duration', '20000', '-flush_packets', '1', '-f', 'ogg', 'pipe:1',
+            ],
+            array_map(fn (string $line) => substr($line, 4), file("{$this->directory}/ffmpeg.log", FILE_IGNORE_NEW_LINES)),
+            'It reads the WAV file on its stdin and writes a page for each packet to its stdout, with the silence taken off.',
+        );
+
+        // The sentence takes the one that waited, and the next one is started for the sentence after it.
+        $this->settled($this->spoken($speech, 'It is a quarter past four.', "{$this->directory}/claude-1.ogg"));
+        $this->assertTrue($speech->isReadyToEncode());
+        $this->waitUntil(fn () => count($this->ffmpegs()) === 2);
+        $this->waitUntil(fn () => ! posix_kill($this->ffmpegs()[0], 0));
+        $this->assertTrue(posix_kill($this->ffmpegs()[1], 0), 'The next one waits.');
+
+        $this->settled($this->spoken($speech, 'Time for a cup of tea.', "{$this->directory}/claude-2.ogg"));
+        $this->waitUntil(fn () => count($this->ffmpegs()) === 3);
+        $this->waitUntil(fn () => ! posix_kill($this->ffmpegs()[1], 0));
+        // Those that have ended are let go: a call speaks hundreds of sentences.
+        $this->waitUntil(fn () => count((new ReflectionProperty(Speech::class, 'encoders'))->getValue($speech)) === 1);
+
+        // No sentence is coming once the call ends: the one that waited is ended with Piper.
+        $this->assertNull($this->settled($speech->stop()));
+        $this->assertFalse($speech->isReadyToEncode());
+        $this->assertSame([false, false, false], array_map(fn (int $pid) => posix_kill($pid, 0), $this->ffmpegs()));
+    }
+
+    public function testPiperIsFreeForTheNextSentenceWhileTheOneBeforeIsStillEncoded(): void
+    {
+        touch($hold = "{$this->directory}/ffmpeg.hold");
+        putenv("FAKE_FFMPEG_HOLD={$hold}");
+        putenv('FAKE_FFMPEG_HOLD_ON=quarter');
+        $speech = $this->speech();
+        $speech->start("{$this->directory}/piper");
+
+        $first = $speech->synthesize('It is a quarter past four.', "{$this->directory}/claude-1.ogg");
+        $encoded = false;
+        $first->whole()->then(function () use (&$encoded) {
+            $encoded = true;
+        });
+        $this->assertNull($this->settled($first->voiced()), 'Piper has spoken it.');
+
+        // The second sentence is spoken and encoded while the first one's ffmpeg is still working.
+        $second = $speech->synthesize('Time for a cup of tea.', "{$this->directory}/claude-2.ogg");
+        $this->settled($second->whole());
+
+        $this->assertSame('Time for a cup of tea.', file_get_contents("{$this->directory}/claude-2.ogg"));
+        $this->assertFalse($encoded);
+        $this->assertFileDoesNotExist("{$this->directory}/claude-1.ogg");
+
+        unlink($hold);
+        $this->settled($first->whole());
+        $this->assertSame('It is a quarter past four.', file_get_contents("{$this->directory}/claude-1.ogg"));
+    }
+
+    public function testStartsAnFfmpegAgainForTheNextSentenceWhenTheOneThatWaitedStopped(): void
+    {
+        $speech = $this->speech();
+        $speech->start("{$this->directory}/piper");
+        $this->waitUntil(fn () => count($this->ffmpegs()) === 1);
+        posix_kill($this->ffmpegs()[0], SIGTERM);
+        $this->waitUntil(fn () => ! $speech->isReadyToEncode());
+
+        // Nothing starts one again until there is a sentence: one that can't be started would be started for ever.
+        delay(0.2);
+        $this->assertCount(1, $this->ffmpegs());
+
+        $path = $this->settled($this->spoken($speech, 'It is a quarter past four.', "{$this->directory}/claude-1.ogg"));
+
+        $this->assertSame('It is a quarter past four.', file_get_contents($path));
+        $this->assertTrue($speech->isReadyToEncode());
+        // One for the sentence, and one for the sentence after it.
+        $this->waitUntil(fn () => count($this->ffmpegs()) === 3);
+    }
+
+    public function testASentenceGetsAnFfmpegWhenTheOneThatWaitedStopsWhilePiperSpeaksIt(): void
+    {
+        putenv('FAKE_PIPER_DELAY=0.5');
+        $speech = $this->speech();
+        $speech->start("{$this->directory}/piper");
+        $this->waitUntil(fn () => count($this->ffmpegs()) === 1);
+
+        $sentence = $speech->synthesize('It is a quarter past four.', "{$this->directory}/claude-1.ogg");
+        posix_kill($this->ffmpegs()[0], SIGTERM);
+        $this->waitUntil(fn () => ! $speech->isReadyToEncode());
+        $this->settled($sentence->whole());
+
+        $this->assertSame('It is a quarter past four.', file_get_contents("{$this->directory}/claude-1.ogg"));
+        $this->assertTrue($speech->isReadyToEncode(), 'And the next sentence has one waiting again.');
+    }
+
+    public function testASentenceFailsWhenItsFfmpegFailsAndTheNextOneIsSpoken(): void
+    {
+        putenv('FAKE_FFMPEG_FAILS_ON=cup of tea');
+        $speech = $this->speech();
+        $speech->start("{$this->directory}/piper");
+
+        $failing = $speech->synthesize('Time for a cup of tea.', "{$this->directory}/claude-1.ogg");
+        $this->assertNull($this->settled($failing->voiced()), 'Piper spoke it.');
+        // What the ffmpeg wrote before it failed had already come: the sentence had started.
+        $this->assertNull($this->settled($failing->started()));
+
+        try {
+            $this->settled($failing->whole());
+            $this->fail('Encoding should have failed.');
+        } catch (CommandFailedException $e) {
+            $this->assertSame(self::FIXTURES . '/fake-ffmpeg exited with code 1: Error while encoding.', $e->getMessage());
+        }
+
+        $this->assertSame($e, $failing->failure());
+        $this->assertFileDoesNotExist("{$this->directory}/claude-1.ogg");
+        $this->assertSame(['.', '..'], scandir("{$this->directory}/piper"), "Piper's file is gone.");
+
+        // Piper had nothing to do with it, and an ffmpeg waits for the next sentence.
+        $this->assertTrue($speech->isRunning());
+        $this->assertTrue($speech->isReadyToEncode());
+        $path = $this->settled($this->spoken($speech, 'The kettle is already on.', "{$this->directory}/claude-2.ogg"));
+        $this->assertSame('The kettle is already on.', file_get_contents($path));
+        $this->assertCount(1, $this->pipers());
+    }
+
+    public function testStopsAnFfmpegThatTakesTooLongOverASentence(): void
+    {
+        touch($hold = "{$this->directory}/ffmpeg.hold");
+        putenv("FAKE_FFMPEG_HOLD={$hold}");
+        $speech = $this->speech(timeout: 0.3);
+        $speech->start("{$this->directory}/piper");
+
+        try {
+            $this->settled($this->spoken($speech, 'It is a quarter past four.', "{$this->directory}/claude-1.ogg"));
+            $this->fail('Encoding should have timed out.');
+        } catch (CommandFailedException $e) {
+            $this->assertSame(self::FIXTURES . '/fake-ffmpeg timed out after 0.3s', $e->getMessage());
+        }
+
+        $this->assertFileDoesNotExist("{$this->directory}/claude-1.ogg");
+        $this->assertTrue($speech->isRunning(), 'Piper was in time.');
+    }
+
+    public function testIsOnlyOverOnceWhatPiperSpokeIsEncoded(): void
+    {
+        touch($hold = "{$this->directory}/ffmpeg.hold");
+        putenv("FAKE_FFMPEG_HOLD={$hold}");
+        $speech = $this->speech();
+        $speech->start("{$this->directory}/piper");
+        $sentence = $speech->synthesize('It is a quarter past four.', "{$this->directory}/claude-1.ogg");
+        $this->settled($sentence->voiced());
+
+        // The call ends while the sentence is with its ffmpeg, which goes on: a call that is over has nothing running.
+        $over = false;
+        $ended = $speech->stop()->then(function () use (&$over) {
+            $over = true;
+        });
+        $this->waitUntil(fn () => ! $speech->isRunning());
+        delay(0.2);
+        $this->assertFalse($over);
+
+        unlink($hold);
+        $this->settled($ended);
+        $this->assertSame('It is a quarter past four.', file_get_contents("{$this->directory}/claude-1.ogg"));
+        $this->waitUntil(fn () => array_filter($this->ffmpegs(), fn (int $pid) => posix_kill($pid, 0)) === []);
+    }
+
     public function testRemovesPipersFileWhenItCannotBeConverted(): void
     {
         $speech = $this->speech(ffmpeg: '/nowhere/ffmpeg');
         $speech->start("{$this->directory}/piper");
 
         try {
-            $this->settled($speech->synthesize('Paris is the capital of France.', "{$this->directory}/claude-1.ogg"));
+            $this->settled($this->spoken($speech, 'Paris is the capital of France.', "{$this->directory}/claude-1.ogg"));
             $this->fail('Synthesizing should have failed.');
         } catch (CommandFailedException $e) {
             $this->assertStringStartsWith('/nowhere/ffmpeg exited with code 127', $e->getMessage());
@@ -434,6 +623,18 @@ final class SpeechTest extends TestCase
     }
 
     /**
+     * Has the sentence spoken and converted.
+     *
+     * @return PromiseInterface<string> The path of its file, once that is complete.
+     */
+    private function spoken(Speech $speech, string $text, string $path): PromiseInterface
+    {
+        $sentence = $speech->synthesize($text, $path);
+
+        return $sentence->whole()->then(static fn () => $sentence->path);
+    }
+
+    /**
      * Waits for what Piper was asked to do, and fails the test when that takes for ever: a Piper that never
      * speaks a sentence, or never ends, would otherwise keep the tests waiting without a word.
      */
@@ -448,6 +649,16 @@ final class SpeechTest extends TestCase
     private function pipers(): array
     {
         $running = "{$this->directory}/piper.running";
+
+        return is_file($running) ? array_map(intval(...), file($running, FILE_IGNORE_NEW_LINES)) : [];
+    }
+
+    /**
+     * @return list<int> The process ID of every ffmpeg that was started to encode a sentence, oldest first.
+     */
+    private function ffmpegs(): array
+    {
+        $running = "{$this->directory}/ffmpeg.running";
 
         return is_file($running) ? array_map(intval(...), file($running, FILE_IGNORE_NEW_LINES)) : [];
     }

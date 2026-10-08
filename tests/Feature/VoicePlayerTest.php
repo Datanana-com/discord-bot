@@ -53,6 +53,24 @@ final class VoicePlayerTest extends VoiceTestCase
         $this->assertLogsNeverMention('quarter past four');
     }
 
+    public function testTheBotStartsOnASentenceWhileItsFfmpegIsStillEncodingIt(): void
+    {
+        // The sentence's ffmpeg has written the first of it, and takes its time over the rest.
+        touch($hold = "{$this->recordings}/ffmpeg.hold");
+        $this->setEnv(['VOICE_PLAYER' => 'bot']);
+        $this->setProcessEnv(['FAKE_FFMPEG_HOLD' => $hold, 'FAKE_FFMPEG_STARTS' => '1']);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        // The bot's own player takes the sentence from there, which these tests see by what it makes of their
+        // files: they hold no Ogg Opus, and it says so before the ffmpeg has ended.
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->loggedProblems() !== [], 'the player to be given the sentence');
+
+        $this->assertFileExists($hold);
+        $this->assertStringStartsWith('Voice reply failed: Could not play ', $this->loggedProblems()[0]);
+        unlink($hold);
+    }
+
     public function testOkayAndTheBotsOwnSentencesGoThroughThePlayerToo(): void
     {
         $this->setEnv(['VOICE_PLAYER' => 'bot']);
