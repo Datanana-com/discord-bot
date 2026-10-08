@@ -24,9 +24,9 @@
 | `CLAUDE_LOOKUP_MODEL` | `sonnet` | The model that looks things up in the background, with web search as its only tool: see [Looking things up](lookups.md#looking-things-up). |
 | `CLAUDE_LOOKUP_ADVISOR` | `opus` | The model the one that looks things up must consult (Claude Code's `--advisor`) for a task Claude handed off as hard; any other task is looked up without one. Leave it empty for no advisor: lookups are then faster and use less of your subscription. |
 | `CLAUDE_LOOKUP_AT_ONCE` | `2` | How many tasks are looked up at once, in all calls and chats together; the others wait for a free slot. A number below 1, or one that isn't a number, is the default. |
-| `PIPER_BINARY` | `piper` | Path to Piper. |
-| `PIPER_MODEL` | | Path to the Piper voice, e.g. `~/piper/voices/en_US-lessac-medium.onnx`. The other voices in its folder can be chosen with `/settings`. |
-| `FFMPEG_BINARY` | `ffmpeg` | Path to ffmpeg, which converts Piper's speech for Discord, and the voice messages sent in DMs for whisper.cpp. The voice library always uses the `ffmpeg` on your `PATH`. |
+| `PIPER_BINARY` | `piper` | Path to Piper, or to `kokoro/kokoro` in this repository to speak with [Kokoro](voice-calls.md#speaking-with-kokoro-instead-of-piper). |
+| `PIPER_MODEL` | | Path to the Piper voice, e.g. `~/piper/voices/en_US-lessac-medium.onnx`; with Kokoro, the file of its voice that `kokoro/install.sh` made, e.g. `kokoro/voices/af_heart.onnx`. The other voices in its folder can be chosen with `/settings`. |
+| `FFMPEG_BINARY` | `ffmpeg` | Path to ffmpeg, which converts Piper's speech for Discord, taking the silence off its start and end, and the voice messages sent in DMs for whisper.cpp. The voice library always uses the `ffmpeg` on your `PATH`. |
 | `STATS_DATABASE` | `databases/stats.sqlite` | SQLite database for the usage statistics, each server's settings, each person's privacy settings, and who opted out of being recorded. It is created on the first start. |
 | `MEMORY_PATH` | `memories` | Where the bot keeps what it remembers about each person, one file per person, and in its `groups` folder what it remembers about each group of people it has calls with. |
 
@@ -40,7 +40,7 @@
 |---|---|
 | `wake_word` | A word or short phrase: at most 32 letters, numbers, spaces, apostrophes and hyphens, starting and ending with a letter or number. List up to 5 spellings separated by commas, for what whisper writes when it mishears it: `claude, cloud, claud`. The first is the one the bot tells people to say. `none` answers everything: Discord doesn't let an option be empty. |
 | `language` | `auto`, or a whisper language code such as `en` or `pt`. With `auto`, whisper detects the language of everything said first, which makes the bot answer a second or two later. |
-| `voice` | The name of a Piper voice in the same folder as `PIPER_MODEL`, e.g. `pt_BR-faber-medium` for `pt_BR-faber-medium.onnx`. Discord lists the installed voices while you type it, and the ones that have what you typed in their name or in the simple name shown: `en_US-lessac-medium` is shown as `Lessac (en_US, medium)`. Up to 25 are listed; the name that is saved is the file's. |
+| `voice` | The name of a voice in the same folder as `PIPER_MODEL`, e.g. `pt_BR-faber-medium` for `pt_BR-faber-medium.onnx`, or `af_bella` for Kokoro's `af_bella.onnx`. Discord lists the installed voices while you type it, and the ones that have what you typed in their name or in the simple name shown: `en_US-lessac-medium` is shown as `Lessac (en_US, medium)`, and Kokoro's `af_heart` as `Heart (American English, female)`. Up to 25 are listed; the name that is saved is the file's. |
 | `model` | `haiku` (Haiku 5.5), `sonnet` or `opus`. It answers in the server's calls, writes their summaries, and answers `/recall`. |
 | `reset` | Goes back to the `.env` defaults. Other options given with it are applied after it. |
 
