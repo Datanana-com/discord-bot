@@ -265,7 +265,7 @@ final class VoiceSession
         $this->queue = resolve(null);
         $this->left = new Deferred();
         $this->pauseSeconds = self::pauseSeconds() ?? UtteranceSplitter::SILENCE_SECONDS;
-        $this->splitter = new UtteranceSplitter("{$directory}/utterances", $this->queueUtterance(...), $this->pauseSeconds);
+        $this->splitter = new UtteranceSplitter("{$directory}/utterances", $this->queueUtterance(...), $this->pauseSeconds, $this->logGaps(...));
     }
 
     /**
@@ -975,6 +975,19 @@ final class VoiceSession
         $this->track(Usage::UTTERANCE, ['user' => $userId, 'duration_ms' => $ms]);
 
         $this->inTurn($userId, fn () => $this->handleUtterance($userId, $wavPath, $endedAt, $people, $seconds, $forgotten));
+    }
+
+    /**
+     * Logs how long the gaps between the packets of an utterance were, to say how often someone goes on
+     * talking a moment after pausing. Only durations and a count, and nothing for who opted out.
+     */
+    private function logGaps(string $userId, float $longestGap, int $longGaps): void
+    {
+        if (isset($this->optedOut[$userId])) {
+            return;
+        }
+
+        $this->log('info', 'Utterance gaps', ['user' => $userId, 'longest_ms' => (int) round($longestGap * 1000), 'long_gaps' => $longGaps]);
     }
 
     /**

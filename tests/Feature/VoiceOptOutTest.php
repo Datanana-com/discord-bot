@@ -69,6 +69,7 @@ final class VoiceOptOutTest extends VoiceTestCase
         $this->assertSame('', $this->transcript($session));
         $this->assertSame([], glob("{$session->directory}/utterances/*"), 'What he was saying is deleted.');
         $this->assertSame([], $this->logged('Utterance ended'));
+        $this->assertSame([], $this->logged('Utterance gaps'), 'Nothing is logged of an utterance that was dropped.');
         $this->assertSame(0, $this->usage()['utterances']);
         $this->assertSame([['user' => '666']], array_map(fn (array $context) => array_slice($context, 2), $this->logged('Skipping a speaker who opted out')));
 

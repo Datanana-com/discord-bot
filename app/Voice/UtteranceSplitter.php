@@ -28,7 +28,10 @@ final class UtteranceSplitter
     /** Longer utterances are cut, so long monologues still get handled. */
     private const float MAX_SECONDS = 30.0;
 
-    /** @var array<string, array{writer: WavWriter, bytes: int, lastAudioAt: float}> */
+    /** A gap between two packets this long or longer is counted: it is where someone might go on after pausing. */
+    public const float LONG_GAP_SECONDS = 0.2;
+
+    /** @var array<string, array{writer: WavWriter, bytes: int, lastAudioAt: float, longestGap: float, longGaps: int}> */
     private array $utterances = [];
 
     private int $count = 0;
@@ -37,11 +40,14 @@ final class UtteranceSplitter
      * @param string $directory Where utterance WAV files are written.
      * @param Closure(string $userId, string $wavPath, float $seconds): void $onUtterance Called with each finished utterance.
      * @param float $silenceSeconds Gap in a speaker's audio that ends their utterance: longer for people who pause in the middle of a sentence.
+     * @param (Closure(string $userId, float $longestGap, int $longGaps): void)|null $onGaps Called after $onUtterance with the longest gap
+     *        between two packets inside the utterance and how many gaps were {@see LONG_GAP_SECONDS} or longer. Not for an utterance that is dropped.
      */
     public function __construct(
         private readonly string $directory,
         private readonly Closure $onUtterance,
         private readonly float $silenceSeconds = self::SILENCE_SECONDS,
+        private readonly ?Closure $onGaps = null,
     ) {
     }
 
@@ -53,8 +59,12 @@ final class UtteranceSplitter
         if (! isset($this->utterances[$userId])) {
             $writer = new WavWriter(sprintf('%s/utterance-%d.wav', $this->directory, ++$this->count));
             $writer->open();
-            $this->utterances[$userId] = ['writer' => $writer, 'bytes' => 0, 'lastAudioAt' => $now];
+            $this->utterances[$userId] = ['writer' => $writer, 'bytes' => 0, 'lastAudioAt' => $now, 'longestGap' => 0.0, 'longGaps' => 0];
         }
+
+        $gap = $now - $this->utterances[$userId]['lastAudioAt'];
+        $this->utterances[$userId]['longestGap'] = max($this->utterances[$userId]['longestGap'], $gap);
+        $this->utterances[$userId]['longGaps'] += $gap >= self::LONG_GAP_SECONDS ? 1 : 0;
 
         $this->utterances[$userId]['writer']->write($pcm);
         $this->utterances[$userId]['bytes'] += strlen($pcm);
@@ -97,7 +107,7 @@ final class UtteranceSplitter
 
     private function finish(string $userId): void
     {
-        ['writer' => $writer, 'bytes' => $bytes] = $this->utterances[$userId];
+        ['writer' => $writer, 'bytes' => $bytes, 'longestGap' => $longestGap, 'longGaps' => $longGaps] = $this->utterances[$userId];
         unset($this->utterances[$userId]);
 
         $writer->finalize();
@@ -109,5 +119,6 @@ final class UtteranceSplitter
         }
 
         ($this->onUtterance)($userId, $writer->getPath(), $bytes / self::BYTES_PER_SECOND);
+        $this->onGaps?->__invoke($userId, $longestGap, $longGaps);
     }
 }
