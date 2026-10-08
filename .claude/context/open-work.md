@@ -1,6 +1,6 @@
 # Open work
 
-Snapshot of 2026-10-07 12:15 Lisbon (master at ec45a5b). Eight PRs are open. Run `gh pr list --state open` and `git fetch` before trusting anything below; master moved four to six times a day this week.
+Snapshot of 2026-10-08 16:40 Lisbon (master at dd0fb4b). Nine PRs are open. Run `gh pr list --state open` and `git fetch` before trusting anything below; master moved four to six times a day this week.
 
 ## The PR workflow in this repo
 
@@ -12,7 +12,7 @@ Snapshot of 2026-10-07 12:15 Lisbon (master at ec45a5b). Eight PRs are open. Run
 
 ## Open PRs
 
-Nine are open, all against `master`. #35 to #42 are briefs (one empty "Start ..." commit each, no files), #38 has code on its branch, #45 is built.
+Nine are open on 2026-10-08, all against `master`: #35, #36, #37, #38, #42, #44, #46, #47 and #48. All but #46 are briefs (an empty "Start ..." commit and a description); #38 has code on its branch. #39, #40 and #41 are closed: measured, with their results in #38's description. #46 (`feature/haiku-5-5-default`, ready) is not described here.
 
 | PR | Branch | State | Holds |
 |---|---|---|---|
@@ -21,9 +21,11 @@ Nine are open, all against `master`. #35 to #42 are briefs (one empty "Start ...
 | #37 | `feature/early-whisper` | draft brief, no code | Start whisper at 0.3 s of silence, drop the text if more packets come, use it at 0.6 s (same bytes, same text). Saves up to 300 ms of whisper time (233 ms average from one call's log). **Claude is not asked early: decided.** Part 1 first: a log line per sentence with the longest gap inside it, so Sky's calls say how often the early text is thrown away. Pinned to 906c3c6. Needs #25's server (satisfied: on master); build on #35 (still open); #34's log lines (`Asked Claude`, `Claude started answering`) are on master. Part 4: the GPU drops its clock after 5 s idle (+100 to 250 ms); Sky to try NVIDIA "Prefer maximum performance" first. The brief still says "on `feature/bench`" for the whisper server and `WhisperServer.php`: it is on master. |
 | #38 | `feature/kokoro-voice` | draft brief, no code | Kokoro (82M, PyTorch, CUDA) voice `af_heart`, picked by Sky on 2026-10-06, trimmed silence accepted. Part 2 = the four measurement PRs below. Part 3 recommended: Kokoro behind a Piper-compatible wrapper (`kokoro_torch_serve.py`, WSL `~/bench-latency/round2/tts-engines/`; do not delete that folder) so `PIPER_BINARY` points at it; `/settings voice:` listing and fallback to decide. Pinned to 906c3c6. Part 3 waited for #34 (now merged; `Speech.php` is unchanged there, the bot sends the Opus packets itself). #25's bench is on master. |
 | #39 to #42 | `chore/kokoro-check-{install,startup,with-whisper,card-full}` | draft briefs, measurements only, pinned to 906c3c6 | Install from nothing in `~/kokoro` with pinned versions and offline model files; start-up time and a sentence that arrives while loading; Kokoro and whisper on the same card at once (the whisper server is on master now); the card full and no card at all (#42 fills the card on purpose: ask Sky for a time slot). Results go into #38's description. |
-| #45 | `feature/voice-autocomplete` | ready, built (2026-10-08) | `/settings voice:` is completed by Discord while it is typed, with simple names (`Lessac (en_US, medium)`, Kokoro's `af_heart` as `Heart (American English, female)`); the saved value is still the file name. `SuggestsOptions` interface, `Application::suggest()`, `VoiceLabel`. Touches `SettingsCommand`, `Application`, `docs/configuration.md` (the `voice` row, which #38 also edits: whoever merges second merges `master` in). 48 of 48 hand-made mutants killed. |
+| #44 | `feature/answer-when-asked` | draft brief, no code | Decided with Sky on 2026-10-07: conversations go everywhere, the bot answers only a sentence that names it, and Claude then gets the whole call so far (up to the lookups' 150,000 characters) instead of the last 20 lines. Part 1 measures first (what a long transcript adds to the wait, the prompt cache, the cost, how often "Claude" stands alone). Decisions for Sky: who can stop an answer, "Claude." and then the question, `/forget` during a call. Pinned to 03577cc. Its own order: #44, then #35 (which gets a new description once #44 is merged), then #37. |
+| #47 | `feature/voice-stream` | draft brief, no code (2026-10-08) | The way from Claude's sentence to the first packet: Piper gets the next sentence as soon as it wrote the one before (100 to 200 ms between sentences; part 2, mergeable alone), one encoder for the call instead of an ffmpeg per sentence (80 to 230 ms before the first sound, measured outside the bot), the player takes packets and not only a file. Part 1 measures in the bot first. Part 5 (the first words before the sentence is whole) has a stop condition: clause by clause gave 0 to 43 ms, and #41 found five words take Kokoro 232 to 274 ms. Decisions for Sky: who encodes (kept ffmpeg as a pipe, the bot through its own FFI binding since the library's `OpusFfi` only declares the decoder, or the Kokoro program), `VOICE_PLAYER=library` kept or not, the `claude-N.ogg` files. Pinned to dd0fb4b. Build after #38 (same ffmpeg step, `Speech::TRIM`). |
+| #48 | `feature/early-claude` | draft brief, no code (2026-10-08) | Ask Claude when #37's early text is there, throw the question away when the person goes on talking, and use the answer at 0.6 s only when the prompt built then is the same byte for byte. **Sky decided against this on 2026-10-06 (in #37); the brief was asked for after a wrong number.** What is left over #37 is about 70 ms on average (0 to 165), worked out from one call's log. Part 1 is measurements and Sky's decision, nothing in `app/` before it; recommended to close under about 100 ms at the median. Pinned to dd0fb4b. Build last: on #37, after #44. Does not need #47. |
 
-Merged into master, newest first: #26 background lookups follow-up (hard tasks, `LookupSlots` cap, stoppable lookups, `/forget` takes lines out of the transcript, no link previews, `composer check:lookups`), #34 own Ogg player (merge ec45a5b; it had merged master and #25 in), #25 `composer bench` with #33 the warm whisper server (merge 50b5f9e; #33 was merged into `feature/bench` first, as f2fc8bf), #31 failures said aloud and a clean exit (merge fb59d33), #28 lookups privacy and injection (906c3c6), #29 README split into `docs/`, #30 leave phrase (`disconnect <wake word>`), #32 remove old slash commands (`BOT_REMOVE_OLD_COMMANDS`), #27 wake word on a fresh install (`claude, claud` default, `WHISPER_PROMPT`).
+Merged into master, newest first: #45 voice autocomplete in `/settings` (merge dd0fb4b; `SuggestsOptions`, `Application::suggest()`, `VoiceLabel`), #26 background lookups follow-up (hard tasks, `LookupSlots` cap, stoppable lookups, `/forget` takes lines out of the transcript, no link previews, `composer check:lookups`), #34 own Ogg player (merge ec45a5b; it had merged master and #25 in), #25 `composer bench` with #33 the warm whisper server (merge 50b5f9e; #33 was merged into `feature/bench` first, as f2fc8bf), #31 failures said aloud and a clean exit (merge fb59d33), #28 lookups privacy and injection (906c3c6), #29 README split into `docs/`, #30 leave phrase (`disconnect <wake word>`), #32 remove old slash commands (`BOT_REMOVE_OLD_COMMANDS`), #27 wake word on a fresh install (`claude, claud` default, `WHISPER_PROMPT`).
 
 The briefs pin their "Where in the code" to the master of their day: #35 and #36 to 689e1ca, #37 to #42 to 906c3c6 (`git merge-base origin/master origin/<branch>`). Master has moved since: #31 (`guarded()`, `apologize()`, `abandon()`, `FailedReply::WHISPER` in `handleUtterance()`), #34 (`player()`, `Asked Claude`, `Claude started answering`, `Started speaking` at the first packet) and #25/#33 (`$seconds` in `handleUtterance()`, the server) reshaped `VoiceSession`: re-read the methods before trusting a brief's description of them.
 
@@ -32,12 +34,17 @@ The briefs pin their "Where in the code" to the master of their day: #35 and #36
 `app/Voice/VoiceSession.php` will be touched by every brief.
 
 - #35 and #37: `handleUtterance()` (:1038), `inTurn()` (:972), `UtteranceSplitter`; #35 also `hear()` (:1371) and `sayOkay()`; #36: `track()` (:1927) and `Usage`; #38: `Speech`, `synthesize()`.
+- #44: `handleUtterance()`, `inTurn()`, `openConversation()` and everything about conversations (`$conversations`, `$waiting`), `answer()`'s prompt and `$transcript`; it takes away what #35's part 2 is about.
+- #47: `Speech::synthesize()` (the ffmpeg step #38 adds `TRIM` to), the `$synthesized` and `$spoken` chains in `answer()` (which #35 also changes), `say()`, `sayOkay()`, `Player`, `OggPlayer`, `OggOpus`.
+- #48: `UtteranceSplitter` and `handleUtterance()` where #37 starts whisper early, `ask()`, `wait()`, `WaitingClaude`, and the prompt of `answer()` that #44 changes.
 
 Conflicts (`git merge-tree --write-tree`): the briefs have no code yet, so there is nothing to merge against; #35 and #37 are the pair that must be built in order. #26 is merged: `VoiceSession` now has `$lookingUp`, `dropUnwantedLookups()`, `removeFromTranscript()` and `handleUtterance(..., float $seconds, array $forgotten)`, so a brief that adds a parameter or a turn there merges against that.
 
 ## Suggested merge order
 
-1. Briefs, each merging the new master first: **#36**, then **#35**, **#37** on #35, **#38** part 3 (after #34, already in), the check PRs #39 to #42 as measurements.
+1. Briefs, each merging the new master first, in two lines that don't wait for each other:
+   - listening: **#36**, **#44**, **#35** (with the new description #44 asks for), **#37** on #35, **#48** last, and only when Sky says yes to its part 1;
+   - speaking: **#38** part 3 (with #42's measurement), then **#47**; #47's part 2 can go in before either. #35 before #47 when both are ready (the same chains in `answer()`).
 
 Whichever of two overlapping PRs merges second merges master in first and re-runs the full suite before pushing: a clean `git merge` has still broken the class (two branches each added a `$waiting` property).
 
@@ -51,6 +58,9 @@ Whichever of two overlapping PRs merges second merges master in first and re-run
 - #37: 0.3 s constant vs a variable; the NVIDIA power setting.
 - #38: how a server picks a Kokoro voice; fallback to Piper when Kokoro fails.
 - #42: a time slot when nothing else uses the card.
+- #44: who can stop an answer; "Claude." and then the question; `/forget` during a call.
+- #47: who encodes; `VOICE_PLAYER=library` kept or taken out; the `claude-N.ogg` files; pieces shorter than a sentence, after listening.
+- #48: whether it is built at all (decided against on 2026-10-06); 0.3 s or 0.2 s.
 
 ## Measured, do not retry (from the latency study, 2026-10-06)
 
