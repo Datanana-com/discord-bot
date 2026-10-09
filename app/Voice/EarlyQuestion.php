@@ -103,7 +103,6 @@ final class EarlyQuestion
             $isText ? ($this->onText)($what) : ($this->onStarted)($what);
         }
 
-        $this->held = [];
 
         return $this->asked;
     }

@@ -1107,11 +1107,12 @@ final class VoiceSession
         $heard = $this->hearing->then(fn () => $this->hearUtterance($userId, $wavPath, $endedAt, $people, $seconds, $forgotten, $from, $until, $early, $asked?->stamp));
         // What is said next is transcribed whatever became of this. Its own turn is told what did.
         $this->hearing = $heard->catch(static fn () => null);
-        // Not a question after all, or not heard: the early question is of no use, and is not kept until its turn.
-        $unusable = fn (array|Throwable|null $question) => $question === null || $question instanceof Throwable ? $this->dropQuestion($asked, 'it was not answered') : null;
-        $heard->then($unusable, $unusable);
 
-        $this->inTurn($userId, fn () => $heard->then(fn (?array $question) => $question === null ? null : $this->answerUtterance($userId, $question, $endedAt, $forgotten, $asked)));
+        // Whatever becomes of the turn, what is left of an early question that was not used is ended with it: the
+        // sentence was nothing to answer, or something changed, or it could not be transcribed.
+        $this->inTurn($userId, fn () => $heard
+            ->then(fn (?array $question) => $question === null ? null : $this->answerUtterance($userId, $question, $endedAt, $forgotten, $asked))
+            ->finally(fn () => $this->dropQuestion($asked, 'it was not answered')));
     }
 
     /**
@@ -1162,13 +1163,13 @@ final class VoiceSession
      */
     private function askEarly(string $userId, string $copy, string $text): void
     {
+        // Someone who opted out has no copy any more: optOut() dropped it with their early question.
         if (
             ($this->early[$userId]['copy'] ?? null) !== $copy
             || $this->askedEarly !== []
             || $this->turns > 0
             || $this->stopped
             || $this->leaving
-            || isset($this->optedOut[$userId])
             || ! $this->wouldAnswer($text)
         ) {
             return;
@@ -1475,7 +1476,6 @@ final class VoiceSession
 
         if ($unanswered !== null) {
             $this->log('debug', 'Not answering', ['user' => $userId, 'reason' => $unanswered]);
-            $this->dropQuestion($asked, 'it was not answered');
 
             return null;
         }
