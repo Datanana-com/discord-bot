@@ -16,6 +16,9 @@ use Discord\Voice\Recording\WavWriter;
  */
 final class UtteranceSplitter
 {
+    /** The bytes of a WAV file before its audio. */
+    private const int WAV_HEADER_BYTES = 44;
+
     /** Bytes per second of 48 kHz, 16-bit stereo PCM. */
     public const int BYTES_PER_SECOND = 48000 * 2 * 2;
 
@@ -31,10 +34,18 @@ final class UtteranceSplitter
     /** A gap between two packets this long or longer is counted: it is where someone might go on after pausing. */
     public const float LONG_GAP_SECONDS = 0.2;
 
-    /** @var array<string, array{writer: WavWriter, bytes: int, lastAudioAt: float, longestGap: float, longGaps: int}> */
+    /**
+     * How long before the end of an utterance whisper is given what was said so far: the early copy. The end is
+     * the silence that ends it, so this is the start of the last {@see EARLY_SECONDS} of it.
+     */
+    public const float EARLY_SECONDS = 0.3;
+
+    /** @var array<string, array{writer: WavWriter, bytes: int, lastAudioAt: float, longestGap: float, longGaps: int, early: bool}> */
     private array $utterances = [];
 
     private int $count = 0;
+
+    private int $copies = 0;
 
     /**
      * @param string $directory Where utterance WAV files are written.
@@ -42,12 +53,20 @@ final class UtteranceSplitter
      * @param float $silenceSeconds Gap in a speaker's audio that ends their utterance: longer for people who pause in the middle of a sentence.
      * @param (Closure(string $userId, float $longestGap, int $longGaps): void)|null $onGaps Called after $onUtterance with the longest gap
      *        between two packets inside the utterance and how many gaps were {@see LONG_GAP_SECONDS} or longer. Not for an utterance that is dropped.
+     * @param (Closure(string $userId, string $wavPath, float $seconds): void)|null $onEarly Called with a copy of what a speaker said so far, as a WAV
+     *        file of its own that is the caller's to delete, once they have been silent for all but the last {@see EARLY_SECONDS} of $silenceSeconds: it is
+     *        what the utterance will be if they say nothing more. Once for each silence, and not for an utterance too short to be kept, or when
+     *        $silenceSeconds is no longer than that. Without it, nothing is copied.
+     * @param (Closure(string $userId): void)|null $onEarlyDropped Called when the speaker goes on after $onEarly was called, which makes the copy something
+     *        they did not stop at.
      */
     public function __construct(
         private readonly string $directory,
         private readonly Closure $onUtterance,
         private readonly float $silenceSeconds = self::SILENCE_SECONDS,
         private readonly ?Closure $onGaps = null,
+        private readonly ?Closure $onEarly = null,
+        private readonly ?Closure $onEarlyDropped = null,
     ) {
     }
 
@@ -59,7 +78,13 @@ final class UtteranceSplitter
         if (! isset($this->utterances[$userId])) {
             $writer = new WavWriter(sprintf('%s/utterance-%d.wav', $this->directory, ++$this->count));
             $writer->open();
-            $this->utterances[$userId] = ['writer' => $writer, 'bytes' => 0, 'lastAudioAt' => $now, 'longestGap' => 0.0, 'longGaps' => 0];
+            $this->utterances[$userId] = ['writer' => $writer, 'bytes' => 0, 'lastAudioAt' => $now, 'longestGap' => 0.0, 'longGaps' => 0, 'early' => false];
+        }
+
+        // They are not done: the copy of what they said so far is not what they said.
+        if ($this->utterances[$userId]['early']) {
+            $this->utterances[$userId]['early'] = false;
+            $this->onEarlyDropped?->__invoke($userId);
         }
 
         $gap = $now - $this->utterances[$userId]['lastAudioAt'];
@@ -81,8 +106,12 @@ final class UtteranceSplitter
     public function flushSilent(float $now): void
     {
         foreach ($this->utterances as $userId => $utterance) {
-            if ($now - $utterance['lastAudioAt'] >= $this->silenceSeconds) {
+            $silence = $now - $utterance['lastAudioAt'];
+
+            if ($silence >= $this->silenceSeconds) {
                 $this->finish((string) $userId);
+            } elseif ($this->onEarly !== null && ! $utterance['early'] && $this->silenceSeconds > self::EARLY_SECONDS && $silence >= $this->silenceSeconds - self::EARLY_SECONDS) {
+                $this->copyEarly((string) $userId);
             }
         }
     }
@@ -95,6 +124,35 @@ final class UtteranceSplitter
         foreach (array_keys($this->utterances) as $userId) {
             $this->finish((string) $userId);
         }
+    }
+
+    /**
+     * Hands out a copy of what a speaker said so far. The recording goes on: its header is only right once it is
+     * closed, so the copy is written whole, with a header of its own.
+     */
+    private function copyEarly(string $userId): void
+    {
+        ['writer' => $writer, 'bytes' => $bytes] = $this->utterances[$userId];
+
+        // Too short to be kept: it is dropped once it is over, and whisper would hear what nobody uses.
+        if ($bytes < self::MIN_SECONDS * self::BYTES_PER_SECOND) {
+            return;
+        }
+
+        $wav = @file_get_contents($writer->getPath());
+
+        // What was written must be all there is: a copy that lacks the end of it is not what they said.
+        if ($wav === false || strlen($wav) !== self::WAV_HEADER_BYTES + $bytes) {
+            return;
+        }
+
+        $copy = new WavWriter(sprintf('%s/early-%d.wav', $this->directory, ++$this->copies));
+        $copy->open();
+        $copy->write(substr($wav, self::WAV_HEADER_BYTES));
+        $copy->finalize();
+
+        $this->utterances[$userId]['early'] = true;
+        ($this->onEarly)($userId, $copy->getPath(), $bytes / self::BYTES_PER_SECOND);
     }
 
     private function finish(string $userId): void

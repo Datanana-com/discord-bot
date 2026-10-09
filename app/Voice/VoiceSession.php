@@ -219,6 +219,13 @@ final class VoiceSession
     /** @var array<string, string> Whose each clip of what was said is, by path, while it waits to be transcribed. */
     private array $clips = [];
 
+    /**
+     * @var array<string, array{text: PromiseInterface<string>, since: int, copy: string}> What whisper was given of
+     *      what each person is saying while they pause, by user ID: the text (it rejects when it can't be had), since
+     *      when (hrtime nanoseconds), and the path of the copy. See {@see transcribeEarly()}.
+     */
+    private array $early = [];
+
     /** @var array<string, array<int, string>> What was said while the same people were in the call, by the key of their memory: entries of the transcript, by their number. */
     private array $said = [];
 
@@ -318,7 +325,7 @@ final class VoiceSession
         $this->left = new Deferred();
         $this->pauseSeconds = self::pauseSeconds() ?? UtteranceSplitter::SILENCE_SECONDS;
         $this->firstWords = self::firstWords() ?? 0;
-        $this->splitter = new UtteranceSplitter("{$directory}/utterances", $this->queueUtterance(...), $this->pauseSeconds, $this->logGaps(...));
+        $this->splitter = new UtteranceSplitter("{$directory}/utterances", $this->queueUtterance(...), $this->pauseSeconds, $this->logGaps(...), $this->transcriber->server === null ? null : $this->transcribeEarly(...), $this->dropEarly(...));
     }
 
     /**
@@ -615,6 +622,9 @@ final class VoiceSession
                 unset($session->audio[$userId]);
             }
 
+            // Whisper may be hearing the start of what they are saying: none of it is used.
+            $session->dropEarly($userId, logged: false);
+
             // So are the clips of what they said that wait for whisper, behind what was said before them. One
             // being transcribed is deleted once whisper is done with it, and what whisper heard is dropped.
             foreach (array_keys($session->clips, $userId, true) as $clip) {
@@ -851,6 +861,8 @@ final class VoiceSession
 
         // The queue gets here once everything said is transcribed, so the summary includes the last thing said.
         return $this->queue = $this->queue
+            // Whisper may still be hearing what someone who opted out was saying: the server ends with the call.
+            ->then(fn () => $this->hearing)
             ->then($this->summarize(...))
             ->catch(function (Throwable $e) {
                 $this->log('warning', 'Could not summarize the call: ' . $e->getMessage());
@@ -963,7 +975,7 @@ final class VoiceSession
             // Checked for each bit of audio: someone can opt out, or back in, during the call.
             $stream?->on('pcm', $this->guarded(function (string $pcm) use ($userId) {
                 if (! isset($this->optedOut[$userId])) {
-                    $now = microtime(true);
+                    $now = hrtime(true) / 1e9;
                     $this->splitter->push($userId, $pcm, $now);
                     $this->hear($userId, $pcm, $now);
                 }
@@ -993,7 +1005,7 @@ final class VoiceSession
         // Often enough for the wait after someone's last word to be the pause itself, and little more.
         $this->ticker = $this->discord->getLoop()->addPeriodicTimer(
             0.05,
-            $this->guarded(fn () => $this->splitter->flushSilent(microtime(true))),
+            $this->guarded(fn () => $this->splitter->flushSilent(hrtime(true) / 1e9)),
         );
 
         // Also clean up when someone else disconnects the bot from the call.
@@ -1059,12 +1071,66 @@ final class VoiceSession
         $this->log('info', 'Utterance ended', ['user' => $userId, 'ms' => $ms]);
         $this->track(Usage::UTTERANCE, ['user' => $userId, 'duration_ms' => $ms]);
 
+        // Whisper has the text already, if it was given what they said so far and they have not said a word since.
+        $early = $this->early[$userId]['text'] ?? null;
+        unset($this->early[$userId]);
+
         // Transcribed now, or once what was said before it is: not when its turn comes, behind every answer before it.
-        $heard = $this->hearing->then(fn () => $this->hearUtterance($userId, $wavPath, $endedAt, $people, $seconds, $forgotten, $from, $until));
+        $heard = $this->hearing->then(fn () => $this->hearUtterance($userId, $wavPath, $endedAt, $people, $seconds, $forgotten, $from, $until, $early));
         // What is said next is transcribed whatever became of this. Its own turn is told what did.
         $this->hearing = $heard->catch(static fn () => null);
 
         $this->inTurn($userId, fn () => $heard->then(fn (?array $question) => $question === null ? null : $this->answerUtterance($userId, $question, $endedAt, $forgotten)));
+    }
+
+    /**
+     * Gives whisper what someone said so far, while they pause, for the sentence's end to find the text ready. It is
+     * a copy: they may go on, and then none of it is used ({@see dropEarly()}). The whisper server hears it, on
+     * {@see $hearing} like everything it hears: it takes one request at a time, and one that waits for it is
+     * given up when the server doesn't answer in time. A copy that is dropped before its turn is never sent. Only the
+     * server hears it ({@see Transcriber::transcribeEarly()}): without one that is ready, the sentence is
+     * transcribed once it is over, as it always was.
+     *
+     * @param string $wavPath The copy, which is deleted here.
+     */
+    private function transcribeEarly(string $userId, string $wavPath, float $seconds): void
+    {
+        // They opted out while pausing.
+        if (isset($this->optedOut[$userId])) {
+            @unlink($wavPath);
+
+            return;
+        }
+
+        // A copy that was dropped while it waited for whisper to hear what was said before it is gone: the server
+        // can't read it, and nothing is sent.
+        $text = $this->hearing->then(fn () => $this->transcriber->transcribeEarly($wavPath, $seconds)->finally(fn () => @unlink($wavPath)));
+        // What is heard next waits for it, whatever became of it: whoever wanted it is told.
+        $this->hearing = $text->catch(static fn () => null);
+        $this->early[$userId] = ['text' => $text, 'since' => hrtime(true), 'copy' => $wavPath];
+    }
+
+    /**
+     * Throws away what whisper is hearing of what someone is saying, because they went on, or opted out: the copy is
+     * deleted, and the text that comes is never used. The next time they pause, whisper is given what they said
+     * so far again.
+     *
+     * @param bool $logged Whether to say so in the log: not when they opted out, which says nothing about them.
+     */
+    private function dropEarly(string $userId, bool $logged = true): void
+    {
+        if (! isset($this->early[$userId])) {
+            return;
+        }
+
+        ['since' => $since, 'copy' => $copy] = $this->early[$userId];
+        unset($this->early[$userId]);
+        // Whisper may have it by now. If it is still waiting for its turn, it finds the copy gone.
+        @unlink($copy);
+
+        if ($logged) {
+            $this->log('info', 'Dropped an early transcription', ['user' => $userId, 'after_ms' => (int) round((hrtime(true) - $since) / 1e6)]);
+        }
     }
 
     /**
@@ -1161,10 +1227,12 @@ final class VoiceSession
      * @param array<string, int> $forgotten How often each memory had been forgotten when it was said.
      * @param float $from When they started saying it, by the clock that only goes forward: see {@see CALLED_SECONDS}.
      * @param float $until When they stopped, by the same clock.
+     * @param PromiseInterface<string>|null $early What whisper was given of it while they paused, when nothing was said since:
+     *        see {@see transcribeEarly()}. It is used instead of asking whisper again, unless it failed.
      * @return PromiseInterface<array{name: string, text: string, said: string, people: list<string>|null, forgotten: array<string, int>, replaced: int}|null>
      *         The question in it, when it is one for the bot. It rejects when it can't be transcribed.
      */
-    private function hearUtterance(string $userId, string $wavPath, float $endedAt, ?array $people, float $seconds, array $forgotten, float $from, float $until): PromiseInterface
+    private function hearUtterance(string $userId, string $wavPath, float $endedAt, ?array $people, float $seconds, array $forgotten, float $from, float $until, ?PromiseInterface $early = null): PromiseInterface
     {
         // They opted out while this waited for whisper, and it was deleted then.
         if (! isset($this->clips[$wavPath])) {
@@ -1174,11 +1242,22 @@ final class VoiceSession
         unset($this->clips[$wavPath]);
         $transcribing = microtime(true);
 
-        return $this->transcriber->transcribe($wavPath, $seconds, $this->log(...))
+        $usedEarly = false;
+
+        return ($early ?? resolve(null))
+            // It failed: the sentence is transcribed as it would be without it.
+            ->catch(static fn () => null)
+            ->then(function (?string $text) use ($wavPath, $seconds, &$usedEarly): string|PromiseInterface {
+                $usedEarly = $text !== null;
+
+                return $text ?? $this->transcriber->transcribe($wavPath, $seconds, $this->log(...));
+            })
             ->finally(fn () => unlink($wavPath))
             ->catch(fn (Throwable $e) => throw new FailedReply(FailedReply::WHISPER, $e))
-            ->then(function (string $text) use ($userId, $endedAt, $transcribing, $people, $forgotten, $from, $until): ?array {
-                $this->log('info', 'Transcribed', ['user' => $userId, 'ms' => $this->msSince($transcribing), 'characters' => mb_strlen($text)]);
+            ->then(function (string $text) use ($userId, $endedAt, $transcribing, $people, $forgotten, $from, $until, &$usedEarly): ?array {
+                // The text of an early start was there while they paused, or soon after: what the sentence waited for is what is left.
+                $ms = $usedEarly ? (int) round((hrtime(true) / 1e9 - $until) * 1000) : $this->msSince($transcribing);
+                $this->log('info', 'Transcribed', ['user' => $userId, 'ms' => $ms, 'characters' => mb_strlen($text), 'early' => $usedEarly]);
 
                 // Nothing was said, or they opted out while it was transcribed.
                 if ($text === '' || isset($this->optedOut[$userId])) {

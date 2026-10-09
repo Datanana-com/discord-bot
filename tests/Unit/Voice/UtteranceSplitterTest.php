@@ -22,6 +22,12 @@ final class UtteranceSplitterTest extends TestCase
     /** @var list<array{string, float, int}> */
     private array $gaps = [];
 
+    /** @var list<array{string, string, float}> What the early splitter handed out: who, the copy, how long. */
+    private array $copies = [];
+
+    /** @var list<string> Who went on after the early splitter handed out a copy. */
+    private array $drops = [];
+
     protected function setUp(): void
     {
         $this->directory = sys_get_temp_dir() . '/splitter-test-' . uniqid();
@@ -204,6 +210,205 @@ final class UtteranceSplitterTest extends TestCase
         $this->assertCount(1, $this->gaps, 'The first 30 seconds are over, and report their gaps.');
         $this->assertSame(1, $this->gaps[0][2]);
         $this->assertEqualsWithDelta(0.52, $this->gaps[0][1], 0.001);
+    }
+
+    public function testHandsOutACopyOfWhatWasSaidOnceTheLastOfTheSilenceBegins(): void
+    {
+        $splitter = $this->earlySplitter();
+        $this->speak('alice', from: 0.0, seconds: 1.0, splitter: $splitter);
+
+        // Her last audio arrived at 0.98 s.
+        $splitter->flushSilent(1.27);
+        $this->assertSame([], $this->copies, '0.29 s of silence is not yet 0.3 s.');
+
+        $splitter->flushSilent(1.29);
+        $this->assertCount(1, $this->copies);
+        [$userId, $copyPath, $seconds] = $this->copies[0];
+        $this->assertSame('alice', $userId);
+        $this->assertSame(1.0, $seconds);
+        $this->assertValidWav($copyPath, seconds: 1.0);
+        $this->assertSame([], $this->utterances, 'She is not done: the recording goes on.');
+
+        $splitter->flushSilent(1.5);
+        $this->assertCount(1, $this->copies, 'Once for each silence.');
+
+        $splitter->flushSilent(1.6);
+        $this->assertCount(1, $this->utterances);
+        $this->assertSame(file_get_contents($this->utterances[0][1]), file_get_contents($copyPath), 'It is what the utterance is, byte for byte.');
+        $this->assertSame([], $this->drops);
+    }
+
+    public function testTheCopyIsAFileOfItsOwnThatTheCallerDeletes(): void
+    {
+        $splitter = $this->earlySplitter();
+        $this->speak('alice', from: 0.0, seconds: 1.0, splitter: $splitter);
+        $splitter->flushSilent(1.3);
+
+        $this->assertNotSame($this->copies[0][1], glob("{$this->directory}/utterance-*.wav")[0]);
+        unlink($this->copies[0][1]);
+        $splitter->flushSilent(1.6);
+        $this->assertValidWav($this->utterances[0][1], seconds: 1.0);
+    }
+
+    public function testTheCopyIsDroppedWhenSheGoesOnAndAnotherIsHandedOutAtTheNextSilence(): void
+    {
+        $splitter = $this->earlySplitter();
+        $this->speak('alice', from: 0.0, seconds: 1.0, splitter: $splitter);
+        $splitter->flushSilent(1.3);
+        $this->assertSame([], $this->drops);
+
+        // She goes on after 0.34 s.
+        $this->speak('alice', from: 1.32, seconds: 1.0, splitter: $splitter);
+        $this->assertSame(['alice'], $this->drops, 'Told once, with her first packet.');
+        $this->assertCount(1, $this->copies);
+
+        // Her last audio arrived at 2.30 s.
+        $splitter->flushSilent(2.5);
+        $this->assertCount(1, $this->copies, '0.2 s of silence.');
+        $splitter->flushSilent(2.63);
+        $this->assertCount(2, $this->copies, 'The next silence starts another.');
+        $this->assertNotSame($this->copies[0][1], $this->copies[1][1], 'Another file: the first may still be read.');
+        $this->assertEqualsWithDelta(2.0, $this->copies[1][2], 0.001);
+
+        $splitter->flushSilent(3.0);
+        $this->assertCount(1, $this->utterances);
+        $this->assertSame(['alice'], $this->drops);
+        $this->assertSame(file_get_contents($this->utterances[0][1]), file_get_contents($this->copies[1][1]));
+    }
+
+    public function testNothingIsHandedOutForWhatIsTooShortToBeKept(): void
+    {
+        $splitter = $this->earlySplitter();
+        $this->speak('alice', from: 0.0, seconds: 0.48, splitter: $splitter);
+
+        $splitter->flushSilent(1.0);
+        $this->assertSame([], $this->copies);
+        $this->assertSame([], $this->utterances);
+        $this->assertSame([], $this->drops);
+
+        // Just long enough: 0.5 s of audio.
+        $this->speak('bob', from: 2.0, seconds: 0.5, splitter: $splitter);
+        $splitter->flushSilent(2.8);
+        $this->assertSame(['bob'], array_column($this->copies, 0));
+    }
+
+    public function testASentenceThatIsCutAtTheLongestLengthHasNoCopyToUse(): void
+    {
+        $splitter = $this->earlySplitter();
+        $this->speak('alice', from: 0.0, seconds: 29.0, splitter: $splitter);
+        $splitter->flushSilent(29.4);
+        $this->assertCount(1, $this->copies);
+
+        $this->speak('alice', from: 29.42, seconds: 2.0, splitter: $splitter);
+
+        $this->assertSame(['alice'], $this->drops, 'She went on: the copy is dropped before the cut.');
+        $this->assertCount(1, $this->utterances);
+        $this->assertValidWav($this->utterances[0][1], seconds: 30.0);
+        $this->assertNotSame(file_get_contents($this->copies[0][1]), file_get_contents($this->utterances[0][1]));
+    }
+
+    public function testStartsAtTheLastOfTheSilenceThatEndsAnUtteranceWhateverItsLength(): void
+    {
+        $splitter = $this->earlySplitter(silenceSeconds: 1.5);
+        $this->speak('alice', from: 0.0, seconds: 1.0, splitter: $splitter);
+
+        $splitter->flushSilent(2.15);
+        $this->assertSame([], $this->copies, '1.17 s of silence, and the last 0.3 s of 1.5 s is from 1.2 s.');
+        $splitter->flushSilent(2.19);
+        $this->assertCount(1, $this->copies);
+    }
+
+    public function testNothingIsHandedOutWhenTheSilenceThatEndsAnUtteranceIsNoLongerThanTheLastOfIt(): void
+    {
+        $splitter = $this->earlySplitter(silenceSeconds: 0.3);
+        $this->speak('alice', from: 0.0, seconds: 1.0, splitter: $splitter);
+
+        $splitter->flushSilent(1.27);
+        $this->assertSame([], $this->copies);
+        $this->assertSame([], $this->utterances);
+
+        $splitter->flushSilent(1.29);
+        $this->assertSame([], $this->copies, 'It ends at 0.3 s of silence, and has no time left before it.');
+        $this->assertCount(1, $this->utterances);
+    }
+
+    public function testHandsOutACopyForEachSpeakerWhenTheirSilenceBegins(): void
+    {
+        $splitter = $this->earlySplitter();
+        $this->speak('alice', from: 0.0, seconds: 1.0, splitter: $splitter);
+        $this->speak('bob', from: 0.2, seconds: 1.0, splitter: $splitter);
+
+        // Alice was silent from 0.98 s, Bob from 1.18 s.
+        $splitter->flushSilent(1.3);
+        $this->assertSame(['alice'], array_column($this->copies, 0));
+
+        $splitter->flushSilent(1.5);
+        $this->assertSame(['alice', 'bob'], array_column($this->copies, 0));
+
+        $this->speak('bob', from: 1.52, seconds: 0.5, splitter: $splitter);
+        $this->assertSame(['bob'], $this->drops, 'Only the copy of who went on is dropped.');
+    }
+
+    public function testEndsAnUtteranceWithACopyInProgressWhenEverythingIsFinished(): void
+    {
+        $splitter = $this->earlySplitter();
+        $this->speak('alice', from: 0.0, seconds: 1.0, splitter: $splitter);
+        $splitter->flushSilent(1.3);
+
+        $splitter->flushAll();
+
+        $this->assertCount(1, $this->utterances);
+        $this->assertSame(file_get_contents($this->utterances[0][1]), file_get_contents($this->copies[0][1]));
+    }
+
+    public function testHandsOutNothingWhenTheRecordingIsGoneAndGoesOnWithoutIt(): void
+    {
+        $splitter = $this->earlySplitter();
+        $this->speak('alice', from: 0.0, seconds: 1.0, splitter: $splitter);
+        array_map(unlink(...), glob("{$this->directory}/utterance-*.wav"));
+
+        $splitter->flushSilent(1.3);
+
+        $this->assertSame([], $this->copies, 'There is nothing to copy.');
+        $this->assertSame([], glob("{$this->directory}/early-*.wav"));
+        $this->speak('alice', from: 1.32, seconds: 0.1, splitter: $splitter);
+        $this->assertSame([], $this->drops, 'Nothing was handed out, so nothing is dropped.');
+    }
+
+    public function testHandsOutNothingWhenTheRecordingLacksTheEndOfWhatWasSaid(): void
+    {
+        $splitter = $this->earlySplitter();
+        $this->speak('alice', from: 0.0, seconds: 1.0, splitter: $splitter);
+        $recording = glob("{$this->directory}/utterance-*.wav")[0];
+        file_put_contents($recording, substr(file_get_contents($recording), 0, -100));
+
+        $splitter->flushSilent(1.3);
+
+        $this->assertSame([], $this->copies, 'A copy that lacks the end is not what she said.');
+        $this->assertSame([], glob("{$this->directory}/early-*.wav"));
+    }
+
+    public function testHandsOutNothingWithoutAnythingToHandItTo(): void
+    {
+        $this->speak('alice', from: 0.0, seconds: 1.0);
+
+        $this->splitter->flushSilent(1.3);
+
+        $this->assertSame([], glob("{$this->directory}/early-*.wav"));
+    }
+
+    /**
+     * A splitter that hands out copies, with where they go.
+     */
+    private function earlySplitter(float $silenceSeconds = UtteranceSplitter::SILENCE_SECONDS): UtteranceSplitter
+    {
+        return new UtteranceSplitter($this->directory, function (string $userId, string $wavPath, float $seconds) {
+            $this->utterances[] = [$userId, $wavPath, $seconds];
+        }, $silenceSeconds, onEarly: function (string $userId, string $wavPath, float $seconds) {
+            $this->copies[] = [$userId, $wavPath, $seconds];
+        }, onEarlyDropped: function (string $userId) {
+            $this->drops[] = $userId;
+        });
     }
 
     /**
