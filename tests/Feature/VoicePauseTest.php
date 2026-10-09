@@ -134,7 +134,8 @@ final class VoicePauseTest extends VoiceTestCase
     private function aliceSpeaks(VoiceClient $vc): void
     {
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
-        $this->spokeAt = microtime(true);
+        // The clock the bot counts the silence with: the wall clock of a machine steps, and the monotonic one runs at its own pace.
+        $this->spokeAt = hrtime(true) / 1e9;
     }
 
     /**
@@ -147,8 +148,8 @@ final class VoicePauseTest extends VoiceTestCase
      */
     private function overAfter(float $seconds, float $pause): bool
     {
-        $this->runFor(max(0.0, $seconds - (microtime(true) - $this->spokeAt)));
-        $silent = microtime(true) - $this->spokeAt;
+        $this->runFor(max(0.0, $seconds - (hrtime(true) / 1e9 - $this->spokeAt)));
+        $silent = hrtime(true) / 1e9 - $this->spokeAt;
         $this->timers->elapse(0.05);
 
         return $this->logged('Utterance ended') !== [] && ($seconds >= $pause || $silent < $pause - 0.1);

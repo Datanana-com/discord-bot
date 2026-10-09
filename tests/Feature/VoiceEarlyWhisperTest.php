@@ -169,6 +169,47 @@ final class VoiceEarlyWhisperTest extends VoiceTestCase
         $this->assertSame('', $this->transcript($session));
     }
 
+    public function testTheCopyOfSomeoneWhoOptsOutAfterTheirSentenceEndedIsNotSentEither(): void
+    {
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => 'Sounds good.']);
+        [$session, $vc] = $this->callWithServer();
+
+        // Bob's request is with the server, held, and Alice's copy waits behind it.
+        touch($this->whisperHold);
+        $this->speak($vc, ssrc: 666, userId: '666', seconds: 1.0);
+        $this->waitUntil(fn () => count($this->serverRequests()) === 2, 'whisper to be given what Bob said');
+        $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => count($this->logged('Utterance ended')) === 2, 'both sentences to be over');
+        $this->assertCount(2, $this->serverRequests());
+
+        VoiceSession::optOut('555');
+        $this->assertFileExists("{$session->directory}/utterances/early-1.wav", 'Bob\'s copy is with the server.');
+        $this->assertFileDoesNotExist("{$session->directory}/utterances/early-2.wav", 'Her copy is gone, though its sentence is over.');
+        $this->transcribe();
+        $this->waitUntil(fn () => $this->logged('Transcribed') !== [], 'Bob to be transcribed');
+        $this->runFor(0.5);
+
+        $this->assertCount(2, $this->serverRequests(), 'Her copy was never sent.');
+        $this->assertSame(['666'], array_column($this->logged('Transcribed'), 'user'));
+        $this->assertSame("Bob: Sounds good.\n", $this->untimed($this->transcript($session)));
+        $this->assertSame([], glob("{$session->directory}/utterances/*"));
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testOptingOutAfterTheCopyWasHeardHasNothingLeftToDelete(): void
+    {
+        [$session, $vc] = $this->callWithServer();
+
+        $this->says($vc, '555', 'Sounds good.');
+        $this->waitUntil(fn () => $this->logged('Transcribed') !== [], 'it to be transcribed');
+
+        // The copy was deleted when whisper had heard it: deleting it again would be a PHP warning, which fails the run.
+        VoiceSession::optOut('555');
+
+        $this->assertSame([], glob("{$session->directory}/utterances/*"));
+        $this->assertSame([], $this->loggedProblems());
+    }
+
     public function testTheCallEndsWithTheSentenceInProgressTranscribedFromTheEarlyText(): void
     {
         [$session, $vc] = $this->callWithServer();
@@ -280,7 +321,8 @@ final class VoiceEarlyWhisperTest extends VoiceTestCase
 
         $this->speak($vc, ssrc: 555, userId: '555', seconds: 29.0);
         $this->waitUntil(fn () => count($this->serverRequests()) === 2, 'whisper to be given the first 29 seconds');
-        $this->runFor(0.2);
+        // Whisper has answered, and the copy is deleted: she goes on within the 0.3 s that are left of the pause.
+        $this->waitUntil(fn () => glob("{$session->directory}/utterances/early-*") === [], 'whisper to have answered');
         // She goes on, to the end of the 30 seconds that are cut off at once: they are not the 29 whisper heard, though it is back with them.
         $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.2);
         $this->waitUntil(fn () => $this->logged('Transcribed') !== [], 'the 30 seconds to be transcribed');
@@ -299,7 +341,7 @@ final class VoiceEarlyWhisperTest extends VoiceTestCase
 
         $this->assertFileExists($this->cliLog, 'whisper-cli transcribed it.');
         $this->assertFalse($this->logged('Transcribed')[0]['early']);
-        $this->assertSame(0, (new ReflectionProperty(UtteranceSplitter::class, 'copies'))->getValue((new ReflectionProperty(VoiceSession::class, 'splitter'))->getValue($session)), 'Nothing was even copied.');
+        $this->assertSame(0, $this->copiesMade($session), 'Nothing was even copied.');
         $this->assertSame([], glob("{$session->directory}/utterances/*"));
     }
 
@@ -314,6 +356,7 @@ final class VoiceEarlyWhisperTest extends VoiceTestCase
         $this->assertFileExists($this->cliLog, 'whisper-cli transcribed it.');
         $this->assertFalse($this->logged('Transcribed')[0]['early']);
         $this->assertSame([], $this->logged('Dropped an early transcription'));
+        $this->assertSame(0, $this->copiesMade($session), 'There was never a server to hear a copy.');
         $this->assertSame([], glob("{$session->directory}/utterances/*"));
     }
 
@@ -325,6 +368,7 @@ final class VoiceEarlyWhisperTest extends VoiceTestCase
         $this->ask($vc, '555', 'Hey Claude, what time is it?');
 
         $this->assertFalse($this->logged('Transcribed')[0]['early']);
+        $this->assertSame(0, $this->copiesMade($session), 'Nothing is copied to be thrown away while the server loads.');
         $this->assertFileExists($this->cliLog, 'whisper-cli transcribed it.');
         $this->assertSame([], glob("{$session->directory}/utterances/*"));
         await($session->stop());
@@ -341,6 +385,14 @@ final class VoiceEarlyWhisperTest extends VoiceTestCase
         $this->waitUntil(fn () => $this->logged('Whisper server ready') !== [], 'the whisper server to be ready');
 
         return [$session, $vc];
+    }
+
+    /**
+     * @return int How many copies of what was said so far the call has made, to give to whisper.
+     */
+    private function copiesMade(VoiceSession $session): int
+    {
+        return (new ReflectionProperty(UtteranceSplitter::class, 'copies'))->getValue((new ReflectionProperty(VoiceSession::class, 'splitter'))->getValue($session));
     }
 
     /**

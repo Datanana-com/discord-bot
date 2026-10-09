@@ -143,7 +143,7 @@ Piper speaks the question, "Hey Claude, tell me in two short sentences why peopl
 | Step | |
 |---|---|
 | waiting for silence | From the end of the question to the bot taking it as over. |
-| whisper | Transcribing the question. Compared. |
+| whisper | How long the bot waited for the text of the question once it was over (`Transcribed` `ms`). Whisper's whole time when it is only started then (no whisper server, or a pause of 0.3 s or less); what is left of it when it was started during the pause, which is 0 to a few ms when it had finished: then the step can hide a slower whisper, and the step below is the one that shows it. Compared. |
 | Claude, the whole answer | From asking Claude to its whole answer. Compared. |
 | from the utterance to the first sentence spoken | `Started speaking` in the log: the first packet of the answer, with the bot's own player (`VOICE_PLAYER=bot`, the default), whose packets the bench's voice client collects instead of sending. |
 | from the end of the question to the first sentence spoken | What someone in the call waits for. Compared. |

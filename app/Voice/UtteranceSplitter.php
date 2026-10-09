@@ -102,15 +102,18 @@ final class UtteranceSplitter
 
     /**
      * Finishes the utterances of everyone who has been silent long enough.
+     *
+     * @param bool $early Whether a copy of what is said so far may be handed out to those who are not: false while
+     *                    nothing is there to hear it, so that no copy is made to be thrown away.
      */
-    public function flushSilent(float $now): void
+    public function flushSilent(float $now, bool $early = true): void
     {
         foreach ($this->utterances as $userId => $utterance) {
             $silence = $now - $utterance['lastAudioAt'];
 
             if ($silence >= $this->silenceSeconds) {
                 $this->finish((string) $userId);
-            } elseif ($this->onEarly !== null && ! $utterance['early'] && $this->silenceSeconds > self::EARLY_SECONDS && $silence >= $this->silenceSeconds - self::EARLY_SECONDS) {
+            } elseif ($early && $this->onEarly !== null && ! $utterance['early'] && $this->silenceSeconds > self::EARLY_SECONDS && $silence >= $this->silenceSeconds - self::EARLY_SECONDS) {
                 $this->copyEarly((string) $userId);
             }
         }

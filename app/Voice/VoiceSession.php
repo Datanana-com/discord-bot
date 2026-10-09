@@ -1005,7 +1005,7 @@ final class VoiceSession
         // Often enough for the wait after someone's last word to be the pause itself, and little more.
         $this->ticker = $this->discord->getLoop()->addPeriodicTimer(
             0.05,
-            $this->guarded(fn () => $this->splitter->flushSilent(hrtime(true) / 1e9)),
+            $this->guarded(fn () => $this->splitter->flushSilent(hrtime(true) / 1e9, early: $this->transcriber->server?->isReady() === true)),
         );
 
         // Also clean up when someone else disconnects the bot from the call.
@@ -1088,8 +1088,8 @@ final class VoiceSession
      * a copy: they may go on, and then none of it is used ({@see dropEarly()}). The whisper server hears it, on
      * {@see $hearing} like everything it hears: it takes one request at a time, and one that waits for it is
      * given up when the server doesn't answer in time. A copy that is dropped before its turn is never sent. Only the
-     * server hears it ({@see Transcriber::transcribeEarly()}): without one that is ready, the sentence is
-     * transcribed once it is over, as it always was.
+     * server hears it ({@see Transcriber::transcribeEarly()}), and no copy is made while it isn't ready: the sentence
+     * is transcribed once it is over, as it always was.
      *
      * @param string $wavPath The copy, which is deleted here.
      */
@@ -1102,9 +1102,14 @@ final class VoiceSession
             return;
         }
 
-        // A copy that was dropped while it waited for whisper to hear what was said before it is gone: the server
-        // can't read it, and nothing is sent.
-        $text = $this->hearing->then(fn () => $this->transcriber->transcribeEarly($wavPath, $seconds)->finally(fn () => @unlink($wavPath)));
+        // Like a clip that waits for whisper: opting out deletes it, also after the sentence ended and this entry is
+        // gone. A copy that is gone, or that was dropped while it waited for whisper to hear what was said before
+        // it, can't be read by the server: nothing is sent.
+        $this->clips[$wavPath] = $userId;
+        $text = $this->hearing->then(fn () => $this->transcriber->transcribeEarly($wavPath, $seconds)->finally(function () use ($wavPath) {
+            unset($this->clips[$wavPath]);
+            @unlink($wavPath);
+        }));
         // What is heard next waits for it, whatever became of it: whoever wanted it is told.
         $this->hearing = $text->catch(static fn () => null);
         $this->early[$userId] = ['text' => $text, 'since' => hrtime(true), 'copy' => $wavPath];
@@ -1127,6 +1132,7 @@ final class VoiceSession
         unset($this->early[$userId]);
         // Whisper may have it by now. If it is still waiting for its turn, it finds the copy gone.
         @unlink($copy);
+        unset($this->clips[$copy]);
 
         if ($logged) {
             $this->log('info', 'Dropped an early transcription', ['user' => $userId, 'after_ms' => (int) round((hrtime(true) - $since) / 1e6)]);

@@ -388,6 +388,19 @@ final class UtteranceSplitterTest extends TestCase
         $this->assertSame([], glob("{$this->directory}/early-*.wav"));
     }
 
+    public function testHandsOutNothingWhileTheCallerSaysNothingIsThereToHearIt(): void
+    {
+        $splitter = $this->earlySplitter();
+        $this->speak('alice', from: 0.0, seconds: 1.0, splitter: $splitter);
+
+        $splitter->flushSilent(1.3, early: false);
+        $this->assertSame([], $this->copies);
+        $this->assertSame([], glob("{$this->directory}/early-*.wav"));
+
+        $splitter->flushSilent(1.35);
+        $this->assertCount(1, $this->copies, 'Once there is, it is made.');
+    }
+
     public function testHandsOutNothingWithoutAnythingToHandItTo(): void
     {
         $this->speak('alice', from: 0.0, seconds: 1.0);
