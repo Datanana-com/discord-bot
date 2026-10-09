@@ -110,7 +110,8 @@ final class VoiceWhisperServerTest extends VoiceTestCase
 
         $this->assertFileDoesNotExist($this->cliLog, 'The server had the time it needed.');
         $this->assertSame([], $this->loggedProblems());
-        $this->assertGreaterThanOrEqual(4000, $this->logged('Transcribed')[0]['ms']);
+        // Counted from the end of the sentence, as whisper was given it 0.3 s earlier.
+        $this->assertGreaterThanOrEqual(3500, $this->logged('Transcribed')[0]['ms']);
     }
 
     public function testWhisperCliTranscribesWhatIsSaidWhileTheServerLoads(): void

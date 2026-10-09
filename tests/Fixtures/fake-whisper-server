@@ -15,6 +15,8 @@ declare(strict_types=1);
 //   FAKE_WHISPER_SERVER_DIE_AT       The request, counted from 1, that it dies on instead of answering it.
 //   FAKE_WHISPER_SERVER_BODY         What it answers requests with instead of a transcript, as it is.
 //   FAKE_WHISPER_OUTPUT              What it hears, as for fake-whisper.
+//   FAKE_WHISPER_SERVER_NUMBERED     When set, what it hears ends with the number of the request, counted from 1 with the
+//                                    warm-up: it answers differently every time it is asked.
 //   FAKE_WHISPER_HOLD                While this file exists, it doesn't answer a request, for 10 seconds at most.
 //   FAKE_WHISPER_DELAY               Seconds it takes to answer a request.
 //
@@ -151,6 +153,7 @@ while (($connection = stream_socket_accept($server, -1)) !== false) {
         $answer(200, 'application/json', (string) $setting('FAKE_WHISPER_SERVER_BODY'));
     } else {
         $output = $setting('FAKE_WHISPER_OUTPUT');
-        $answer(200, 'application/json', json_encode(['text' => sprintf(" [BLANK_AUDIO]\n %s\n", $output === false ? 'Hey Claude, (coughs) what time is it?' : $output)]));
+        $heard = $output === false ? 'Hey Claude, (coughs) what time is it?' : $output;
+        $answer(200, 'application/json', json_encode(['text' => sprintf(" [BLANK_AUDIO]\n %s\n", $setting('FAKE_WHISPER_SERVER_NUMBERED') === false ? $heard : "{$heard} {$requests}")]));
     }
 }

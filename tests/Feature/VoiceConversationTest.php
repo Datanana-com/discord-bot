@@ -358,11 +358,16 @@ arg=A voice call with the assistant Claude.
         // Each step is logged with the call's server and session, so one call can be followed in the log.
         $steps = array_filter($this->logs->getRecords(), fn ($record) => ($record->context['session'] ?? null) === $session->id);
         $this->assertSame(
-            ['Voice session started', 'Recording a speaker', 'Utterance ended', 'Transcribed', 'Asked Claude', 'Claude started answering', 'Claude answered', 'Started speaking', 'Voice session stopped', 'Summarized the call'],
+            ['Voice session started', 'Recording a speaker', 'Utterance ended', 'Utterance gaps', 'Transcribed', 'Asked Claude', 'Claude started answering', 'Claude answered', 'Started speaking', 'Voice session stopped', 'Summarized the call'],
             array_values(array_map(fn ($record) => $record->message, $steps)),
         );
         $this->assertSame(self::GUILD_ID, $this->logged('Voice session started')[0]['guild']);
         $this->assertSame(['user' => '555', 'ms' => 1000], array_slice($this->logged('Utterance ended')[0], 2));
+        // The packets of the test come all at once, so there are no long gaps; only the user, a duration and a count are logged.
+        $gaps = array_slice($this->logged('Utterance gaps')[0], 2);
+        $this->assertSame(['user', 'longest_ms', 'long_gaps'], array_keys($gaps));
+        $this->assertSame(['555', 0], [$gaps['user'], $gaps['long_gaps']]);
+        $this->assertLessThan(100, $gaps['longest_ms']);
         $this->assertSame(28, $this->logged('Transcribed')[0]['characters']);
         $this->assertSame(26, $this->logged('Claude answered')[0]['characters']);
         $this->assertSame(['speakers' => 1, 'utterances' => 1, 'answers' => 1, 'failures' => 0], array_slice($this->logged('Voice session stopped')[0], 3));

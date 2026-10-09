@@ -111,10 +111,31 @@ final class VoicePauseTest extends VoiceTestCase
         $this->assertSame([], $this->loggedProblems());
     }
 
+    public function testLogsHowLongAliceStoppedInTheMiddleOfWhatSheSaid(): void
+    {
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        // She stops for 0.3 s, shorter than the pause that ends what she says, and goes on.
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 0.6);
+        $this->runFor(0.3);
+        $this->aliceSpeaks($vc);
+        $this->assertTrue($this->overAfter(0.65, pause: 0.6));
+
+        $this->assertCount(1, $this->logged('Utterance ended'), 'It is one utterance.');
+        $gaps = $this->logged('Utterance gaps');
+        $this->assertCount(1, $gaps);
+        $this->assertSame(1, $gaps[0]['long_gaps']);
+        // Counted in milliseconds, and the time the test ran for is not exact.
+        $this->assertGreaterThanOrEqual(290, $gaps[0]['longest_ms']);
+        $this->assertLessThan(5000, $gaps[0]['longest_ms']);
+        $this->assertSame([], $this->loggedProblems());
+    }
+
     private function aliceSpeaks(VoiceClient $vc): void
     {
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
-        $this->spokeAt = microtime(true);
+        // The clock the bot counts the silence with: the wall clock of a machine steps, and the monotonic one runs at its own pace.
+        $this->spokeAt = hrtime(true) / 1e9;
     }
 
     /**
@@ -127,8 +148,8 @@ final class VoicePauseTest extends VoiceTestCase
      */
     private function overAfter(float $seconds, float $pause): bool
     {
-        $this->runFor(max(0.0, $seconds - (microtime(true) - $this->spokeAt)));
-        $silent = microtime(true) - $this->spokeAt;
+        $this->runFor(max(0.0, $seconds - (hrtime(true) / 1e9 - $this->spokeAt)));
+        $silent = hrtime(true) / 1e9 - $this->spokeAt;
         $this->timers->elapse(0.05);
 
         return $this->logged('Utterance ended') !== [] && ($seconds >= $pause || $silent < $pause - 0.1);
