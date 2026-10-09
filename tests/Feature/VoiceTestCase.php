@@ -74,6 +74,12 @@ abstract class VoiceTestCase extends TestCase
     /** The PID of every stand-in of Piper that was started: see {@see pipers()}. */
     protected string $piperRunning;
 
+    /** Where the fake Piper writes each line it is given. */
+    protected string $piperLines;
+
+    /** Where each fake ffmpeg that encodes a sentence writes its process ID. */
+    protected string $ffmpegRunning;
+
     /** While this file exists, Claude's stand-in doesn't answer when it is asked for a new memory. */
     protected string $claudeHold;
 
@@ -144,6 +150,8 @@ abstract class VoiceTestCase extends TestCase
         $this->claudeCalls = "{$this->recordings}/claude.calls";
         $this->claudeWaiting = "{$this->recordings}/claude.waiting";
         $this->piperRunning = "{$this->recordings}/piper.running";
+        $this->piperLines = "{$this->recordings}/piper.lines";
+        $this->ffmpegRunning = "{$this->recordings}/ffmpeg.running";
         $this->claudeHold = "{$this->recordings}/claude.hold";
         $this->whisperHold = "{$this->recordings}/whisper.hold";
         $this->memories = "{$this->recordings}/memories";
@@ -176,6 +184,8 @@ abstract class VoiceTestCase extends TestCase
             'FAKE_CLAUDE_PAUSE' => '0',
             'FAKE_CLAUDE_RESUME' => $this->claudeResume,
             'FAKE_PIPER_RUNNING' => $this->piperRunning,
+            'FAKE_PIPER_LINES' => $this->piperLines,
+            'FAKE_FFMPEG_RUNNING' => $this->ffmpegRunning,
             'FAKE_CLAUDE_HOLD' => $this->claudeHold,
             'FAKE_WHISPER_OUTPUT' => 'Hey Claude, what time is it?',
             'FAKE_WHISPER_HOLD' => $this->whisperHold,
@@ -205,6 +215,7 @@ abstract class VoiceTestCase extends TestCase
         // A call a test left starting, as when the bot never got to join, is not starting in the next test.
         (new ReflectionProperty(VoiceSession::class, 'starting'))->setValue(null, []);
         LookupSlots::reset();
+        Usage::reset();
         // Nor is a bot that was stopped in one test still stopping in the next.
         (new ReflectionProperty(VoiceSession::class, 'refusing'))->setValue(null, false);
 
@@ -427,6 +438,23 @@ abstract class VoiceTestCase extends TestCase
     protected function pipers(): array
     {
         return is_file($this->piperRunning) ? array_map(intval(...), file($this->piperRunning, FILE_IGNORE_NEW_LINES)) : [];
+    }
+
+    /**
+     * @return list<string> Every sentence Piper was given, in order: also those it had not finished, or that nobody heard.
+     */
+    protected function givenToPiper(): array
+    {
+        return is_file($this->piperLines) ? file($this->piperLines, FILE_IGNORE_NEW_LINES) : [];
+    }
+
+    /**
+     * @return list<int> The process ID of every ffmpeg that was started to encode a sentence, oldest first: the
+     *                   last one waits for the next sentence.
+     */
+    protected function ffmpegs(): array
+    {
+        return is_file($this->ffmpegRunning) ? array_map(intval(...), file($this->ffmpegRunning, FILE_IGNORE_NEW_LINES)) : [];
     }
 
     /**
@@ -742,6 +770,65 @@ abstract class VoiceTestCase extends TestCase
         $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => $text]);
         $this->speak($vc, ssrc: (int) $userId, userId: $userId, seconds: 1.0);
         $this->waitUntil(fn () => count($this->sent) > $answers, 'the answer');
+    }
+
+    /**
+     * Someone says something, without waiting for what happens.
+     */
+    protected function says(VoiceClient $vc, string $userId, string $text, float $seconds = 1.0): void
+    {
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => $text]);
+        $this->speak($vc, ssrc: (int) $userId, userId: $userId, seconds: $seconds);
+    }
+
+    /**
+     * Someone says something that the bot hears, and doesn't answer.
+     */
+    protected function hearsNoAnswer(VoiceClient $vc, VoiceSession $session, string $userId, string $text): void
+    {
+        $sent = $this->sent;
+        $asked = count($this->claudeCalls());
+
+        $this->says($vc, $userId, $text);
+        $this->waitUntil(fn () => str_contains($this->transcript($session), '] ' . self::MEMBERS[$userId] . ": {$text}\n"), 'it to be transcribed');
+        // Only now: it waited its turn behind the answer before it, whose last sentence may still have been spoken.
+        $played = $this->played;
+        $this->runFor(0.5);
+
+        $this->assertSame($sent, $this->sent, 'Nothing was posted.');
+        $this->assertSame($played, $this->played, 'Nothing was said.');
+        $this->assertSame($asked, count($this->claudeCalls()), 'Claude was not asked.');
+    }
+
+    /**
+     * @return list<array<string, mixed>> What each time the message was logged says, beyond the guild and session.
+     */
+    protected function contexts(string $message): array
+    {
+        return array_map(fn (array $context) => array_slice($context, 2), $this->logged($message));
+    }
+
+    /**
+     * Puts lines into a call's transcript as if they had been said earlier in it, each with its time: in what
+     * the call keeps of it, and in its file.
+     *
+     * @param list<string> $lines
+     */
+    protected function saidEarlier(VoiceSession $session, array $lines): void
+    {
+        $entries = array_combine(range(1, count($lines)), $lines);
+        $this->setProperty($session, VoiceSession::class, 'transcript', $entries);
+        $this->setProperty($session, VoiceSession::class, 'entries', count($lines));
+        file_put_contents("{$session->directory}/transcript.txt", implode("\n", $lines) . "\n");
+    }
+
+    /**
+     * How the prompt of a question ends, after the call so far: the line that is answered, without its time, and who said it.
+     */
+    protected function asking(string $name, string $text): string
+    {
+        return "{$name} said this to you just now, and everyone in the call hears your answer:\n\n{$name}: {$text}\n\n"
+            . "Answer {$name}. What they ask is often about what was said in the call before, by anyone in it.";
     }
 
     /**

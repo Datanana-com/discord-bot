@@ -11,7 +11,9 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use React\EventLoop\Loop;
 use React\Promise\Deferred;
+use React\Promise\PromiseInterface;
 use Tests\Wav;
+use Throwable;
 
 use function React\Async\await;
 
@@ -70,6 +72,36 @@ final class TranscriberTest extends TestCase
         $this->assertSame('Hey Claude, what time is it?', $text, 'Without the annotations, like whisper-cli\'s.');
         $this->assertSame('untouched', file_get_contents("{$this->folder}/cli.log"), 'whisper-cli did not run.');
         $this->assertStringContainsString('request language=pt prompt=A voice call with Claude. format=json', file_get_contents("{$this->folder}/server.log"));
+    }
+
+    public function testTranscribesACopyOfWhatIsStillBeingSaidWithTheServerAlone(): void
+    {
+        $transcriber = $this->transcriberWithServer(language: 'pt', prompt: 'A voice call with Claude.');
+
+        $text = await($transcriber->transcribeEarly($this->wav(), seconds: 2.0));
+
+        $this->assertSame('Hey Claude, what time is it?', $text, 'Cleaned like the other.');
+        $this->assertSame('untouched', file_get_contents("{$this->folder}/cli.log"), 'whisper-cli did not run.');
+        $this->assertStringContainsString('request language=pt prompt=A voice call with Claude. format=json', file_get_contents("{$this->folder}/server.log"));
+    }
+
+    public function testDoesNotTranscribeACopyWithoutAServerThatIsReady(): void
+    {
+        putenv('FAKE_WHISPER_SERVER_LOAD=5');
+        $transcriber = $this->transcriberWithServer(ready: false);
+
+        $this->assertRejectedWith('There is no whisper server to transcribe with early.', $transcriber->transcribeEarly($this->wav()));
+        $this->assertRejectedWith('There is no whisper server to transcribe with early.', $this->slowTranscriber()->transcribeEarly($this->wav()));
+        $this->assertSame('untouched', file_get_contents("{$this->folder}/cli.log"), 'Not whisper-cli either: it would load the model for a copy that may be thrown away.');
+    }
+
+    public function testDoesNotFallBackToWhisperCliWhenTheServerFailsOnACopy(): void
+    {
+        $transcriber = $this->transcriberWithServer();
+        $this->serverSays("FAKE_WHISPER_SERVER_STATUS='500'");
+
+        $this->assertRejectedWith('HTTP status code 500 (Fake)', $transcriber->transcribeEarly($this->wav()));
+        $this->assertSame('untouched', file_get_contents("{$this->folder}/cli.log"));
     }
 
     public function testWhisperCliTranscribesWhileTheServerLoads(): void
@@ -298,6 +330,19 @@ final class TranscriberTest extends TestCase
     /**
      * What the stand-in of the server reads again with each request: it has answered the warm-up, and says it from now on.
      */
+    /**
+     * @param PromiseInterface<string> $promise
+     */
+    private function assertRejectedWith(string $message, PromiseInterface $promise): void
+    {
+        try {
+            await($promise);
+            $this->fail('It was not rejected.');
+        } catch (Throwable $e) {
+            $this->assertSame($message, $e->getMessage());
+        }
+    }
+
     private function serverSays(string $setting): void
     {
         file_put_contents("{$this->folder}/fake.env", $setting . PHP_EOL);

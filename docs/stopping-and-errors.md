@@ -11,7 +11,7 @@
 - Ctrl+C a second time ends it without waiting for that. A call that wasn't summarized by then keeps its `transcript.txt`.
 - The programs it started that are still running, such as a Claude Code that is looking something up, are ended with it.
 - The programs the bot runs (whisper.cpp, Claude Code, Piper, ffmpeg) are started in a session of their own, with `setsid`, where there is one. Ctrl+C goes to everything that runs in the terminal, and would otherwise end the Claude Code that is writing a summary.
-- This needs PHP's `pcntl` extension. Without it, the bot says so in a warning when it starts, and Ctrl+C ends it at once, still in its calls, while the programs it had started go on until they are done.
+- This needs PHP's `pcntl` extension. Without it, the bot says so in a warning when it starts, and Ctrl+C ends it at once, still in its calls and without writing the statistics it still held, while the programs it had started go on until they are done.
 
 ## When something fails
 

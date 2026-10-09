@@ -56,6 +56,30 @@ final class VoiceWhisperServerTest extends VoiceTestCase
         $this->assertFalse($this->isRunning($pid), 'The server ends with the call.');
     }
 
+    public function testTheServerIsGivenOneSentenceAtATimeInTheOrderTheyEnded(): void
+    {
+        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => 'Sounds good.']);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->waitUntil(fn () => $this->logged('Whisper server ready') !== [], 'the whisper server to be ready');
+
+        // Alice and Bob say something at the same time, and the server takes long over what Alice said.
+        $this->speakAndWait($vc, '555', '666');
+        $this->waitUntil(fn () => count($this->serverRequests()) === 2, 'the server to be asked');
+        $this->runFor(0.3);
+
+        // What Bob said waits for it: a request the server gets to late counts as one it didn't answer in time.
+        $this->assertCount(2, $this->serverRequests(), 'Its warm-up, and what Alice said.');
+
+        $this->transcribe();
+        $this->waitUntil(fn () => count($this->logged('Transcribed')) === 2, 'both to be transcribed');
+
+        $this->assertCount(3, $this->serverRequests());
+        $this->assertSame(['555', '666'], array_column($this->logged('Transcribed'), 'user'));
+        $this->assertSame("Alice: Sounds good.\nBob: Sounds good.\n", $this->untimed($this->transcript($session)));
+        $this->assertFileDoesNotExist($this->cliLog, 'whisper-cli did not run.');
+        $this->assertSame([], $this->loggedProblems());
+    }
+
     public function testWhatWasSaidBeforeTheCallEndedIsStillTranscribedByTheServer(): void
     {
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
@@ -86,7 +110,8 @@ final class VoiceWhisperServerTest extends VoiceTestCase
 
         $this->assertFileDoesNotExist($this->cliLog, 'The server had the time it needed.');
         $this->assertSame([], $this->loggedProblems());
-        $this->assertGreaterThanOrEqual(4000, $this->logged('Transcribed')[0]['ms']);
+        // Counted from the end of the sentence, as whisper was given it 0.3 s earlier.
+        $this->assertGreaterThanOrEqual(3500, $this->logged('Transcribed')[0]['ms']);
     }
 
     public function testWhisperCliTranscribesWhatIsSaidWhileTheServerLoads(): void

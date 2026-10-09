@@ -6,12 +6,12 @@ Anyone can use `/optout`, in any server the bot is in or in a direct message wit
 
 - no recording of them is kept;
 - what they say isn't transcribed, so it is not in `transcript.txt` or the summary, and is never sent to Claude;
-- Claude doesn't answer them, also when they say the wake word, and a conversation they had open is closed;
+- Claude doesn't answer them, also when they say the wake word;
 - no `utterance` statistics are saved for them.
 
 `/optin` undoes it. Both commands answer with what changed, and only whoever used them sees that.
 
-Opting out during a call takes effect right away, also while a call that just ended is still being transcribed and summarized. What they say from then on is dropped, their recording files of that call are deleted, and the rest of an answer Claude was giving them is neither spoken nor posted. What was already transcribed stays in the transcript, so it is in the summary too. Someone who opts back in during a call is transcribed and answered again right away, but only recorded again once they rejoin the call.
+Opting out during a call takes effect right away, also while a call that just ended is still being transcribed and summarized. What they say from then on is dropped, their recording files of that call are deleted, and the rest of an answer Claude was giving them is neither spoken nor posted. A sentence of theirs that still waited for whisper is deleted, and a question of theirs that waited for its turn is no longer answered. What was already transcribed stays in the transcript, so it is in the summary too, and Claude is given it with the rest of the call, for as long as the call goes on, whenever someone else asks it something or something is looked up. Someone who opts back in during a call is transcribed and answered again right away, but only recorded again once they rejoin the call.
 
 The opt-outs are kept in the `opt_outs` table of `STATS_DATABASE`: the user ID and when they opted out. They are read when a call starts. When they can't be read, `/record` refuses to start, as it can't tell who must not be recorded.
 

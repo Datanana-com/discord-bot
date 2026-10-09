@@ -7,7 +7,10 @@ namespace App\Voice;
 use App\Support\Shell;
 use Closure;
 use React\Promise\PromiseInterface;
+use RuntimeException;
 use Throwable;
+
+use function React\Promise\reject;
 
 /**
  * Speech-to-text through a local whisper.cpp build: the whisper-server that a call keeps running, when there is
@@ -103,6 +106,22 @@ final readonly class Transcriber
                 return $this->withWhisperCli($wavPath, $seconds);
             },
         );
+    }
+
+    /**
+     * Transcribes a copy of what is still being said, which may be thrown away: with the server only. whisper-cli
+     * loads its model for every file, so a copy that is thrown away would cost as much as one that is used.
+     *
+     * @return PromiseInterface<string> The spoken text, as {@see transcribe()}. Rejects when there is no server that is
+     *                                  ready, or it fails: the recording is then transcribed once it is over.
+     */
+    public function transcribeEarly(string $wavPath, float $seconds = 0.0): PromiseInterface
+    {
+        if ($this->server === null || ! $this->server->isReady()) {
+            return reject(new RuntimeException('There is no whisper server to transcribe with early.'));
+        }
+
+        return $this->server->transcribe($wavPath, $this->language, $this->prompt, $seconds)->then(self::clean(...));
     }
 
     /**

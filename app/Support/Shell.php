@@ -80,6 +80,10 @@ final class Shell
      *                                                          say why it failed.
      * @param string|null $cwd Working directory, or null for the bot's own.
      * @param array<string, string>|null $env Environment variables, or null to inherit the bot's.
+     * @param (callable(string $bytes): void)|null $onBytes Called with stdout as it comes, in pieces of any size,
+     *                                                      for a program that prints something other than lines
+     *                                                      of text. $onLine is not called then. When it throws,
+     *                                                      the program is stopped.
      */
     public static function open(
         array $command,
@@ -87,8 +91,9 @@ final class Shell
         ?callable $onErrorLine = null,
         ?string $cwd = null,
         ?array $env = null,
+        ?callable $onBytes = null,
     ): Program {
-        return new Program($command, $onLine === null ? null : $onLine(...), $onErrorLine === null ? null : $onErrorLine(...), $cwd, $env);
+        return new Program($command, $onLine === null ? null : $onLine(...), $onErrorLine === null ? null : $onErrorLine(...), $cwd, $env, $onBytes === null ? null : $onBytes(...));
     }
 
     /**

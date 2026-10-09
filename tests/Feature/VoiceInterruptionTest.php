@@ -40,6 +40,7 @@ final class VoiceInterruptionTest extends VoiceTestCase
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 0.4);
         $this->assertSame([], $this->cutOff);
         $this->assertSame([], $this->logged('Interrupted'));
+        $this->runFor(0.1);
 
         // With half a second, she is heard: the sentence is cut off, at once.
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 0.1);
@@ -50,20 +51,25 @@ final class VoiceInterruptionTest extends VoiceTestCase
         $this->speak($vc, ssrc: 1, userId: '555', seconds: 0.6);
         $this->assertSame(["{$session->directory}/claude-2.ogg"], $this->cutOff);
 
-        // It is logged once, with who interrupted, in which call, and how long the bot had been speaking.
+        // It is logged once, with who interrupted, in which call, how long the bot had been speaking, and how
+        // long after she started talking over it the bot was silent.
         $interrupted = $this->logged('Interrupted');
         $this->assertCount(1, $interrupted);
-        $this->assertSame(['guild', 'session', 'user', 'ms'], array_keys($interrupted[0]));
+        $this->assertSame(['guild', 'session', 'user', 'ms', 'after_ms'], array_keys($interrupted[0]));
         $this->assertSame([self::GUILD_ID, $session->id, '555'], array_slice(array_values($interrupted[0]), 0, 3));
         $this->assertIsInt($interrupted[0]['ms']);
         // Since its first sentence started, a moment before the test noticed: not since the question, a second
         // and more ago, nor since what Alice just said.
         $this->assertGreaterThanOrEqual(300, $interrupted[0]['ms']);
         $this->assertLessThan($spokenFor + 500, $interrupted[0]['ms']);
+        // From the first of her laugh, not from the last bit of it: the test took its time between the two.
+        $this->assertIsInt($interrupted[0]['after_ms']);
+        $this->assertGreaterThanOrEqual(100, $interrupted[0]['after_ms']);
+        $this->assertLessThan($spokenFor, $interrupted[0]['after_ms'], 'Not since the bot started speaking.');
 
         // Claude writes the rest. The answer is posted whole, and is in the transcript, like one cut off by /stop.
         touch($this->claudeResume);
-        $this->waitUntil(fn () => count($this->logged('Transcribed')) === 2, 'what Alice did over the answer to be transcribed');
+        $this->waitUntil(fn () => count($this->logged('Transcribed')) === 2 && $this->sent !== [], 'what Alice did over the answer to be transcribed, and the answer to be posted');
 
         $this->assertSame([self::QUESTION . "\n" . self::ANSWER], $this->sent);
         $this->assertSame(1, $this->usage()['answers']);
@@ -221,9 +227,11 @@ final class VoiceInterruptionTest extends VoiceTestCase
 
         $this->waitUntil(fn () => count($this->logged('Transcribed')) === 2, 'what Alice said to be transcribed');
 
-        // The second sentence was already with Piper, which finished it. It isn't spoken, and the third never gets to Piper.
+        // The second sentence was already with Piper, which finished it. It isn't spoken, and its file isn't kept.
+        // The third never gets to Piper.
         $this->assertCount(1, $this->played);
-        $this->assertSame(["{$session->directory}/claude-2.ogg", "{$session->directory}/claude-3.ogg"], glob("{$session->directory}/claude-*"));
+        $this->assertSame(['It is a quarter past four.', 'Time for a cup of tea.'], $this->givenToPiper());
+        $this->waitUntil(fn () => glob("{$session->directory}/claude-*") === ["{$session->directory}/claude-2.ogg"], 'the file of the sentence nobody heard to be deleted');
         $this->assertSame([self::QUESTION . "\n" . self::ANSWER], $this->sent);
         $this->assertSame([], $this->loggedProblems());
     }

@@ -214,6 +214,36 @@ final class VoiceFailureTest extends VoiceTestCase
         $this->assertSame(['Sorry, something went wrong with what was said. The bot\'s logs say why.'], $this->sent);
     }
 
+    public function testDoesNotKeepASorryNobodyHeardWhenTheCallEndsWhileItIsMade(): void
+    {
+        $this->setProcessEnv(['FAKE_WHISPER_EXIT' => '1', 'FAKE_PIPER_DELAY' => '0.5']);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel(), connected: true), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->givenToPiper() === [self::SORRY], 'sorry to be with Piper');
+        await($session->stop());
+
+        $this->assertSame([], $this->played);
+        $this->assertSame([], glob("{$session->directory}/claude-*"));
+    }
+
+    public function testDoesNotSaySorryToSomeoneWhoOptedOutWhileItWasStillEncoded(): void
+    {
+        // Its ffmpeg has written the first of it, and takes its time over the rest: the voice library can't start yet.
+        touch($hold = "{$this->recordings}/ffmpeg.hold");
+        $this->setProcessEnv(['FAKE_WHISPER_EXIT' => '1', 'FAKE_FFMPEG_HOLD' => $hold, 'FAKE_FFMPEG_STARTS' => '1']);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->givenToPiper() === [self::SORRY], 'sorry to be with Piper');
+        $this->runFor(0.3);
+        VoiceSession::optOut('555');
+        unlink($hold);
+        $this->runFor(0.5);
+
+        $this->assertSame([], $this->played);
+    }
+
     public function testWhatFailsBetweenPiperAndTheCallIsNotTakenForASentenceThatCannotBeSpoken(): void
     {
         $this->memory()->save(['555', '666'], 'They are planning a trip.');

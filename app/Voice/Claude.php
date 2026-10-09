@@ -18,13 +18,24 @@ final readonly class Claude
     /** The models a server can choose from, by the names Claude Code gives the latest of each. */
     public const array MODELS = ['haiku', 'sonnet', 'opus'];
 
+    /**
+     * The model a name stands for, where Claude Code's own latest of it is not the latest there is: Claude Code
+     * 2.1.289 still gives Haiku 4.5 for "haiku". Once it gives this one or a newer one, the entry can go.
+     */
+    private const array IDS = ['haiku' => 'claude-haiku-5-5'];
+
     private const string SYSTEM_PROMPT = <<<'PROMPT'
         You are Claude, taking part in a Discord voice call. Your replies are read aloud by a
         text-to-speech engine, so answer the way you would speak: short, natural sentences, and no
         markdown, lists, code blocks, emoji or links. Keep answers to a few sentences unless you are
         asked for more. You only get a speech-to-text transcript of the call, so expect
-        transcription mistakes and ask for clarification when something is unclear. Before the
-        transcript you may get what you remember about the person talking to you, and what you
+        transcription mistakes and ask for clarification when something is unclear. The transcript
+        is the whole call so far, each line with the time it was said. People in the call talk to
+        each other most of the time, and to you only now and then. After the transcript you are
+        told which line you are answering and who said it: answer that line, with everything said
+        before it in mind, by anyone. You are often asked about what the others said, to say who is
+        right, or to sum it up. Before the
+        transcript you may get what you remember about the person you are answering, and what you
         remember about everyone in the call together. Each is labeled with whose it is. The other
         people in the call have memories of their own, which you only get when they shared them with
         the call: such a memory is labeled with their name, and you may use it for anyone in the
@@ -164,7 +175,8 @@ final readonly class Claude
             '--output-format', 'stream-json',
             '--verbose',
             '--include-partial-messages',
-            '--model', $this->model,
+            // A full model ID, as in CLAUDE_MODEL=claude-haiku-4-5-20251001, is passed on as it is.
+            '--model', self::IDS[$this->model] ?? $this->model,
             ...($this->advisor === '' ? [] : ['--advisor', $this->advisor]),
             '--system-prompt', $systemPrompt,
             // The prompt is built from whatever anyone says in the call,

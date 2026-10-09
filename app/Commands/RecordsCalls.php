@@ -111,11 +111,14 @@ trait RecordsCalls
         $name = VoiceSession::wakeWordName($session->wakeWord);
         // The first of the leave phrase's spellings, like the wake word's. There is none in a server without a wake word, unless VOICE_LEAVE_PHRASE is set.
         $leave = VoiceSession::wakeWordName($session->leavePhrase);
+        $stop = VoiceSession::wakeWordName($session->stopPhrase);
 
         return ($name === ''
             ? 'I answer everything that is said.'
-            // The first of the stop phrase's spellings, like the wake word's.
-            : "Say \"{$name}\" to talk to me, and \"" . VoiceSession::wakeWordName($session->stopPhrase) . '" when you\'re done.')
+            // Every question needs it: nothing is answered because of what someone said before.
+            : "I only answer what is said with \"{$name}\" in it: say it with every question.")
+            // It stops what the bot is saying, whoever says it. There is none in a server without a wake word.
+            . ($stop === '' ? '' : " Say \"{$stop}\" to make me stop.")
             . ($leave === '' ? '' : " Say \"{$leave}\" to make me leave.");
     }
 

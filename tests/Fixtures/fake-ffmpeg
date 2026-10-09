@@ -1,12 +1,55 @@
 #!/bin/sh
 # Stands in for ffmpeg: logs its arguments, then copies the -i input file to the output file, the last argument.
 # With FAKE_FFMPEG_BYTES, the output is that many bytes of silence instead: 32000 per second of 16 kHz mono 16-bit audio.
+#
+# Started with "-i pipe:0", as the bot starts the ffmpeg that encodes a sentence, it waits for its stdin to be
+# closed and then copies what it read to its stdout. It may be started long before it gets anything, so it only
+# then reads what a test has set since, from the file FAKE_ENV when there is one. Before it copies, it waits for
+# as long as the file FAKE_FFMPEG_HOLD exists, for 30 seconds at most: with FAKE_FFMPEG_HOLD_ON, only when what
+# it read contains that text. With FAKE_FFMPEG_STARTS, it copies the first half before it waits, like an encoder
+# that has started on a sentence and takes its time over the rest. With FAKE_FFMPEG_FAILS_ON, it fails on what
+# contains that text instead, after it copied the first half of it: it then ends with code 1. Its PID is appended
+# to FAKE_FFMPEG_RUNNING when it starts.
 for arg in "$@"; do printf 'arg=%s\n' "$arg"; done > "${FAKE_FFMPEG_LOG:-/dev/null}"
 while [ $# -gt 1 ]; do
     if [ "$1" = "-i" ]; then in="$2"; fi
     shift
 done
-if [ -n "$FAKE_FFMPEG_BYTES" ]; then
+if [ "$in" = "pipe:0" ]; then
+    if [ -n "${FAKE_FFMPEG_RUNNING:-}" ]; then printf '%s\n' "$$" >> "$FAKE_FFMPEG_RUNNING"; fi
+    # Text, in the tests that run this: the fake Piper's files hold the sentence itself. Read by the shell itself:
+    # a program started for it, like cat, would keep this one's pipes open when a test kills it while it waits.
+    read=""
+    while IFS= read -r line || [ -n "$line" ]; do
+        read="${read}${line}"
+    done
+    if [ -r "${FAKE_ENV:-}" ]; then . "$FAKE_ENV"; fi
+    half=$((${#read} / 2))
+    if [ -n "${FAKE_FFMPEG_STARTS:-}" ]; then printf '%s' "$read" | head -c "$half"; fi
+    case "$read" in
+        *"${FAKE_FFMPEG_HOLD_ON:-}"*)
+            held=600
+            while [ -e "${FAKE_FFMPEG_HOLD:-}" ] && [ "$held" -gt 0 ]; do
+                sleep 0.05
+                held=$((held - 1))
+            done
+            ;;
+    esac
+    if [ -n "${FAKE_FFMPEG_FAILS_ON:-}" ]; then
+        case "$read" in
+            *"$FAKE_FFMPEG_FAILS_ON"*)
+                if [ -z "${FAKE_FFMPEG_STARTS:-}" ]; then printf '%s' "$read" | head -c "$half"; fi
+                echo "Error while encoding." >&2
+                exit 1
+                ;;
+        esac
+    fi
+    if [ -n "${FAKE_FFMPEG_STARTS:-}" ]; then
+        printf '%s' "$read" | tail -c "+$((half + 1))"
+    else
+        printf '%s' "$read"
+    fi
+elif [ -n "$FAKE_FFMPEG_BYTES" ]; then
     head -c "$FAKE_FFMPEG_BYTES" /dev/zero > "$1"
 else
     cp "$in" "$1"

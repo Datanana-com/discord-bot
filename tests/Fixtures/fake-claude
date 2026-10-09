@@ -76,7 +76,14 @@ if [ -n "$lookup" ] && [ -n "${FAKE_CLAUDE_LOOKUP_GO:-}" ]; then
     done
     rm -f "$FAKE_CLAUDE_LOOKUP_GO"
 fi
-sleep "${FAKE_CLAUDE_DELAY:-0}"
+# Ended by the bot while it takes its time, it ends what it started for that too, as Claude Code is gone at
+# once: what is left would hold its output open, and the bot would only see it end when that is over.
+# It first prints FAKE_CLAUDE_LAST_WORDS, when that is set: what Claude Code had written and not yet handed over.
+busy=
+trap 'trap - TERM; kill $busy 2> /dev/null; if [ -n "${FAKE_CLAUDE_LAST_WORDS:-}" ]; then printf "%s\n" "$FAKE_CLAUDE_LAST_WORDS"; fi; kill -TERM $$' TERM
+sleep "${FAKE_CLAUDE_DELAY:-0}" &
+busy=$!
+wait "$busy"
 ticks=$((${FAKE_CLAUDE_PAUSE:-0} * 20))
 printf '%s' "$output" | while IFS= read -r line || [ -n "$line" ]; do
     printf '%s\n' "$line"
@@ -85,7 +92,10 @@ printf '%s' "$output" | while IFS= read -r line || [ -n "$line" ]; do
         ticks=$((ticks - 1))
     done
     ticks=0
-done
+done &
+busy=$!
+wait "$busy"
+busy=
 # Claude Code keeps reading messages until its stdin is closed.
 if [ -n "$waits" ]; then cat > /dev/null; fi
 exit "${FAKE_CLAUDE_EXIT:-0}"
