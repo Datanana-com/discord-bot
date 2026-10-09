@@ -226,6 +226,18 @@ final class VoiceSession
      */
     private array $early = [];
 
+    /**
+     * @var array<string, EarlyQuestion> What Claude was asked of what each person is saying while they pause, by
+     *      user ID, until the sentence ends and takes it: see {@see askEarly()}. At most one at a time.
+     */
+    private array $askedEarly = [];
+
+    /**
+     * @var array<int, EarlyQuestion> Every question that was asked early and is neither used nor dropped, by object ID:
+     *      also the ones a sentence that is over has taken over, which wait for their turn.
+     */
+    private array $questions = [];
+
     /** @var array<string, array<int, string>> What was said while the same people were in the call, by the key of their memory: entries of the transcript, by their number. */
     private array $said = [];
 
@@ -622,6 +634,13 @@ final class VoiceSession
                 unset($session->audio[$userId]);
             }
 
+            // What Claude was asked of what they said is ended, also when their sentence is over and waits for its turn.
+            foreach ($session->questions as $question) {
+                if ($question->userId === $userId) {
+                    $session->dropQuestion($question, 'they opted out', logged: false);
+                }
+            }
+
             // Whisper may be hearing the start of what they are saying: none of it is used.
             $session->dropEarly($userId, logged: false);
 
@@ -822,6 +841,12 @@ final class VoiceSession
         // No question is coming for the Claude Code process that waited for one. One that is answering ends once it has.
         $this->waitingClaude?->stop();
         $this->waitingClaude = null;
+
+        // Nor is one that was asked early: whoever it was for is no longer answered.
+        foreach ($this->questions as $question) {
+            $this->dropQuestion($question, 'the call stopped');
+        }
+
         // Piper ends too, once it has spoken the sentence it may be working on.
         $piperEnded = $this->speech->stop();
 
@@ -1074,13 +1099,19 @@ final class VoiceSession
         // Whisper has the text already, if it was given what they said so far and they have not said a word since.
         $early = $this->early[$userId]['text'] ?? null;
         unset($this->early[$userId]);
+        // And Claude has been asked about it, when it would be answered: this sentence takes that over.
+        $asked = $this->askedEarly[$userId] ?? null;
+        unset($this->askedEarly[$userId]);
 
         // Transcribed now, or once what was said before it is: not when its turn comes, behind every answer before it.
-        $heard = $this->hearing->then(fn () => $this->hearUtterance($userId, $wavPath, $endedAt, $people, $seconds, $forgotten, $from, $until, $early));
+        $heard = $this->hearing->then(fn () => $this->hearUtterance($userId, $wavPath, $endedAt, $people, $seconds, $forgotten, $from, $until, $early, $asked?->stamp));
         // What is said next is transcribed whatever became of this. Its own turn is told what did.
         $this->hearing = $heard->catch(static fn () => null);
+        // Not a question after all, or not heard: the early question is of no use, and is not kept until its turn.
+        $unusable = fn (array|Throwable|null $question) => $question === null || $question instanceof Throwable ? $this->dropQuestion($asked, 'it was not answered') : null;
+        $heard->then($unusable, $unusable);
 
-        $this->inTurn($userId, fn () => $heard->then(fn (?array $question) => $question === null ? null : $this->answerUtterance($userId, $question, $endedAt, $forgotten)));
+        $this->inTurn($userId, fn () => $heard->then(fn (?array $question) => $question === null ? null : $this->answerUtterance($userId, $question, $endedAt, $forgotten, $asked)));
     }
 
     /**
@@ -1113,6 +1144,89 @@ final class VoiceSession
         // What is heard next waits for it, whatever became of it: whoever wanted it is told.
         $this->hearing = $text->catch(static fn () => null);
         $this->early[$userId] = ['text' => $text, 'since' => hrtime(true), 'copy' => $wavPath];
+        // Whisper failing is for the sentence to find out: it is then transcribed again.
+        $text->then(fn (string $heard) => $this->askEarly($userId, $wavPath, $heard), static fn () => null);
+    }
+
+    /**
+     * Asks Claude what someone said so far, when it is a sentence that would be answered, without waiting for
+     * the pause to be over: the answer is held, and used once the sentence has ended with the same prompt (see
+     * {@see answer()}), and otherwise thrown away.
+     *
+     * Only for one nobody else's turn is going on or waits for, and only one at a time: an early question
+     * never makes someone else's real one wait, and it doesn't jump the queue. Nothing is said, posted,
+     * remembered, counted or looked up before the sentence has ended. Not for a sentence that only follows a
+     * call of the bot ("Hey Claude." and then the question), which is answered once it has ended as before.
+     *
+     * @param string $copy Which copy of what they said it is the text of: it is no use once they went on, or the sentence ended.
+     */
+    private function askEarly(string $userId, string $copy, string $text): void
+    {
+        if (
+            ($this->early[$userId]['copy'] ?? null) !== $copy
+            || $this->askedEarly !== []
+            || $this->turns > 0
+            || $this->stopped
+            || $this->leaving
+            || isset($this->optedOut[$userId])
+            || ! $this->wouldAnswer($text)
+        ) {
+            return;
+        }
+
+        try {
+            // Built as it is when the sentence ends: the line is in the transcript then, with the time it has now.
+            $stamp = date('[H:i:s] ');
+            $name = $this->nameOf($userId);
+            $people = $this->group($userId);
+            $basis = $this->personalMemoryBasis($userId, $people);
+            $prompt = $this->prompt($userId, $name, $stamp . Lookups::personLine($name, $text), $people, $this->sharers($userId), $basis !== null, unwritten: true);
+            $question = new EarlyQuestion($userId, $prompt, $stamp);
+            $question->asked($this->begin($userId, $prompt, $question->text(...), $question->started(...), early: true));
+            $this->askedEarly[$userId] = $question;
+            $this->questions[spl_object_id($question)] = $question;
+            // The next question finds a process waiting, as it would after an answer.
+            $this->wait();
+        } catch (Throwable $e) {
+            $this->log('warning', 'Could not ask Claude early: ' . $e->getMessage(), ['user' => $userId]);
+        }
+    }
+
+    /**
+     * Whether a sentence is one the bot answers: it names the bot, and is neither the stop phrase, the leave
+     * phrase nor only a call. What {@see hearUtterance()} decides, for a sentence that is not over yet, and
+     * without doing any of it.
+     */
+    private function wouldAnswer(string $text): bool
+    {
+        return $text !== ''
+            && ! ($this->leavePhrase !== '' && self::mentions($text, $this->leavePhrase))
+            && ! ($this->stopPhrase !== '' && self::mentions($text, $this->stopPhrase))
+            && ! $this->onlyCalls($text)
+            && self::mentions($text, $this->wakeWord);
+    }
+
+    /**
+     * Throws away a question that was asked early, and ends the Claude Code process it was asked of.
+     *
+     * @param string $reason Why, for the log: nothing of what was said.
+     * @param bool $logged Whether to say so in the log: not when they opted out, which says nothing about them.
+     */
+    private function dropQuestion(?EarlyQuestion $question, string $reason, bool $logged = true): void
+    {
+        if ($question === null || ! $question->drop()) {
+            return;
+        }
+
+        unset($this->questions[spl_object_id($question)]);
+
+        if (($this->askedEarly[$question->userId] ?? null) === $question) {
+            unset($this->askedEarly[$question->userId]);
+        }
+
+        if ($logged) {
+            $this->log('info', 'Dropped an early question', ['user' => $question->userId, 'after_ms' => $question->ageMs(), 'reason' => $reason]);
+        }
     }
 
     /**
@@ -1124,6 +1238,9 @@ final class VoiceSession
      */
     private function dropEarly(string $userId, bool $logged = true): void
     {
+        // Claude is no longer asked about it either: what it writes is never used.
+        $this->dropQuestion($this->askedEarly[$userId] ?? null, 'they went on', $logged);
+
         if (! isset($this->early[$userId])) {
             return;
         }
@@ -1235,10 +1352,12 @@ final class VoiceSession
      * @param float $until When they stopped, by the same clock.
      * @param PromiseInterface<string>|null $early What whisper was given of it while they paused, when nothing was said since:
      *        see {@see transcribeEarly()}. It is used instead of asking whisper again, unless it failed.
+     * @param string|null $stamp The time of its line in the transcript, when Claude was asked about it early: the prompt
+     *        that was sent holds the line with that time, and so does the one that is built now.
      * @return PromiseInterface<array{name: string, text: string, said: string, people: list<string>|null, forgotten: array<string, int>, replaced: int}|null>
      *         The question in it, when it is one for the bot. It rejects when it can't be transcribed.
      */
-    private function hearUtterance(string $userId, string $wavPath, float $endedAt, ?array $people, float $seconds, array $forgotten, float $from, float $until, ?PromiseInterface $early = null): PromiseInterface
+    private function hearUtterance(string $userId, string $wavPath, float $endedAt, ?array $people, float $seconds, array $forgotten, float $from, float $until, ?PromiseInterface $early = null, ?string $stamp = null): PromiseInterface
     {
         // They opted out while this waited for whisper, and it was deleted then.
         if (! isset($this->clips[$wavPath])) {
@@ -1260,7 +1379,7 @@ final class VoiceSession
             })
             ->finally(fn () => unlink($wavPath))
             ->catch(fn (Throwable $e) => throw new FailedReply(FailedReply::WHISPER, $e))
-            ->then(function (string $text) use ($userId, $endedAt, $transcribing, $people, $forgotten, $from, $until, &$usedEarly): ?array {
+            ->then(function (string $text) use ($userId, $endedAt, $transcribing, $people, $forgotten, $from, $until, $stamp, &$usedEarly): ?array {
                 // The text of an early start was there while they paused, or soon after: what the sentence waited for is what is left.
                 $ms = $usedEarly ? (int) round((hrtime(true) / 1e9 - $until) * 1000) : $this->msSince($transcribing);
                 $this->log('info', 'Transcribed', ['user' => $userId, 'ms' => $ms, 'characters' => mb_strlen($text), 'early' => $usedEarly]);
@@ -1273,7 +1392,7 @@ final class VoiceSession
                 // Someone else in the call may have opted out since it was said, while it waited for whisper.
                 $people = $this->unlessOptedOut($people);
                 $name = $this->nameOf($userId);
-                $said = $this->remember(Lookups::personLine($name, $text), $this->unlessForgotten($people, $forgotten));
+                $said = $this->remember(Lookups::personLine($name, $text), $this->unlessForgotten($people, $forgotten), $stamp);
 
                 // Someone said the leave phrase, and the bot is saying okay: that is the end of the call too.
                 if ($this->stopped || $this->leaving) {
@@ -1339,8 +1458,9 @@ final class VoiceSession
      * @param array{name: string, text: string, said: string, people: list<string>|null, forgotten: array<string, int>, replaced: int} $question See {@see hearUtterance()}.
      * @param float $endedAt When they stopped saying it, to time the answer from.
      * @param array<string, int> $forgotten How often each memory had been forgotten when it was said.
+     * @param EarlyQuestion|null $asked What Claude was asked while they paused, when it was: see {@see askEarly()}.
      */
-    private function answerUtterance(string $userId, array $question, float $endedAt, array $forgotten): ?PromiseInterface
+    private function answerUtterance(string $userId, array $question, float $endedAt, array $forgotten, ?EarlyQuestion $asked = null): ?PromiseInterface
     {
         $unanswered = match (true) {
             $this->stopped || $this->leaving => 'the session stopped',
@@ -1355,12 +1475,13 @@ final class VoiceSession
 
         if ($unanswered !== null) {
             $this->log('debug', 'Not answering', ['user' => $userId, 'reason' => $unanswered]);
+            $this->dropQuestion($asked, 'it was not answered');
 
             return null;
         }
 
         // Who was there when it was said: answer() takes who is there now, and uses no group's memory unless they are the same.
-        return $this->answer($userId, $question['name'], $question['text'], $endedAt, $question['people'], forgotten: $forgotten, said: $question['said']);
+        return $this->answer($userId, $question['name'], $question['text'], $endedAt, $question['people'], forgotten: $forgotten, said: $question['said'], early: $asked);
     }
 
     /**
@@ -1486,9 +1607,11 @@ final class VoiceSession
      * @param array<string, int>|null $forgotten How often each memory had been forgotten when they said it, when that
      *                                           is known: otherwise it is taken now.
      * @param string $said The entry of the transcript that is answered, when it is what they said.
+     * @param EarlyQuestion|null $early What Claude was asked while they paused: its answer is used when the prompt built
+     *        now is the one it was asked, and thrown away, with Claude asked again, when it is not.
      * @return PromiseInterface<mixed> Resolves once the answer is posted and the bot has stopped speaking.
      */
-    private function answer(string $userId, string $name, string $question, float $endedAt, ?array $people, ?array $lookedUp = null, ?array $forgotten = null, string $said = ''): PromiseInterface
+    private function answer(string $userId, string $name, string $question, float $endedAt, ?array $people, ?array $lookedUp = null, ?array $forgotten = null, string $said = '', ?EarlyQuestion $early = null): PromiseInterface
     {
         $asking = microtime(true);
         // How often each memory was forgotten before what they said was said, or else before Claude is asked
@@ -1584,7 +1707,21 @@ final class VoiceSession
         // Where the time to a slow answer went: logged once the first piece of the answer is there.
         $started = fn (array $timing) => $this->log('info', 'Claude started answering', ['user' => $userId, ...$timing, 'held' => $full]);
 
-        return $this->ask($userId, $this->prompt($userId, $name, $said, $group, $sharers, $basis !== null, $lookedUp['text'] ?? null), $full ? static fn () => null : $handOff->push(...), $started)->then(
+        $prompt = $this->prompt($userId, $name, $said, $group, $sharers, $basis !== null, $lookedUp['text'] ?? null);
+        $onText = $full ? static fn () => null : $handOff->push(...);
+
+        // What was asked while they paused, when what Claude is asked now is the same: its answer is what it would be.
+        // Whatever changed in between, a memory, who is in the call, another line, is in the prompt.
+        if ($early?->matches($prompt)) {
+            unset($this->questions[spl_object_id($early)]);
+            $this->log('info', 'Used the early question', ['user' => $userId, 'ahead_ms' => $early->ageMs()]);
+            $answered = $this->conclude($userId, $early->adopt($onText, $started));
+        } else {
+            $this->dropQuestion($early, 'what was asked changed');
+            $answered = $this->ask($userId, $prompt, $onText, $started);
+        }
+
+        return $answered->then(
             function (?string $answer) use ($sentences, $handOff, $full, $lookedUp, $forgotten, &$spoken, $userId, $sharers, $depends, $basis, $among, $name, $question, $endedAt, $asking, $people) {
                 // It was stopped before anything of it was heard, and Claude Code with it: there is no answer.
                 if ($answer === null) {
@@ -1733,7 +1870,8 @@ final class VoiceSession
      */
     private function wait(): void
     {
-        if ($this->stopped) {
+        // One is waiting already: Claude was asked early, and another was started then.
+        if ($this->stopped || $this->waitingClaude !== null) {
             return;
         }
 
@@ -1769,12 +1907,24 @@ final class VoiceSession
      */
     private function ask(string $userId, string $prompt, callable $onText, ?callable $onStarted = null): PromiseInterface
     {
+        return $this->conclude($userId, $this->begin($userId, $prompt, $onText, $onStarted));
+    }
+
+    /**
+     * Gives Claude the prompt, without making it the answer anyone is waiting for: see {@see conclude()}.
+     *
+     * @param bool $early Whether it is asked while the person is still pausing: see {@see askEarly()}.
+     * @return array{PromiseInterface<string|null>, PromiseInterface<null>, Closure(): void} Claude's answer, what
+     *         resolves when it is ended, and what ends it.
+     */
+    private function begin(string $userId, string $prompt, callable $onText, ?callable $onStarted = null, bool $early = false): array
+    {
         $waiting = $this->waitingClaude;
         $this->waitingClaude = null;
         // How long the process that gets the question had been waiting for one, or null when none was: one
         // that only just started may still be starting, which the time to the first word then includes.
         // And how much it was given: the whole call so far, which grows. Counts, never what was said.
-        $this->log('info', 'Asked Claude', ['user' => $userId, 'waited_ms' => $waiting?->waitedMs(), 'lines' => count($this->transcript), 'characters' => mb_strlen($prompt)]);
+        $this->log('info', 'Asked Claude', ['user' => $userId, 'waited_ms' => $waiting?->waitedMs(), 'lines' => count($this->transcript), 'characters' => mb_strlen($prompt), 'early' => $early]);
 
         // Resolved when the answer is stopped, and the process started for the question, when there is one.
         $ended = new Deferred();
@@ -1819,10 +1969,23 @@ final class VoiceSession
             $waiting?->stop();
             $started?->cancel();
         };
+        return [$answer, $ended->promise(), $end];
+    }
+
+    /**
+     * Makes what Claude was asked the answer to someone: it can be stopped from now, and the next question gets
+     * a process of its own once it is over.
+     *
+     * @param array{PromiseInterface<string|null>, PromiseInterface<null>, Closure(): void} $asked See {@see begin()}.
+     * @return PromiseInterface<string|null> As {@see ask()}.
+     */
+    private function conclude(string $userId, array $asked): PromiseInterface
+    {
+        [$answer, $ended, $end] = $asked;
         // What can stop the answer, from when Claude is asked: see stopAnswer().
         $this->answering = ['user' => $userId, 'stopped' => false, 'cut' => new Deferred(), 'end' => $end];
 
-        return race([$answer, $ended->promise()])->finally($this->wait(...));
+        return race([$answer, $ended])->finally($this->wait(...));
     }
 
     /**
@@ -2141,8 +2304,9 @@ final class VoiceSession
      * @param list<string> $sharers Whose shared memories are added: see {@see sharers()}.
      * @param bool $personalAllowed Whether the asker's personal memory may be added: see {@see personalMemoryBasis()}.
      * @param string|null $lookedUp What was looked up for them, when Claude is asked to tell them that: no memory is added then.
+     * @param bool $unwritten Whether $said is not in the transcript yet, as when Claude is asked early: it is then added to the end of it.
      */
-    private function prompt(string $userId, string $name, string $said, ?array $people, array $sharers, bool $personalAllowed, ?string $lookedUp = null): string
+    private function prompt(string $userId, string $name, string $said, ?array $people, array $sharers, bool $personalAllowed, ?string $lookedUp = null, bool $unwritten = false): string
     {
         // Telling what was looked up has no memory in it: it tells what was found, so there is nothing in it
         // for a web page to make it repeat.
@@ -2174,7 +2338,7 @@ final class VoiceSession
             }
         }
 
-        return $remembered . "Transcript of the voice call so far:\n\n{$this->conversation()}\n\n" . Lookups::asking($name, $said);
+        return $remembered . "Transcript of the voice call so far:\n\n{$this->conversation($unwritten ? $said : null)}\n\n" . Lookups::asking($name, $said);
     }
 
     /**
@@ -2182,10 +2346,12 @@ final class VoiceSession
      * answers and what was looked up, each with its time, in the order it was said. Of a call too long to fit,
      * the end: see {@see Lookups::recent()}. It is taken in the same step as who is in the call and whose memory
      * may be used are checked, with nothing to wait for in between.
+     *
+     * @param string|null $next The entry that is added to it next, when it is not in it yet.
      */
-    private function conversation(): string
+    private function conversation(?string $next = null): string
     {
-        return Lookups::recent(implode("\n", $this->transcript));
+        return Lookups::recent(implode("\n", $next === null ? $this->transcript : [...$this->transcript, $next]));
     }
 
     /**
@@ -2218,11 +2384,12 @@ final class VoiceSession
      * Adds a line to the transcript, and to what the memory of the people who were there is updated from.
      *
      * @param list<string>|null $people Who was in the call: see {@see group()}.
+     * @param string|null $stamp The time of the entry, when it was fixed before: see {@see askEarly()}. Now otherwise.
      * @return string The entry it was added as, with its time.
      */
-    private function remember(string $line, ?array $people): string
+    private function remember(string $line, ?array $people, ?string $stamp = null): string
     {
-        $line = date('[H:i:s] ') . $line;
+        $line = ($stamp ?? date('[H:i:s] ')) . $line;
         $this->transcript[++$this->entries] = $line;
 
         file_put_contents("{$this->directory}/transcript.txt", $line . PHP_EOL, FILE_APPEND);

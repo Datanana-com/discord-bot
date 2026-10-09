@@ -69,7 +69,7 @@ final class VoiceWholeCallTest extends VoiceTestCase
 
         // The log says how much Claude was given, in counts: never a word of it.
         $asked = $this->logged('Asked Claude')[0];
-        $this->assertSame(['guild', 'session', 'user', 'waited_ms', 'lines', 'characters'], array_keys($asked));
+        $this->assertSame(['guild', 'session', 'user', 'waited_ms', 'lines', 'characters', 'early'], array_keys($asked));
         $this->assertSame([601, mb_strlen($prompt)], [$asked['lines'], $asked['characters']]);
         // In characters, not bytes.
         $this->assertNotSame(strlen($prompt), mb_strlen($prompt));
