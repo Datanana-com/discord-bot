@@ -1148,7 +1148,7 @@ final class VoiceSession
      * @param array<string, int> $forgotten How often each memory had been forgotten when it was said.
      * @param float $from When they started saying it, by the clock that only goes forward: see {@see CALLED_SECONDS}.
      * @param float $until When they stopped, by the same clock.
-     * @return PromiseInterface<array{name: string, text: string, said: string, people: list<string>|null, replaced: int}|null>
+     * @return PromiseInterface<array{name: string, text: string, said: string, people: list<string>|null, forgotten: array<string, int>, replaced: int}|null>
      *         The question in it, when it is one for the bot. It rejects when it can't be transcribed.
      */
     private function hearUtterance(string $userId, string $wavPath, float $endedAt, ?array $people, float $seconds, array $forgotten, float $from, float $until): PromiseInterface
@@ -1230,7 +1230,7 @@ final class VoiceSession
                     $this->stopAnswer($userId, 'a new question', $endedAt);
                 }
 
-                return ['name' => $name, 'text' => $text, 'said' => $said, 'people' => $people, 'replaced' => $this->replaced[$userId][0]];
+                return ['name' => $name, 'text' => $text, 'said' => $said, 'people' => $people, 'forgotten' => $this->forgotten, 'replaced' => $this->replaced[$userId][0]];
             });
     }
 
@@ -1238,7 +1238,7 @@ final class VoiceSession
      * Answers a question when its turn has come, unless something changed while it waited behind the answers
      * before it: it was transcribed, and decided to be a question, when it was said.
      *
-     * @param array{name: string, text: string, said: string, people: list<string>|null, replaced: int} $question See {@see hearUtterance()}.
+     * @param array{name: string, text: string, said: string, people: list<string>|null, forgotten: array<string, int>, replaced: int} $question See {@see hearUtterance()}.
      * @param float $endedAt When they stopped saying it, to time the answer from.
      * @param array<string, int> $forgotten How often each memory had been forgotten when it was said.
      */
@@ -1248,6 +1248,8 @@ final class VoiceSession
             $this->stopped || $this->leaving => 'the session stopped',
             // What they said is in the transcript: Claude is not asked about it, and nothing is said to them.
             isset($this->optedOut[$userId]) => 'they opted out',
+            // /forget took what they said out of the transcript since: Claude is not given it after all.
+            $this->unlessForgotten($question['people'], $question['forgotten']) !== $question['people'] => 'it was forgotten',
             // They said the stop phrase, or asked something else, since.
             $this->replaced[$userId][0] !== $question['replaced'] => $this->replaced[$userId][1],
             default => null,
@@ -1342,8 +1344,9 @@ final class VoiceSession
         $okay = $this->synthesize(self::OKAY, $path);
 
         return $this->player->ready($okay)
-            // It holds nothing of anyone's memory, so only the call ending, or them opting out, stops it.
-            ->then(fn () => $this->stillTalkingTo($userId) ? race([$this->player->play($okay), $this->left->promise()]) : $okay->drop())
+            // It holds nothing of anyone's memory, so only the call ending, or them opting out, stops it: not the
+            // leave phrase, which this is the answer to.
+            ->then(fn () => ! $this->stopped && ! isset($this->optedOut[$userId]) ? race([$this->player->play($okay), $this->left->promise()]) : $okay->drop())
             ->catch(fn (Throwable $e) => $this->log('warning', 'Could not say okay: ' . $e->getMessage(), ['user' => $userId]));
     }
 
@@ -1679,6 +1682,20 @@ final class VoiceSession
         $ended = new Deferred();
         $started = null;
         $stopped = false;
+        // What Claude Code still writes once the answer is stopped is nobody's: it had it written before it
+        // was ended, and the answer after this one may have begun by then. Not arrow functions: $stopped changes.
+        $written = $onText;
+        $onText = static function (string $text) use ($written, &$stopped): void {
+            if (! $stopped) {
+                $written($text);
+            }
+        };
+        $begun = $onStarted;
+        $onStarted = $begun === null ? null : static function (array $timing) use ($begun, &$stopped): void {
+            if (! $stopped) {
+                $begun($timing);
+            }
+        };
 
         if ($waiting === null) {
             $this->log('warning', 'No Claude Code process was waiting for the question', ['user' => $userId]);
@@ -1964,11 +1981,12 @@ final class VoiceSession
     }
 
     /**
-     * Whether something can still be said to someone: not once the call stopped or they opted out.
+     * Whether something can still be said to someone: not once the call stopped, someone said the leave phrase,
+     * or they opted out.
      */
     private function stillTalkingTo(string $userId): bool
     {
-        return ! $this->stopped && ! isset($this->optedOut[$userId]);
+        return ! $this->stopped && ! $this->leaving && ! isset($this->optedOut[$userId]);
     }
 
     /**

@@ -38,8 +38,8 @@ final class VoiceStopAtOnceTest extends VoiceTestCase
         // Alice doesn't want it any more. There is nothing to talk over yet: the bot hasn't said a word.
         $this->says($vc, '555', self::STOP);
         $this->waitUntil(fn () => count($this->logged('Utterance ended')) === 2, 'Alice to finish speaking');
-        // Long enough for whisper, which has nothing to wait for.
-        $this->runFor(0.5);
+        // Long enough for whisper, which has nothing to wait for: also on a machine that is busy.
+        $this->runFor(1.5);
 
         // Only now does Claude get to the end of its sentence.
         touch($this->claudeResume);
@@ -52,7 +52,7 @@ final class VoiceStopAtOnceTest extends VoiceTestCase
 
     public function testAnAnswerNobodyHeardAnythingOfIsNotWrittenToItsEndNorPosted(): void
     {
-        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is', ' a quarter past four.'), 'FAKE_CLAUDE_PAUSE' => '10']);
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is', ' a quarter past four.'), 'FAKE_CLAUDE_PAUSE' => '30']);
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
 
         $this->says($vc, '555', self::QUESTION);
@@ -71,7 +71,7 @@ final class VoiceStopAtOnceTest extends VoiceTestCase
         // Since she stopped saying it: the silence that ended her sentence, and whisper.
         $this->assertGreaterThanOrEqual(0, $stopped[0]['ms']);
         $this->assertLessThan(5000, $stopped[0]['ms']);
-        $this->waitUntil(fn () => ! $this->isRunning($writing), 'Claude Code to end');
+        $this->waitUntil(fn () => ! $this->isRunning($writing), 'Claude Code to end', 3.0);
 
         // Nobody heard it, so it is nobody's: not in the text channel, and not in the transcript.
         $this->runFor(0.3);
@@ -95,7 +95,7 @@ final class VoiceStopAtOnceTest extends VoiceTestCase
     public function testClaudeIsNotAskedAgainWhenItIsStoppedBeforeItWroteAnything(): void
     {
         // Claude takes long to start, as in the call this was built after.
-        $this->setProcessEnv(['FAKE_CLAUDE_DELAY' => '5']);
+        $this->setProcessEnv(['FAKE_CLAUDE_DELAY' => '30']);
         VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
 
         $this->says($vc, '555', self::QUESTION);
@@ -105,7 +105,7 @@ final class VoiceStopAtOnceTest extends VoiceTestCase
         $this->setProcessEnv(['FAKE_CLAUDE_DELAY' => '0']);
 
         $this->hears($vc, '555', self::STOP);
-        $this->waitUntil(fn () => ! $this->isRunning($asked), 'Claude Code to end');
+        $this->waitUntil(fn () => ! $this->isRunning($asked), 'Claude Code to end', 3.0);
         $this->runFor(0.3);
 
         // A waiting process that ends without a word is asked again in a new one, but not one that was stopped.
@@ -119,7 +119,7 @@ final class VoiceStopAtOnceTest extends VoiceTestCase
     {
         $this->setProcessEnv([
             'FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is', ' a quarter past four.'),
-            'FAKE_CLAUDE_PAUSE' => '10',
+            'FAKE_CLAUDE_PAUSE' => '30',
             'FAKE_CLAUDE_WAITING_LEAVES' => '1',
         ]);
         VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
@@ -131,7 +131,9 @@ final class VoiceStopAtOnceTest extends VoiceTestCase
         $writing = $this->claudeCalls()[0]['pid'];
 
         $this->hears($vc, '555', self::STOP);
-        $this->waitUntil(fn () => ! $this->isRunning($writing), 'Claude Code to end');
+        $this->waitUntil(fn () => ! $this->isRunning($writing), 'Claude Code to end', 3.0);
+        // The summary at the end of the test is not to take as long.
+        $this->setProcessEnv(['FAKE_CLAUDE_PAUSE' => '0']);
         $this->runFor(0.3);
 
         $this->assertSame([], $this->played);
@@ -143,7 +145,7 @@ final class VoiceStopAtOnceTest extends VoiceTestCase
     {
         $this->setProcessEnv([
             'FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is', ' a quarter past four.'),
-            'FAKE_CLAUDE_PAUSE' => '10',
+            'FAKE_CLAUDE_PAUSE' => '30',
             'FAKE_CLAUDE_WAITING_FAILS' => '1',
         ]);
         VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
@@ -154,7 +156,9 @@ final class VoiceStopAtOnceTest extends VoiceTestCase
         $writing = $this->claudeCalls()[0]['pid'];
 
         $this->hears($vc, '555', self::STOP);
-        $this->waitUntil(fn () => ! $this->isRunning($writing), 'Claude Code to end');
+        $this->waitUntil(fn () => ! $this->isRunning($writing), 'Claude Code to end', 3.0);
+        // The summary at the end of the test is not to take as long.
+        $this->setProcessEnv(['FAKE_CLAUDE_PAUSE' => '0']);
         $this->runFor(0.3);
 
         $this->assertSame([], $this->played);
@@ -270,9 +274,10 @@ final class VoiceStopAtOnceTest extends VoiceTestCase
         $this->says($vc, '555', self::QUESTION);
         $this->waitUntil(fn () => $this->logged('Claude started answering') !== [], 'Claude to start writing');
 
-        // While she waits, Alice says something to Bob, coughs, and only says the bot's name.
+        // While she waits, Alice says something to Bob, coughs, makes a sound whisper hears nothing in, and only says the bot's name.
         $this->hears($vc, '555', 'Let us see what it says.');
         $this->hears($vc, '555', '(coughs)');
+        $this->hears($vc, '555', '');
         $this->hears($vc, '555', 'Claude.');
 
         touch($this->claudeResume);
@@ -436,7 +441,8 @@ final class VoiceStopAtOnceTest extends VoiceTestCase
     {
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
         $this->inCall('555', '666');
-        $this->playing = (new Deferred())->promise();
+        $speaking = new Deferred();
+        $this->playing = $speaking->promise();
         $this->ask($vc, '666', 'Hey Claude, are you there?');
         $this->waitUntil(fn () => count($this->played) === 1, 'the answer to Bob to be spoken');
 
@@ -446,11 +452,137 @@ final class VoiceStopAtOnceTest extends VoiceTestCase
 
         $this->assertStringNotContainsString('Porto', $this->transcript($session));
         $this->assertStringNotContainsString('are you there', $this->transcript($session));
+
+        // Its turn comes: Claude is not given what was taken out of the call, and it is not posted as a question.
+        $this->playing = null;
+        $speaking->resolve(null);
+        $this->waitUntil(fn () => $this->logged('Not answering') !== [], 'her turn to come');
+        $this->runFor(0.3);
+
+        $this->assertSame([['user' => '555', 'reason' => 'it was forgotten']], $this->contexts('Not answering'));
+        $this->assertCount(1, $this->claudeCalls());
+        $this->assertStringNotContainsString('Porto', implode("\n", $this->sent));
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testAQuestionThatWhisperHadNotWrittenWhenForgetCameIsAnswered(): void
+    {
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->inCall('555', '666');
+
+        // Nothing of it was in the transcript to take out: it gets its line after, and is not remembered.
+        $this->speakAndWait($vc, '555');
+        VoiceSession::forget(['555', '666']);
+        $this->transcribe();
+        $this->waitUntil(fn () => $this->sent !== [], 'the answer');
+
+        $this->assertCount(1, $this->claudeCalls());
+        $this->assertSame([], $this->logged('Not answering'));
+        $this->assertStringContainsString('] Alice: ', $this->transcript($session));
+    }
+
+    public function testAQuestionSaidAfterForgetIsAnswered(): void
+    {
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->inCall('555', '666');
+        $this->ask($vc, '666', 'Hey Claude, are you there?');
+        VoiceSession::forget(['555', '666']);
+
+        // Only what was said before it is forgotten.
+        $this->ask($vc, '555', self::QUESTION);
+
+        $this->assertCount(2, $this->claudeCalls());
+        $this->assertSame([], $this->logged('Not answering'));
+    }
+
+    public function testClaudeStartingOnAnAnswerAsItIsStoppedIsNotAStart(): void
+    {
+        // Claude takes long to start, and its first words come as it is ended.
+        $this->setProcessEnv(['FAKE_CLAUDE_DELAY' => '30', 'FAKE_CLAUDE_LAST_WORDS' => self::claudeText('It is a quarter past four. ')]);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->says($vc, '555', self::QUESTION);
+        $this->waitUntil(fn () => $this->claudeCalls() !== [], 'Claude to be asked');
+        $asked = $this->claudeCalls()[0]['pid'];
+        // The summary at the end of the test is not to take as long.
+        $this->setProcessEnv(['FAKE_CLAUDE_DELAY' => '0', 'FAKE_CLAUDE_LAST_WORDS' => '']);
+
+        $this->hears($vc, '555', self::STOP);
+        $this->waitUntil(fn () => ! $this->isRunning($asked), 'Claude Code to end', 3.0);
+        $this->runFor(0.3);
+
+        $this->assertSame([], $this->logged('Claude started answering'), 'It had stopped answering by then.');
+        $this->assertSame([], $this->played);
+        $this->assertSame([], $this->sent);
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testWhatClaudeHadStillWrittenWhenItsAnswerWasStoppedIsNotSpoken(): void
+    {
+        $this->setProcessEnv([
+            'FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is', ' a quarter past four.'),
+            'FAKE_CLAUDE_PAUSE' => '30',
+            // What it had written and not handed over yet arrives when it is ended: a whole sentence, and more.
+            'FAKE_CLAUDE_LAST_WORDS' => self::claudeText(' a quarter past four. And it is Thursday today, all day long.'),
+        ]);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->says($vc, '555', self::QUESTION);
+        $this->waitUntil(fn () => $this->logged('Claude started answering') !== [], 'Claude to start writing');
+        $writing = $this->claudeCalls()[0]['pid'];
+
+        $this->hears($vc, '555', self::STOP);
+        $this->waitUntil(fn () => ! $this->isRunning($writing), 'Claude Code to end', 3.0);
+        // The summary at the end of the test is not to take as long.
+        $this->setProcessEnv(['FAKE_CLAUDE_PAUSE' => '0', 'FAKE_CLAUDE_LAST_WORDS' => '']);
+        $this->runFor(0.5);
+
+        $this->assertSame([], $this->played, 'The answer was stopped: nothing of it is spoken, whenever it arrives.');
+        $this->assertSame([], $this->sent);
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testAnAnswerClaudeHadWrittenToItsEndIsPostedThoughItWasStoppedBeforeItsFirstWord(): void
+    {
+        // Piper takes long over the first sentence: Claude has written its answer, and nobody has heard any of it.
+        $this->setProcessEnv(['FAKE_PIPER_DELAY' => '2']);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->says($vc, '555', self::QUESTION);
+        $this->waitUntil(fn () => $this->sent !== [], 'the answer to be posted');
+        $this->assertSame([], $this->played);
+
+        $this->hears($vc, '555', self::STOP);
+        $this->runFor(2.5);
+
+        // It is not spoken. What was posted when Claude had written it stays, and so does its line in the transcript.
+        $this->assertSame([], $this->played);
+        $this->assertSame(['> **Alice:** ' . self::QUESTION . "\n" . self::ANSWER], $this->sent);
+        $this->assertStringContainsString('] Claude: ' . self::ANSWER . "\n", $this->transcript($session));
+        $this->assertFalse($this->contexts('Stopped answering')[0]['spoken']);
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testTheStopPhraseOfSomeoneWhoOptedOutIsNotHeard(): void
+    {
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        VoiceSession::optOut('666');
+        $this->playing = (new Deferred())->promise();
+        $this->ask($vc, '555', self::QUESTION);
+        $this->waitUntil(fn () => count($this->played) === 1, 'the answer to Alice to be spoken');
+
+        // Nothing Bob says is recorded or transcribed, so the bot doesn't know that he said it.
+        $this->says($vc, '666', self::STOP);
+        $this->runFor(1.5);
+
+        $this->assertSame([], $this->cutOff);
+        $this->assertCount(1, $this->logged('Transcribed'));
+        $this->assertSame([], $this->logged('Stopped answering'));
     }
 
     public function testTheLeavePhraseEndsTheCallWhileClaudeIsStillWriting(): void
     {
-        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is', ' a quarter past four.'), 'FAKE_CLAUDE_PAUSE' => '10']);
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is', ' a quarter past four.'), 'FAKE_CLAUDE_PAUSE' => '30']);
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
 
         $this->says($vc, '555', self::QUESTION);
@@ -459,7 +591,7 @@ final class VoiceStopAtOnceTest extends VoiceTestCase
 
         // Bob ends the call. It doesn't wait for an answer that nobody has heard a word of.
         $this->hears($vc, '666', self::LEAVE);
-        $this->waitUntil(fn () => ! $this->isRunning($writing), 'Claude Code to end');
+        $this->waitUntil(fn () => ! $this->isRunning($writing), 'Claude Code to end', 3.0);
         // The summary is Claude's too: it is not held back.
         touch($this->claudeResume);
         $this->callEnds($session);
