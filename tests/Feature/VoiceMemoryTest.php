@@ -657,6 +657,35 @@ final class VoiceMemoryTest extends VoiceTestCase
         $this->assertSame(self::TRIP, $this->memory()->read(['555', '666']));
     }
 
+    public function testDoesNotUseAGroupMemoryWhenSomeoneOptsOutAfterAQuestionWasTranscribedAndBeforeItsTurn(): void
+    {
+        $this->memory()->save(['555', '666'], self::TRIP);
+        $this->inCall('555', '666');
+        $this->setProcessEnv(['FAKE_CLAUDE_PAUSE' => '10']);
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        // Claude is writing its answer to Bob when Alice asks: whisper has written her question, and it waits for its turn.
+        $this->says($vc, '666', 'Hey Claude, what time is it?');
+        $this->waitUntil(fn () => $this->logged('Claude started answering') !== [], 'Claude to start writing');
+        $this->assertStringContainsString('Lisbon', $this->claudeCalls()[0]['prompt']);
+        $this->says($vc, '555', 'Claude, what day is it?');
+        $this->waitUntil(fn () => count($this->logged('Transcribed')) === 2, 'her question to be transcribed');
+
+        // Bob opts out then. Who is in the call is taken again when her turn comes.
+        VoiceSession::optOut('666');
+        $this->setProcessEnv(['FAKE_CLAUDE_PAUSE' => '0']);
+        touch($this->claudeResume);
+        $this->waitUntil(fn () => $this->sent !== [], 'the answer to Alice');
+
+        $this->assertCount(2, $this->claudeCalls());
+        $this->assertStringContainsString('Answer Alice.', $this->claudeCalls()[1]['prompt']);
+        $this->assertStringNotContainsString('Lisbon', $this->claudeCalls()[1]['prompt']);
+
+        await($session->stop());
+
+        $this->assertSame(self::TRIP, $this->memory()->read(['555', '666']));
+    }
+
     public function testDoesNotSaveAMemoryWhenSomeoneOptsOutWhileClaudeIsWritingIt(): void
     {
         $this->inCall('555', '666');

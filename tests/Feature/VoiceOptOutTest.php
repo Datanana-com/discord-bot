@@ -146,39 +146,35 @@ final class VoiceOptOutTest extends VoiceTestCase
 
     public function testDropsWhatWaitedToBeTranscribedWhenSomeoneOptedOut(): void
     {
-        $this->setProcessEnv(['FAKE_CLAUDE_DELAY' => '1']);
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
 
-        // Both ask Claude something. Alice is answered first, and Bob opts out while he waits for his turn.
-        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
-        $this->speak($vc, ssrc: 2, userId: '666', seconds: 1.0);
-        $this->waitUntil(fn () => is_file($this->claudeLog), 'Claude to be asked');
-        $this->assertCount(1, glob("{$session->directory}/utterances/*"), 'What Bob said waits to be transcribed.');
+        // Both ask Claude something. Whisper is busy with what Alice said, and Bob opts out while what he said waits for it.
+        $this->speakAndWait($vc, '555', '666');
+        $this->assertCount(2, glob("{$session->directory}/utterances/*"), 'What Bob said waits to be transcribed.');
         VoiceSession::optOut('666');
         // Right away, so nothing of him is left if the bot stops before it gets to it.
-        $this->assertSame([], glob("{$session->directory}/utterances/*"), 'What he said is deleted.');
+        $this->assertCount(1, glob("{$session->directory}/utterances/*"), 'What he said is deleted.');
+        $this->transcribe();
         $this->waitUntil(fn () => $this->sent !== [], 'Alice to be answered');
         $this->runFor(0.5);
 
-        $this->assertCount(1, $this->logged('Transcribed'));
+        $this->assertCount(1, $this->logged('Transcribed'), 'Whisper was never given what he said.');
         $this->assertStringNotContainsString('Bob', $this->transcript($session));
         $this->assertStringContainsString('Answer Alice.', file_get_contents($this->claudeLog), 'Claude was only asked by Alice.');
         $this->assertCount(1, $this->sent);
-
-        // Only the answer is slow, not the call's summary.
-        $this->setProcessEnv(['FAKE_CLAUDE_DELAY' => '0']);
+        $this->assertSame([], glob("{$session->directory}/utterances/*"));
+        $this->assertSame([], $this->loggedProblems());
     }
 
-    public function testDoesNotTranscribeWhatWasDeletedWhenSomeoneOptsBackInBeforeItsTurn(): void
+    public function testDoesNotTranscribeWhatWasDeletedWhenSomeoneOptsBackInBeforeWhisperGetsToIt(): void
     {
-        $this->setProcessEnv(['FAKE_CLAUDE_DELAY' => '1']);
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
 
-        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
-        $this->speak($vc, ssrc: 2, userId: '666', seconds: 1.0);
-        $this->waitUntil(fn () => is_file($this->claudeLog), 'Claude to be asked');
+        // What Bob said waits for whisper behind what Alice said.
+        $this->speakAndWait($vc, '555', '666');
         VoiceSession::optOut('666');
         VoiceSession::optIn('666');
+        $this->transcribe();
         $this->waitUntil(fn () => $this->sent !== [], 'Alice to be answered');
         $this->runFor(0.5);
 
@@ -186,8 +182,6 @@ final class VoiceOptOutTest extends VoiceTestCase
         $this->assertCount(1, $this->logged('Transcribed'));
         $this->assertStringNotContainsString('Bob', $this->transcript($session));
         $this->assertSame([], $this->loggedProblems());
-
-        $this->setProcessEnv(['FAKE_CLAUDE_DELAY' => '0']);
     }
 
     public function testDropsWhatWasBeingTranscribedWhenSomeoneOptedOut(): void

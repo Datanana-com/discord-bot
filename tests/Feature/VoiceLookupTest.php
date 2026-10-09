@@ -557,6 +557,59 @@ final class VoiceLookupTest extends VoiceTestCase
         $this->assertSame([['guild' => self::GUILD_ID, 'session' => $session->id, 'user' => '555', 'reason' => 'a shared memory was taken back']], $this->logged('Not answering'));
     }
 
+    public function testTheStopPhraseStopsWhatIsBeingToldOfWhatWasLookedUp(): void
+    {
+        $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 1, 'the lookup to start');
+        $this->setProcessEnv([
+            'FAKE_CLAUDE_OUTPUT' => self::claudeStream('The first sentence of it is here. ', 'And this is the second one.'),
+            'FAKE_CLAUDE_PAUSE' => '10',
+        ]);
+        touch($this->go);
+        $this->waitUntil(fn () => in_array('The first sentence of it is here.', array_map(file_get_contents(...), $this->played), true), 'its first sentence to be spoken');
+
+        // Bob says the stop phrase while Claude is still writing the second sentence: telling is stopped like any answer.
+        $this->says($vc, '666', 'Stop, Claude.');
+        $this->waitUntil(fn () => $this->logged('Stopped answering') !== [], 'the telling to be stopped');
+        touch($this->claudeResume);
+        $this->waitUntil(fn () => count($this->logged('Claude answered')) === 2, 'Claude to be done');
+        $this->runFor(0.5);
+
+        $this->assertSame([self::LOOKING, 'The first sentence of it is here.'], array_map(file_get_contents(...), $this->played));
+        $this->assertSame(['user' => '555', 'by' => '666', 'reason' => 'the stop phrase'], array_slice($this->contexts('Stopped answering')[0], 0, 3));
+        // The call heard its start, so it is posted and in the transcript whole, as an answer that was cut is.
+        $this->assertStringEndsWith("The first sentence of it is here. And this is the second one.", $this->answersToAlice()[2]);
+        $this->assertStringContainsString('] Claude: The first sentence of it is here. And this is the second one.' . "\n", $this->transcript($session));
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testDoesNotTellWhatWasLookedUpOnceSomeoneSaidTheLeavePhrase(): void
+    {
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+        $this->ask($vc, '555', self::QUESTION);
+        $this->waitUntil(fn () => count($this->lookups()) === 1 && count($this->played) === 1, 'the lookup to start');
+
+        // Bob ends the call, and what was looked up arrives while the bot is still saying okay.
+        $okay = new Deferred();
+        $this->playing = $okay->promise();
+        $this->says($vc, '666', 'Disconnect Claude.');
+        $this->waitUntil(fn () => count($this->played) === 2, 'okay to be spoken');
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream(self::TOLD)]);
+        touch($this->go);
+        $this->waitUntil(fn () => count($this->answersToAlice()) === 2, 'what was looked up to be posted');
+        $this->runFor(0.5);
+
+        // It is posted, as after a call. Nobody is told: the call is ending.
+        $this->assertCount(2, $this->claudeCalls(), 'Claude answered and looked it up: it was not asked to tell.');
+
+        $this->playing = null;
+        $okay->resolve(null);
+        $this->waitUntil(fn () => VoiceSession::unfinished() === [], 'the call to be over');
+        $this->assertCount(2, $this->played);
+        $this->assertSame([], $this->loggedProblems());
+    }
+
     public function testRemembersNothingOfWhatWasLookedUpOnceSomeoneJoinedWhileItWasLookedUp(): void
     {
         // Alice is alone with the bot when she asks, and her memory is used in calls with others too (the default).

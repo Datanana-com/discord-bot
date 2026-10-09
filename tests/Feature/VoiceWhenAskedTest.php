@@ -201,29 +201,33 @@ final class VoiceWhenAskedTest extends VoiceTestCase
         $this->assertSame([], $this->logged('Not answering'));
     }
 
-    public function testAStopPhraseSaidOverAnAnswerToSomeoneElseStopsNothing(): void
+    public function testAStopPhraseSaidOverAnAnswerToSomeoneElseStopsIt(): void
     {
         VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
-        $speaking = new Deferred();
-        $this->playing = $speaking->promise();
+        // The sentence the bot is speaking is a long one: it never ends by itself here.
+        $this->playing = (new Deferred())->promise();
         $this->ask($vc, '555', 'Hey Claude, what time is it?');
         $this->waitUntil(fn () => count($this->played) === 1, 'the answer to Alice to be spoken');
 
-        // Bob says it while the bot is answering Alice.
+        // Bob says it while the bot is answering Alice. Talking over it is not what stops it: it isn't his answer.
         $this->says($vc, '666', 'Stop, Claude.');
-        $this->waitUntil(fn () => count($this->logged('Utterance ended')) === 2, 'Bob to finish speaking');
-        $this->runFor(0.5);
-
-        // Only Alice can interrupt the answer to her: it is spoken to the end, and the phrase waits its turn.
         $this->assertSame([], $this->cutOff);
-        $this->assertSame([], $this->logged('Not answering'));
 
-        $speaking->resolve(null);
-        $this->waitUntil(fn () => $this->logged('Not answering') !== [], 'the stop phrase to have its turn');
-        $this->runFor(0.3);
+        // The phrase is: anyone in the call can make the bot stop, and it doesn't wait for the answer to be over.
+        $this->waitUntil(fn () => $this->cutOff !== [], 'the answer to be cut off');
+        $this->assertSame([$this->played[0]], $this->cutOff);
+        $this->assertSame([], $this->logged('Interrupted'));
         $this->assertSame([['user' => '666', 'reason' => 'the stop phrase']], $this->contexts('Not answering'));
+        $stopped = $this->contexts('Stopped answering');
+        $this->assertCount(1, $stopped);
+        $this->assertSame(['user', 'by', 'reason', 'ms', 'spoken'], array_keys($stopped[0]));
+        $this->assertSame(['user' => '555', 'by' => '666', 'reason' => 'the stop phrase'], array_slice($stopped[0], 0, 3));
+        $this->assertIsInt($stopped[0]['ms']);
+        $this->assertTrue($stopped[0]['spoken']);
+
+        $this->runFor(0.3);
         $this->assertCount(1, $this->played, 'Nothing is said about it.');
-        $this->assertSame([], $this->cutOff);
+        $this->assertSame([], $this->loggedProblems());
     }
 
     public function testAStopPhraseSaidOverTheirOwnAnswerCutsItLikeAnythingTheySay(): void

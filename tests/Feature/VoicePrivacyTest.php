@@ -234,14 +234,16 @@ final class VoicePrivacyTest extends CommandTestCase
     public function testSomeoneJoiningWhileTheQuestionWaitsForItsTurnCounts(): void
     {
         $this->inCall('555');
-        $this->setProcessEnv(['FAKE_CLAUDE_PAUSE' => '10']);
+        // The bot speaks the first sentence of its answer while Claude is still writing the second.
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream('Finish the trailer first. ', 'Then the store page.'), 'FAKE_CLAUDE_PAUSE' => '10']);
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
         $this->privacy('555', UserSettings::AFTER_SHARE);
 
-        // The first question is being answered, and the second one, asked while Alice was alone, waits behind it.
+        // The first question is being answered, and the second one, asked while Alice was alone, waits behind it:
+        // she talked over an answer she had heard the start of, which Claude writes to its end.
         $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => self::QUESTION]);
         $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
-        $this->waitUntil(fn () => $this->claudeCalls() !== [], 'Claude to be asked');
+        $this->waitUntil(fn () => $this->played !== [], 'the first sentence to be spoken');
         $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
         $this->waitUntil(fn () => count($this->logged('Utterance ended')) === 2, 'the second question to end');
         $this->joins('666');
@@ -258,14 +260,16 @@ final class VoicePrivacyTest extends CommandTestCase
     public function testSomeoneLeavingWhileTheQuestionWaitsForItsTurnDoesNotMakeThemAlone(): void
     {
         $this->inCall('555', '666');
-        $this->setProcessEnv(['FAKE_CLAUDE_PAUSE' => '10']);
+        // The bot speaks the first sentence of its answer while Claude is still writing the second.
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream('Finish the trailer first. ', 'Then the store page.'), 'FAKE_CLAUDE_PAUSE' => '10']);
         $session = VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
         $this->privacy('555', UserSettings::AFTER_SHARE);
 
-        // The second question is asked with Bob in the call, and waits behind the first one.
+        // The second question is asked with Bob in the call, and waits behind the first one, which Claude writes
+        // to its end: Alice heard the start of it.
         $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => self::QUESTION]);
         $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
-        $this->waitUntil(fn () => $this->claudeCalls() !== [], 'Claude to be asked');
+        $this->waitUntil(fn () => $this->played !== [], 'the first sentence to be spoken');
         $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
         $this->waitUntil(fn () => count($this->logged('Utterance ended')) === 2, 'the second question to end');
         $this->leaves('666');

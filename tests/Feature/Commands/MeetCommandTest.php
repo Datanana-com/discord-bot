@@ -68,7 +68,7 @@ final class MeetCommandTest extends CommandTestCase
     /** The names people have on Discord. The bot only knows what Bob goes by in the server: Spartan. */
     private const array USERS = ['555' => 'Alice', '666' => 'Bob', '777' => 'Carol', '888' => 'Dave', '999' => 'Claude', '1234' => 'Jukebox'];
 
-    private const string RECORDING = '🔴 Recording the meeting in <#200>. I only answer what is said with "claude" in it: say it with every question. Say "disconnect claude" to make me leave. It ends when everyone has left, and its channel is deleted. Use /optout if you don\'t want to be recorded. I remember each group\'s calls: see what I remember with /memory, and delete it with /forget.';
+    private const string RECORDING = '🔴 Recording the meeting in <#200>. I only answer what is said with "claude" in it: say it with every question. Say "stop claude" to make me stop. Say "disconnect claude" to make me leave. It ends when everyone has left, and its channel is deleted. Use /optout if you don\'t want to be recorded. I remember each group\'s calls: see what I remember with /memory, and delete it with /forget.';
 
     private const string MISSING_PERMISSION = 'I can\'t make the meeting\'s channel: I need the Manage Channels permission, besides View Channels, Connect and Speak. Ask a server admin to give it to me.';
 
