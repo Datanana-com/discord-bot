@@ -17,6 +17,22 @@ trait UsesStatsDatabase
         $capsule = new DB();
         $capsule->addConnection(['driver' => 'sqlite', 'database' => ':memory:'], Usage::CONNECTION);
         $capsule->setAsGlobal();
+        // Rows a test left held would be written into this test's database.
+        Usage::reset();
+    }
+
+    /**
+     * What is written in the statistics database, in the order it was written: not what is held and not yet.
+     *
+     * @return list<string> Each event's type.
+     */
+    protected function writtenEvents(): array
+    {
+        $connection = DB::connection(Usage::CONNECTION);
+
+        return $connection->getSchemaBuilder()->hasTable('events')
+            ? $connection->table('events')->orderBy('id')->pluck('type')->all()
+            : [];
     }
 
     /**

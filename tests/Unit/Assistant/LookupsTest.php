@@ -162,10 +162,64 @@ final class LookupsTest extends TestCase
 
         $this->assertSame(self::HEADING . ":\n\n{$said}\n\nThe task:\n\n" . self::TASK, $this->calls()[0]['prompt']);
 
-        // One character more, and it gets the end.
-        await($this->lookups()->lookUp(self::TASK, '555', self::HEADING, fn () => "e{$said}"));
+        // One character more, and it gets the end: what was said last, whole.
+        $last = 'Bob: ' . str_repeat('é', 149_995);
+        await($this->lookups()->lookUp(self::TASK, '555', self::HEADING, fn () => "Alice: Hi.\n{$last}"));
 
-        $this->assertSame(self::HEADING . ":\n\n(Its beginning is left out: it is too long.)\n{$said}\n\nThe task:\n\n" . self::TASK, $this->calls()[1]['prompt']);
+        $this->assertSame(self::HEADING . ":\n\n(Its beginning is left out: it is too long.)\n{$last}\n\nThe task:\n\n" . self::TASK, $this->calls()[1]['prompt']);
+    }
+
+    public function testKeepsAConversationThatFitsAsItIs(): void
+    {
+        $said = "Alice: One.\nClaude: Two,\n  on two lines.\nBob: Three.";
+
+        $this->assertSame($said, Lookups::recent($said));
+        $this->assertSame($said, Lookups::recent($said, mb_strlen($said)));
+        $this->assertSame(150_000, Lookups::CONVERSATION_LIMIT);
+    }
+
+    public function testTheEndOfAConversationNeverStartsInTheMiddleOfWhatSomeoneSaid(): void
+    {
+        // An answer of several lines: the later ones are indented, and go on the first.
+        $said = "Alice: One.\nClaude: Two,\n  on three lines,\n  and this is the third.\nBob: Three.\nCarol: Four.";
+        $note = "(Its beginning is left out: it is too long.)\n";
+
+        // The limit falls in the answer's second line: its third line would start what is kept, with nobody's name on it.
+        $this->assertSame("{$note}Bob: Three.\nCarol: Four.", Lookups::recent($said, mb_strlen("ines,\n  and this is the third.\nBob: Three.\nCarol: Four.")));
+        // It falls in the answer's first line: none of the answer is kept.
+        $this->assertSame("{$note}Bob: Three.\nCarol: Four.", Lookups::recent($said, mb_strlen($said) - mb_strlen("Alice: One.\nCla")));
+        // It falls right before the answer: all of it is kept, as nothing of it is missing.
+        $this->assertSame("{$note}Claude: Two,\n  on three lines,\n  and this is the third.\nBob: Three.\nCarol: Four.", Lookups::recent($said, mb_strlen($said) - mb_strlen("Alice: One.\n")));
+        // One character less, and its first letter is: the answer goes.
+        $this->assertSame("{$note}Bob: Three.\nCarol: Four.", Lookups::recent($said, mb_strlen($said) - mb_strlen("Alice: One.\nC")));
+    }
+
+    public function testKeepsNothingOfAConversationWhoseLastEntryAloneIsTooLong(): void
+    {
+        $said = "Alice: One.\nClaude: Two,\n  on two lines.";
+
+        // Only the note: half an answer, starting anywhere, reads as something else.
+        $this->assertSame("(Its beginning is left out: it is too long.)\n", Lookups::recent($said, 20));
+        $this->assertSame("(Its beginning is left out: it is too long.)\n", Lookups::recent("Alice: " . str_repeat('é', 50), 20));
+    }
+
+    public function testCountsTheLimitInCharactersNotBytes(): void
+    {
+        $said = "Alice: Olá.\nBob: Então é isso aí, não é?\nCarol: É.";
+
+        $this->assertSame("(Its beginning is left out: it is too long.)\nBob: Então é isso aí, não é?\nCarol: É.", Lookups::recent($said, mb_strlen("Bob: Então é isso aí, não é?\nCarol: É.")));
+    }
+
+    public function testAsksClaudeToAnswerTheLineThatWasSaidToIt(): void
+    {
+        $this->assertSame(
+            "Alice said this to you just now, and everyone in the call hears your answer:\n\n[10:00:00] Alice: Claude, who is right?\n\n"
+            . 'Answer Alice. What they ask is often about what was said in the call before, by anyone in it.',
+            Lookups::asking('Alice', '[10:00:00] Alice: Claude, who is right?'),
+        );
+        // A name that reads like the bot's is told apart here as in the transcript.
+        $this->assertStringStartsWith('Claude (member) said this to you just now', Lookups::asking('Claude', '[10:00:00] Claude (member): Claude, who is right?'));
+        $this->assertStringContainsString("\n\nAnswer Claude (member). ", Lookups::asking('Claude', '[10:00:00] Claude (member): Claude, who is right?'));
     }
 
     public function testLooksUpOneTaskAtATimeInTheOrderTheyWereHandedOff(): void

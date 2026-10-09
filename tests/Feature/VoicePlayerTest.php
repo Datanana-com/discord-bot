@@ -53,23 +53,42 @@ final class VoicePlayerTest extends VoiceTestCase
         $this->assertLogsNeverMention('quarter past four');
     }
 
+    public function testTheBotStartsOnASentenceWhileItsFfmpegIsStillEncodingIt(): void
+    {
+        // The sentence's ffmpeg has written the first of it, and takes its time over the rest.
+        touch($hold = "{$this->recordings}/ffmpeg.hold");
+        $this->setEnv(['VOICE_PLAYER' => 'bot']);
+        $this->setProcessEnv(['FAKE_FFMPEG_HOLD' => $hold, 'FAKE_FFMPEG_STARTS' => '1']);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        // The bot's own player takes the sentence from there, which these tests see by what it makes of their
+        // files: they hold no Ogg Opus, and it says so before the ffmpeg has ended.
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->loggedProblems() !== [], 'the player to be given the sentence');
+
+        $this->assertFileExists($hold);
+        $this->assertStringStartsWith('Voice reply failed: Could not play ', $this->loggedProblems()[0]);
+        unlink($hold);
+    }
+
     public function testOkayAndTheBotsOwnSentencesGoThroughThePlayerToo(): void
     {
         $this->setEnv(['VOICE_PLAYER' => 'bot']);
         VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
 
-        // The stop phrase: "Okay." can't be played from these tests' files either, which is logged, and nothing
-        // goes to the library.
+        // "Sorry, something went wrong.", which the bot says on its own when whisper fails, can't be played from
+        // these tests' files either, which is logged, and nothing goes to the library.
         $this->ask($vc, '555', 'Hey Claude, what time is it?');
         $this->waitUntil(fn () => count($this->sent) === 2, 'the channel to be told the answer could not be spoken');
-        $this->setProcessEnv(['FAKE_WHISPER_OUTPUT' => 'Stop, Claude.']);
-        $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
-        $this->waitUntil(fn () => preg_grep('/^Could not say okay: /', $this->loggedProblems()) !== [], 'okay to fail');
-
-        // Nor can "Sorry, something went wrong.", which the bot says on its own when whisper fails.
         $this->setProcessEnv(['FAKE_WHISPER_EXIT' => '1']);
         $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
         $this->waitUntil(fn () => preg_grep('/^Could not say sorry: /', $this->loggedProblems()) !== [], 'sorry to fail');
+
+        // Nor can the "Okay." of the leave phrase: the bot leaves all the same.
+        $this->setProcessEnv(['FAKE_WHISPER_EXIT' => '0', 'FAKE_WHISPER_OUTPUT' => 'Disconnect, Claude.']);
+        $this->speak($vc, ssrc: 555, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => preg_grep('/^Could not say okay: /', $this->loggedProblems()) !== [], 'okay to fail');
+        $this->waitUntil(fn () => VoiceSession::forGuild(self::GUILD_ID) === null, 'the bot to leave');
 
         $this->assertSame([], $this->played, 'Nothing was handed to the library.');
         $problems = implode("\n", $this->loggedProblems());
