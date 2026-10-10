@@ -40,7 +40,9 @@ final class VoiceEarlyWhisperTest extends VoiceTestCase
         $this->waitUntil(fn () => count($this->serverRequests()) === 2, 'whisper to be given what she said');
 
         $this->assertSame([], $this->logged('Utterance ended'), 'She is still being waited for.');
-        $this->assertSame([], $this->claudeCalls(), 'Nothing else happens early.');
+        // It names the bot, so Claude is asked while it waits (see VoiceEarlyClaudeTest): nothing else happens early.
+        $this->assertSame([], $this->sent);
+        $this->assertSame([], $this->played);
         $this->assertSame('', $this->transcript($session), 'Not even the transcript.');
 
         $this->waitUntil(fn () => count($this->sent) === 1, 'the answer');

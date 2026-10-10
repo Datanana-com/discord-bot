@@ -62,7 +62,7 @@ final class VoiceStreamingTest extends VoiceTestCase
 
         // So is where the time to the answer went: which process was asked, and when Claude started writing.
         $asked = $this->logged('Asked Claude')[0];
-        $this->assertSame(['guild', 'session', 'user', 'waited_ms', 'lines', 'characters'], array_keys($asked));
+        $this->assertSame(['guild', 'session', 'user', 'waited_ms', 'lines', 'characters', 'early'], array_keys($asked));
         $this->assertSame([1, mb_strlen($this->claudeCalls()[0]['prompt'])], [$asked['lines'], $asked['characters']], 'How much of the call it was given, in counts.');
         $this->assertSame('555', $asked['user']);
         $this->assertIsInt($asked['waited_ms'], 'The process that waited for the question was asked.');
