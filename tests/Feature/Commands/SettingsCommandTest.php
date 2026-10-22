@@ -252,7 +252,7 @@ Wake word: `claude`, `cloud`, `claud` (default)
     public static function invalidValues(): iterable
     {
         $wakeWord = 'The wake word must be a word or short phrase, or up to 5 of them separated by commas for the ways whisper may write it. Each is at most 32 letters, numbers, spaces, apostrophes and hyphens, starting and ending with a letter or number. Use `none` to answer everything.';
-        $voice = 'The voice must be one of the installed Piper voices: `pt_BR-faber-medium`, `voice`.';
+        $voice = 'The voice must be one of the installed voices: `pt_BR-faber-medium`, `voice`.';
 
         yield 'a wake word that is too long' => [['wake_word' => str_repeat('a', 33)], $wakeWord];
         yield 'a wake word that pings everyone when /record announces it' => [['wake_word' => '@everyone'], $wakeWord];
@@ -305,7 +305,7 @@ Wake word: `claude`, `cloud`, `claud` (default)
     {
         $this->setEnv(['PIPER_MODEL' => '/nowhere/voices/en_US-lessac-medium.onnx']);
 
-        $this->assertSame("No Piper voices are installed in PIPER_MODEL's folder.", $this->settings(['voice' => 'pt_BR-faber-medium']));
+        $this->assertSame("No voices are installed in the folders of PIPER_MODEL and Kokoro.", $this->settings(['voice' => 'pt_BR-faber-medium']));
     }
 
     public function testResetGoesBackToTheDefaults(): void
@@ -434,7 +434,7 @@ Wake word: `claude`, `cloud`, `claud` (default)
         $reply = $this->settings(['voice' => 'en_GB-alan-medium']);
 
         $this->assertSame(2000, mb_strlen($reply));
-        $this->assertStringStartsWith('The voice must be one of the installed Piper voices: `en_US-voice-number-100-medium`, ', $reply);
+        $this->assertStringStartsWith('The voice must be one of the installed voices: `en_US-voice-number-100-medium`, ', $reply);
     }
 
     public function testSuggestsTheInstalledVoicesByTheirSimpleNames(): void

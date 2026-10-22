@@ -43,7 +43,7 @@ final class VoiceBenchTest extends VoiceTestCase
     private const int QUESTIONS = 5;
 
     /** The settings of .env the bench runs with. Not where the bot keeps its data, nor its Discord login. */
-    private const string SETTINGS = '/^(WHISPER|CLAUDE|PIPER|FFMPEG|VOICE)_/';
+    private const string SETTINGS = '/^(WHISPER|CLAUDE|PIPER|KOKORO|FFMPEG|VOICE)_/';
 
     /** Nor anything that looks like a login: the settings are printed, and saved with the baseline. */
     private const string SECRETS = '/TOKEN|KEY|SECRET|PASSWORD/';
@@ -116,6 +116,10 @@ final class VoiceBenchTest extends VoiceTestCase
             $this->waitUntil(fn () => $this->logged('Whisper server ready') !== [] || $this->loggedProblems() !== [], 'the whisper server to be ready', 70.0);
             $this->assertSame([], $this->loggedProblems(), 'The whisper server started.');
         }
+
+        // Kokoro answers once it has loaded, which a call's first minute is long enough for.
+        $this->waitUntil(fn () => $session->voiceIsReady(), 'the voice to be ready', 70.0);
+        $this->assertSame([], $this->loggedProblems(), 'The voice started.');
 
         $frames = intdiv(strlen($this->question), self::FRAME);
         // Stands in for libopus: every packet decodes to the next 20 ms of the question.
