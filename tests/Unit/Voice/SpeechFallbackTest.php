@@ -9,6 +9,8 @@ use App\Voice\Speech;
 use PHPUnit\Framework\TestCase;
 use React\Promise\PromiseInterface;
 use ReflectionMethod;
+use ReflectionProperty;
+use Throwable;
 use Tests\WaitsWithin;
 
 use function React\Async\delay;
@@ -43,7 +45,7 @@ final class SpeechFallbackTest extends TestCase
             $this->settled($speech->stop());
         }
 
-        foreach (['FAKE_PIPER_LINES', 'FAKE_PIPER_FAILS_ON', 'FAKE_KOKORO_DEVICE', 'FAKE_KOKORO_LOAD', 'FAKE_KOKORO_DELAY'] as $variable) {
+        foreach (['FAKE_PIPER_LINES', 'FAKE_PIPER_LOG', 'FAKE_PIPER_DELAY', 'FAKE_PIPER_FAILS_ON', 'FAKE_KOKORO_DEVICE', 'FAKE_KOKORO_LOAD', 'FAKE_KOKORO_DELAY'] as $variable) {
             putenv($variable);
         }
 
@@ -225,6 +227,150 @@ final class SpeechFallbackTest extends TestCase
         $this->assertTrue($wrote->invoke($speech, 'INFO:__main__:Wrote /nowhere.wav', -1), 'It is taken for nothing.');
         $this->assertFalse($speech->isReady(), 'And it did not make Kokoro ready.');
     }
+    public function testPiperGetsItsOwnVoiceAndWhatKokoroLeftInTheFolderIsGone(): void
+    {
+        putenv('FAKE_KOKORO_DEVICE=cpu');
+        putenv("FAKE_PIPER_LOG={$this->directory}/piper.args");
+        $speech = $this->speech();
+        $this->watch($speech);
+        $speech->start("{$this->directory}/voice");
+        @mkdir("{$this->directory}/voice");
+        file_put_contents("{$this->directory}/voice/left-over.wav", 'Kokoro wrote it');
+
+        $this->settled($this->spoken($speech, 'It is a quarter past four.', "{$this->directory}/claude-1.ogg"));
+
+        $this->assertStringContainsString("arg=/voices/en_US-lessac-medium.onnx\n", (string) file_get_contents("{$this->directory}/piper.args"), 'Piper has the voice of its own, not Kokoro\'s.');
+        $this->assertFileDoesNotExist("{$this->directory}/voice/left-over.wav");
+        $this->assertNull($this->property($speech, 'loading'), 'Nothing waits for Kokoro to load any more.');
+    }
+
+    public function testASentenceGivenToPiperHasTheTimeAPiperSentenceHas(): void
+    {
+        putenv('FAKE_PIPER_DELAY=5');
+        $speech = $this->speech(timeout: 0.5);
+        $speech->start("{$this->directory}/voice");
+        $this->waitUntil(fn () => $speech->isReady());
+
+        try {
+            // Kokoro fails on it, and Piper is slow.
+            $this->settled($this->spoken($speech, 'FAIL, it says.', "{$this->directory}/claude-1.ogg"));
+            $this->fail('Synthesizing should have failed.');
+        } catch (CommandFailedException $e) {
+            $this->assertStringContainsString('timed out after 0.5s', $e->getMessage());
+        }
+    }
+
+    public function testASentenceThatWaitsForKokoroToLoadHasAsLongAsItMayLoad(): void
+    {
+        putenv('FAKE_KOKORO_LOAD=2');
+        $speech = $this->speech(slow: 0.5);
+        $this->watch($speech);
+        $speech->start("{$this->directory}/voice");
+
+        $path = $this->settled($this->spoken($speech, 'It is a quarter past four.', "{$this->directory}/claude-1.ogg"));
+
+        $this->assertStringStartsWith('RIFF', (string) file_get_contents($path), 'Kokoro spoke it, 1.5 s after a sentence may take.');
+        $this->assertSame([], $this->reasons);
+    }
+
+    public function testKokoroIsNotGivenUpForNotLoadingOnceItHas(): void
+    {
+        $speech = $this->speech(load: 0.6);
+        $this->watch($speech);
+        $speech->start("{$this->directory}/voice");
+        $this->waitUntil(fn () => $speech->isReady());
+
+        delay(1.0);
+
+        $this->assertSame([], $this->reasons);
+        $this->assertNull($this->property($speech, 'loading'));
+    }
+
+    public function testASentenceAKokoroThatEndedWithTheCallHadNotSpokenFailsAtOnce(): void
+    {
+        putenv('FAKE_KOKORO_DELAY=5');
+        $speech = $this->speech();
+        $this->watch($speech);
+        $speech->start("{$this->directory}/voice");
+        $this->waitUntil(fn () => $speech->isReady());
+        $sentence = $this->spoken($speech, 'It is a quarter past four.', "{$this->directory}/claude-1.ogg");
+        $failed = null;
+        $sentence->then(null, function (Throwable $e) use (&$failed): void {
+            $failed = $e;
+        });
+
+        // The call ends, and Kokoro with it before it has spoken the sentence.
+        $stopped = $speech->stop();
+        $this->property($speech, 'piper')->stop('killed');
+        $this->settled($stopped);
+        delay(0.3);
+
+        $this->assertInstanceOf(CommandFailedException::class, $failed, 'It is not left waiting for a voice that is gone.');
+        $this->assertSame([], $this->reasons, 'The call ended: nothing is given to Piper.');
+    }
+
+    public function testWhatKokoroSaysAfterTheCallEndedStartsNothing(): void
+    {
+        $speech = $this->speech();
+        $this->watch($speech);
+        $speech->start("{$this->directory}/voice");
+        $this->waitUntil(fn () => $speech->isReady());
+        $this->settled($speech->stop());
+
+        (new ReflectionMethod($speech, 'wrote'))->invoke($speech, 'DEVICE cpu', $this->property($speech, 'generation'));
+
+        $this->assertSame([], $this->reasons);
+        $this->assertFalse($speech->isRunning(), 'Piper was not started for a call that is over.');
+    }
+
+    public function testWhatAProgramThatWasGivenUpSaysIsNotTakenForTheOneThatSpeaks(): void
+    {
+        putenv('FAKE_KOKORO_DEVICE=cpu');
+        putenv('FAKE_PIPER_DELAY=1');
+        $speech = $this->speech();
+        $this->watch($speech);
+        $speech->start("{$this->directory}/voice");
+        $kokoro = $this->property($speech, 'generation');
+        $this->waitUntil(fn () => $speech->isReady());
+        $path = "{$this->directory}/claude-1.ogg";
+        $sentence = $speech->synthesize('It is a quarter past four.', $path);
+
+        // Kokoro, which was stopped, still has a "Wrote" to say.
+        $this->assertTrue((new ReflectionMethod($speech, 'wrote'))->invoke($speech, 'INFO:__main__:Wrote /nowhere.wav', $kokoro));
+
+        $this->settled($sentence->whole());
+        $this->assertSame('It is a quarter past four.', file_get_contents($path), 'Piper spoke it.');
+    }
+
+    public function testPipersOwnLinesAreNotKokorosMessages(): void
+    {
+        $speech = new Speech(self::FIXTURES . '/fake-piper', '/voices/en_US-lessac-medium.onnx', self::FIXTURES . '/fake-ffmpeg');
+
+        $this->assertFalse((new ReflectionMethod($speech, 'wrote'))->invoke($speech, 'READY {}', $this->property($speech, 'generation')), 'It may say why the voice fails.');
+        $this->assertTrue($speech->isReady(), 'And it is not waiting for a READY.');
+    }
+
+    public function testKokoroFallsBackToPiperOnlyWhenPiperIsInstalled(): void
+    {
+        $voices = $this->kokoroFolder(['af_heart']);
+        mkdir("{$this->directory}/piper");
+        touch("{$this->directory}/piper/voice.onnx");
+        $_ENV['KOKORO_BINARY'] = "{$voices}/kokoro";
+        $_ENV['PIPER_BINARY'] = self::FIXTURES . '/fake-piper';
+        $_ENV['PIPER_MODEL'] = "{$this->directory}/piper/voice.onnx";
+
+        $both = Speech::fromEnv();
+        $this->assertSame(self::FIXTURES . '/fake-piper', $this->property($both, 'fallbackBinary'));
+        $this->assertSame("{$this->directory}/piper/voice.onnx", $this->property($both, 'fallbackModel'));
+
+        $_ENV['PIPER_BINARY'] = '/nowhere/piper';
+        $this->assertNull($this->property(Speech::fromEnv(), 'fallbackBinary'), 'There is no Piper.');
+
+        $_ENV['PIPER_BINARY'] = self::FIXTURES . '/fake-piper';
+        $_ENV['PIPER_MODEL'] = "{$this->directory}/piper/nowhere.onnx";
+        $this->assertNull($this->property(Speech::fromEnv(), 'fallbackBinary'), 'There is no voice for Piper.');
+    }
+
     public function testAVoiceWithoutAFallbackIsReadyAtOnce(): void
     {
         $speech = new Speech(self::FIXTURES . '/fake-piper', '/voices/en_US-lessac-medium.onnx', self::FIXTURES . '/fake-ffmpeg');
@@ -331,12 +477,18 @@ final class SpeechFallbackTest extends TestCase
         });
     }
 
-    private function speech(float $load = 30.0, float $slow = 5.0): Speech
+    private function property(Speech $speech, string $name): mixed
+    {
+        return (new ReflectionProperty($speech, $name))->getValue($speech);
+    }
+
+    private function speech(float $load = 30.0, float $slow = 5.0, float $timeout = 120.0): Speech
     {
         return $this->speeches[] = new Speech(
             self::FIXTURES . '/fake-kokoro',
             '/voices/af_heart.onnx',
             self::FIXTURES . '/fake-ffmpeg',
+            timeout: $timeout,
             fallbackBinary: self::FIXTURES . '/fake-piper',
             fallbackModel: '/voices/en_US-lessac-medium.onnx',
             loadSeconds: $load,

@@ -174,7 +174,7 @@ final class Speech
      */
     private function mayFallBack(): bool
     {
-        return $this->kokoro && $this->fallbackBinary !== null && $this->fellBack === null;
+        return $this->fallbackBinary !== null && $this->fellBack === null;
     }
 
     /**
@@ -224,6 +224,7 @@ final class Speech
     {
         $binary = $this->fellBack === null ? $this->binary : (string) $this->fallbackBinary;
         $model = $this->fellBack === null ? $this->model : (string) $this->fallbackModel;
+        // What an earlier program says from now on is not taken for this one's.
         $generation = ++$this->generation;
         // With --output-dir, Piper keeps reading its stdin: it speaks each line into a WAV file of the folder,
         // and says on stderr when the file is complete.
@@ -252,8 +253,6 @@ final class Speech
         $this->cancelLoading();
         $old = $this->piper;
         $this->piper = null;
-        // What Kokoro says or does from now on is not taken for Piper's.
-        $this->generation++;
         $old?->stop($reason);
         $this->emptyFolder();
         $this->launch();

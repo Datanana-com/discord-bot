@@ -51,6 +51,8 @@ final class RecordCommandTest extends CommandTestCase
         $this->assertNotNull($session = VoiceSession::forGuild(self::GUILD_ID));
         $this->assertDirectoryExists($session->directory);
         $this->assertStringStartsWith("{$this->recordings}/" . self::GUILD_ID . '/', $session->directory);
+        delay(0.3);
+        $this->assertCount(1, $this->voicesRunning(), 'The call has the voice that started before the join, and no other.');
     }
 
     public function testTellsPeopleToSayTheFirstSpellingOnly(): void
@@ -349,6 +351,8 @@ final class RecordCommandTest extends CommandTestCase
         $this->assertNull(VoiceSession::forGuild(self::GUILD_ID));
         $this->assertDirectoryDoesNotExist("{$this->recordings}/" . self::GUILD_ID, 'Nothing was recorded.');
         $this->assertSame(['Could not read who opted out of recording: Database connection [stats] not configured.'], $this->loggedProblems());
+        delay(0.3);
+        $this->assertSame([], $this->voicesRunning(), 'The voice that started for the call that never was ended.');
     }
 
     public function testStartsTheCallWithWhoOptedOutWhileJoining(): void
@@ -449,6 +453,7 @@ final class RecordCommandTest extends CommandTestCase
         $this->joinsWith(resolve($this->voiceClient($channel)));
 
         $this->record($this->interaction($channel));
+        $this->assertStringContainsString('My voice is still getting ready', $this->updates[0], 'Kokoro has not said it is ready.');
         $this->waitUntil(fn () => $this->logged('Speaking with Piper instead of Kokoro') !== [], 'Kokoro to be given up');
 
         $this->assertSame([['guild' => self::GUILD_ID, 'session' => VoiceSession::forGuild(self::GUILD_ID)->id, 'reason' => 'it runs on the processor']], $this->logged('Speaking with Piper instead of Kokoro'));

@@ -11,13 +11,10 @@ import numpy as np
 import torch
 from kokoro import KPipeline
 
-# The first sentences a card or a processor speaks are slower, and that must not be somebody's answer: these are
-# spoken before READY. A short, a middle and a long one, twice.
-WARM_UP = [
-    "Yes, that works for me.",
-    "The meeting is tomorrow at three in the afternoon, so you have time to prepare.",
-    "I looked at the weather for this weekend, and it should be mostly sunny on Saturday, with a light breeze, but Sunday may bring some rain in the late afternoon.",
-]
+# The first sentence a card or a processor speaks is slower (600 ms instead of 80 to 130), and that must not be
+# somebody's answer: this is spoken before READY. One long sentence is enough: the three that were here, twice,
+# gave the same 80 to 130 ms afterwards and made READY 1.5 s later.
+WARM_UP = "I looked at the weather for this weekend, and it should be mostly sunny on Saturday, with a light breeze, but Sunday may bring some rain in the late afternoon."
 
 
 def pick_device(requested):
@@ -37,8 +34,7 @@ class Speaker:
         self.device = device
         # The voices starting with b are British, the others American.
         self.pipeline = KPipeline(lang_code="b" if voice.startswith("b") else "a", device=device, repo_id="hexgrad/Kokoro-82M")
-        for sentence in WARM_UP * 2:
-            self.speak(sentence)
+        self.speak(WARM_UP)
 
         self.info = {"device": device, "torch": torch.__version__, "cuda": torch.version.cuda, "rss_mb": round(rss_mb(), 1)}
 
