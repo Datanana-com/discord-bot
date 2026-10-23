@@ -173,6 +173,8 @@ abstract class VoiceTestCase extends TestCase
             // The voice client plays nothing: the files handed to it are collected in $played. The bot's own
             // player would send their packets, and fake-ffmpeg's files hold no Ogg Opus to send.
             'VOICE_PLAYER' => 'library',
+            // Most tests answer sentence by sentence. The default, and the setting, are tested in VoiceStreamingTest.
+            'VOICE_FIRST_WORDS' => '0',
         ]);
         $this->setProcessEnv([
             'FAKE_ENV' => "{$this->recordings}/fake.env",

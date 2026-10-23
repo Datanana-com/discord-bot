@@ -291,7 +291,7 @@ final class VoiceSession
     /** How long someone has to be silent for what they said to be over. */
     private readonly float $pauseSeconds;
 
-    /** How many words of an answer are spoken before their sentence is whole: VOICE_FIRST_WORDS, 0 for none. */
+    /** How many words of an answer are spoken before their sentence is whole: VOICE_FIRST_WORDS, 8 unless it is set, 0 for none. */
     private readonly int $firstWords;
 
     /**
@@ -380,14 +380,14 @@ final class VoiceSession
 
     /**
      * How many words of an answer are spoken as soon as Claude has written them, before their sentence is
-     * whole: VOICE_FIRST_WORDS. 0, which it is when it isn't set, for none: an answer is spoken sentence by
-     * sentence.
+     * whole: VOICE_FIRST_WORDS. 8 when it isn't set (the number Sky found best); 0, which an empty one is too, for
+     * none: an answer is spoken sentence by sentence.
      *
      * @return int|null Null when it is set to something that isn't a whole number, 0 or more.
      */
     private static function firstWords(): ?int
     {
-        $value = trim((string) env('VOICE_FIRST_WORDS', ''));
+        $value = trim((string) env('VOICE_FIRST_WORDS', '8'));
 
         return match (true) {
             $value === '' => 0,
