@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Voice\VoiceSession;
+use PHPUnit\Framework\Attributes\DataProvider;
 use React\Promise\Deferred;
 use Throwable;
 
@@ -254,6 +255,50 @@ final class VoiceStreamingTest extends VoiceTestCase
         $this->assertSame([self::QUESTION . "\nIt is a quarter past four in the afternoon. Time for a cup of tea."], $this->sent, 'What is posted is what Claude wrote.');
         $this->assertCount(1, $this->logged('Started speaking'));
         $this->assertSame([], $this->loggedProblems());
+    }
+
+    public function testSpeaksTheFirstEightWordsOfAnAnswerBeforeItsFirstSentenceIsWholeWhenNothingIsSet(): void
+    {
+        // The other tests answer sentence by sentence; this is what a call does when VOICE_FIRST_WORDS is not in .env.
+        unset($_ENV['VOICE_FIRST_WORDS']);
+        $this->setProcessEnv([
+            'FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is a quarter past four in the afternoon', ' sky. Time for a cup of tea.'),
+            'FAKE_CLAUDE_PAUSE' => '10',
+        ]);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => $this->played !== [], 'the first words to be spoken');
+
+        $this->assertSame(['It is a quarter past four in the'], array_map(file_get_contents(...), $this->played));
+        $this->assertSame([], $this->sent, 'Claude is still writing.');
+
+        touch($this->claudeResume);
+        $this->waitUntil(fn () => count($this->played) === 3, 'the whole answer to be spoken');
+
+        $this->assertSame(['It is a quarter past four in the', 'afternoon sky.', 'Time for a cup of tea.'], array_map(file_get_contents(...), $this->played));
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    #[DataProvider('noFirstWords')]
+    public function testSpeaksSentenceBySentenceWhenTheFirstWordsAreSetToNone(string $value): void
+    {
+        $this->setEnv(['VOICE_FIRST_WORDS' => $value]);
+        $this->setProcessEnv(['FAKE_CLAUDE_OUTPUT' => self::claudeStream('It is a quarter past four in the afternoon', ' sky. Time for a cup of tea.')]);
+        VoiceSession::start($vc = $this->voiceClient($channel = $this->voiceChannel()), $channel, $this->discord);
+
+        $this->speak($vc, ssrc: 1, userId: '555', seconds: 1.0);
+        $this->waitUntil(fn () => count($this->played) === 2, 'the answer to be spoken');
+
+        $this->assertSame(['It is a quarter past four in the afternoon sky.', 'Time for a cup of tea.'], array_map(file_get_contents(...), $this->played));
+        $this->assertSame([], $this->loggedProblems());
+    }
+
+    /** @return iterable<string, array{string}> */
+    public static function noFirstWords(): iterable
+    {
+        yield 'zero' => ['0'];
+        yield 'empty' => [''];
     }
 
     public function testLooksWhetherASentenceIsStillWantedWhenTheLibraryCanStartOnIt(): void
