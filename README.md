@@ -67,7 +67,7 @@ flowchart TD
 - **Summary.** When the call ends, Claude summarizes its whole transcript in the text channel where `/record` was used.
 - **When something fails.** What can't be transcribed, answered or spoken is said in the text channel, and the call hears "Sorry, something went wrong.", once for each thing that fails. The call goes on.
 
-More in [docs/voice-calls.md](docs/voice-calls.md): what is answered, what Claude is given, interruptions, pauses, retention, how Claude Code and Piper are kept running during a call, and how to speak with Kokoro instead of Piper.
+More in [docs/voice-calls.md](docs/voice-calls.md): what is answered, what Claude is given, interruptions, pauses, retention, how Claude Code and Piper are kept running during a call, and Kokoro, the voice of a call when it is installed, with Piper as the fallback.
 
 ## Looking things up
 
@@ -176,7 +176,7 @@ The voice library doesn't support native Windows, so run the bot inside WSL2 (th
     sh ./models/download-ggml-model.sh base
     ```
 
-4. Install Piper and a voice. Pick a voice in your language from the [voice list](https://huggingface.co/rhasspy/piper-voices), e.g. `pt_BR-faber-medium` for Brazilian Portuguese.
+4. Install Piper and a voice (Piper is the voice of calls when [Kokoro](docs/voice-calls.md#speaking-with-kokoro) isn't installed, and the one a call falls back to when Kokoro can't speak). Pick a voice in your language from the [voice list](https://huggingface.co/rhasspy/piper-voices), e.g. `pt_BR-faber-medium` for Brazilian Portuguese.
 
     ```bash
     python3 -m venv ~/piper
@@ -236,6 +236,8 @@ Set these in `.env`. The notes and measurements behind each one are in [docs/con
 | `CLAUDE_LOOKUP_ADVISOR` | `opus` | The model it must consult for a hard task. Leave it empty for no advisor. |
 | `CLAUDE_LOOKUP_AT_ONCE` | `2` | How many tasks are looked up at once, in all calls and chats together. |
 | `PIPER_BINARY` | `piper` | Path to Piper. |
+| `KOKORO_BINARY` | `kokoro/kokoro`, once `kokoro/install.sh` has run | Path to [Kokoro](docs/voice-calls.md#speaking-with-kokoro), which speaks calls when it is installed. Empty: Piper only. |
+| `KOKORO_VOICE` | `af_heart` | Kokoro's voice for a server that hasn't chosen one with `/settings voice:`. |
 | `PIPER_MODEL` | | Path to the Piper voice, e.g. `~/piper/voices/en_US-lessac-medium.onnx`. |
 | `FFMPEG_BINARY` | `ffmpeg` | Path to ffmpeg, which converts Piper's speech for Discord, and the voice messages sent in DMs for whisper.cpp. |
 | `STATS_DATABASE` | `databases/stats.sqlite` | SQLite database for the statistics, the settings, and who opted out. It is created on the first start. |

@@ -27,6 +27,10 @@
             <directory>tests/Bench</directory>
         </testsuite>
     </testsuites>
+    <php>
+        <!-- The tests never speak with a Kokoro that happens to be installed in this folder: those that need it say so. -->
+        <env name="KOKORO_BINARY" value="" force="true"/>
+    </php>
     <extensions>
         <!-- Fails the run when a test leaves a socket or a timer in the event loop, which would hang PHP at shutdown. -->
         <bootstrap class="Tests\EventLoopCheck"/>

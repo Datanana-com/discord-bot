@@ -8,6 +8,7 @@ use App\Analytics\Usage;
 use App\Commands\Global\RecordCommand;
 use App\Privacy\OptOuts;
 use App\Settings\GuildSettings;
+use App\Support\Shell;
 use App\Voice\VoiceSession;
 use Discord\Builders\MessageBuilder;
 use Discord\Parts\Channel\Channel;
@@ -19,6 +20,7 @@ use React\Promise\Deferred;
 use ReflectionClass;
 use RuntimeException;
 
+use function React\Async\delay;
 use function React\Promise\reject;
 use function React\Promise\resolve;
 
@@ -49,6 +51,8 @@ final class RecordCommandTest extends CommandTestCase
         $this->assertNotNull($session = VoiceSession::forGuild(self::GUILD_ID));
         $this->assertDirectoryExists($session->directory);
         $this->assertStringStartsWith("{$this->recordings}/" . self::GUILD_ID . '/', $session->directory);
+        delay(0.3);
+        $this->assertCount(1, $this->voicesRunning(), 'The call has the voice that started before the join, and no other.');
     }
 
     public function testTellsPeopleToSayTheFirstSpellingOnly(): void
@@ -272,6 +276,10 @@ final class RecordCommandTest extends CommandTestCase
 
         $this->assertCount(2, $this->responses);
         $this->assertSame(2, $joins);
+
+        // The voices started for the joins that never end.
+        Shell::stopAll();
+        delay(0.3);
     }
 
     public function testRefusesWhenVoiceIsUnavailable(): void
@@ -343,6 +351,8 @@ final class RecordCommandTest extends CommandTestCase
         $this->assertNull(VoiceSession::forGuild(self::GUILD_ID));
         $this->assertDirectoryDoesNotExist("{$this->recordings}/" . self::GUILD_ID, 'Nothing was recorded.');
         $this->assertSame(['Could not read who opted out of recording: Database connection [stats] not configured.'], $this->loggedProblems());
+        delay(0.3);
+        $this->assertSame([], $this->voicesRunning(), 'The voice that started for the call that never was ended.');
     }
 
     public function testStartsTheCallWithWhoOptedOutWhileJoining(): void
@@ -409,6 +419,58 @@ final class RecordCommandTest extends CommandTestCase
         $this->assertNull(VoiceSession::forGuild(self::GUILD_ID));
         $this->assertSame([], $this->logged('Voice session started'));
         $this->assertFalse(VoiceSession::isStarting(self::GUILD_ID));
+        delay(0.3);
+        $this->assertSame([], $this->voicesRunning(), 'The voice that started for the call that never was ended.');
+    }
+
+    public function testTheVoiceStartsBeforeTheBotHasJoinedAndEndsWhenItCouldNot(): void
+    {
+        $channel = $this->voiceChannel();
+        $joining = new Deferred();
+        $this->joinsWith($joining->promise());
+        $this->record($this->interaction($channel));
+
+        $this->waitUntil(fn () => count($this->voicesRunning()) === 1, 'the voice to start');
+        $this->assertNull(VoiceSession::forGuild(self::GUILD_ID), 'The bot has not joined yet.');
+
+        $joining->reject(new RuntimeException('Timed out'));
+        delay(0.3);
+
+        $this->assertSame([], $this->voicesRunning(), 'The voice ended with the join that failed.');
+    }
+
+    public function testTheCallSpeaksWithPiperAndSaysSoWhenKokoroRunsOnTheProcessor(): void
+    {
+        $kokoro = "{$this->recordings}/kokoro";
+        mkdir("{$kokoro}/voices", 0755, true);
+        // Its voices are the empty files next to it, so it is a program of its own that runs the stand-in.
+        file_put_contents("{$kokoro}/kokoro", "#!/bin/sh\nexec " . realpath(__DIR__ . '/../../Fixtures/fake-kokoro') . ' "$@"' . "\n");
+        chmod("{$kokoro}/kokoro", 0755);
+        touch("{$kokoro}/voices/af_heart.onnx");
+        $this->setEnv(['KOKORO_BINARY' => "{$kokoro}/kokoro"]);
+        $this->setProcessEnv(['FAKE_KOKORO_DEVICE' => 'cpu']);
+        $channel = $this->voiceChannel();
+        $this->joinsWith(resolve($this->voiceClient($channel)));
+
+        $this->record($this->interaction($channel));
+        $this->assertStringContainsString('My voice is still getting ready', $this->updates[0], 'Kokoro has not said it is ready.');
+        $this->waitUntil(fn () => $this->logged('Speaking with Piper instead of Kokoro') !== [], 'Kokoro to be given up');
+
+        $this->assertSame([['guild' => self::GUILD_ID, 'session' => VoiceSession::forGuild(self::GUILD_ID)->id, 'reason' => 'it runs on the processor']], $this->logged('Speaking with Piper instead of Kokoro'));
+        $this->assertSame(['My voice is not working as it should, so I will speak with a simpler one for the rest of the call.'], $this->sent);
+
+        Shell::stopAll();
+        delay(0.3);
+    }
+
+    /**
+     * @return list<int> The process IDs of the voices that were started and still run.
+     */
+    private function voicesRunning(): array
+    {
+        $started = is_file($this->piperRunning) ? array_map(intval(...), file($this->piperRunning, FILE_IGNORE_NEW_LINES)) : [];
+
+        return array_values(array_filter($started, fn (int $pid) => posix_kill($pid, 0)));
     }
 
     private function record(object $interaction): void

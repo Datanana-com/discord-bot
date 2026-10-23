@@ -89,9 +89,9 @@ The silence at the start and at the end of each sentence is taken off when it is
 
 An answer is spoken sentence by sentence, so its first sound waits for Claude to finish its first sentence, and for the voice to speak all of it. `VOICE_FIRST_WORDS` has the bot speak the first words of an answer before that: with its default `8`, the first eight words go to the voice as soon as the ninth has begun, the rest of the sentence follows as a piece of its own, and from there the answer goes on sentence by sentence. Measured with twelve first sentences of real answers, the first sound came about 200 ms sooner with Piper (`en_US-lessac-medium`; 92 to 512 ms) and about 80 ms sooner with Kokoro (`af_heart`; 21 to 305 ms), more for a long first sentence and nothing for one of five words. The price is how it sounds: the voice reads each piece on its own, so a first sentence spoken in two pieces has two melodies, and a short pause where a person would make none. A piece is never shorter than a sentence may be (20 characters), never ends next to a number ("60 to 90 seconds") or between two capitalized words, as in most names ("Dr. Jane Miller"; "Ludwig van Beethoven" can still be cut after "van"), and never goes on to the next line: an answer that starts with a short line of its own has no first words. The rest of the sentence is spoken as soon as it is whole, however short it is. An answer that is held back until it is whole, as when too much is being looked up already, is spoken sentence by sentence. It is on (`8`) unless you set it; `0` turns it off.
 
-## Speaking with Kokoro instead of Piper
+## Speaking with Kokoro
 
-[Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) (82 million parameters, run with PyTorch) has voices its makers grade above Piper's, and on a graphics card it speaks a sentence about as fast as Piper's `en_US-lessac-medium`: measured on an RTX 3080, between nothing and 70 ms faster over the first sentences of 32 real answers. The bot doesn't know Kokoro: `kokoro/kokoro_serve.py` in this repository answers the way Piper does (one sentence on a line in, a WAV file and a `Wrote` line out, for a whole call), and `PIPER_BINARY` points at it.
+[Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) (82 million parameters, run with PyTorch) has voices its makers grade above Piper's, and on a graphics card it speaks a sentence about as fast as Piper's `en_US-lessac-medium`: measured on an RTX 3080, between nothing and 70 ms faster over the first sentences of 32 real answers. It is the voice of a call whenever it is installed: the bot looks for `kokoro/venv` in this repository (or `KOKORO_BINARY`), and a server's `/settings voice:` or `KOKORO_VOICE` (`af_heart` unless set) picks which of its voices. Piper stays installed as the voice it falls back to (see below), and as the voice of any voice that isn't Kokoro's. The bot doesn't know Kokoro itself: `kokoro/kokoro_serve.py` in this repository answers the way Piper does (one sentence on a line in, a WAV file and a `Wrote` line out, for a whole call).
 
 Install it from this repository's folder:
 
@@ -102,16 +102,22 @@ bash kokoro/install.sh af_bella bf_emma # and these as well (see the model's `vo
 
 It needs `python3` with `venv` (Ubuntu: `python3-venv`), about 7 GB of disk (6.2 GB installed: the PyTorch libraries are most of it, and 3.3 GB are downloaded; with `PIP_NO_CACHE_DIR=1` pip's own cache doesn't grow by 3 GB more), the internet for that one run, and **a graphics card driver 580 or newer**: the PyTorch it installs is built for CUDA 13, and under WSL the driver is the one of Windows. With an older driver, install the same PyTorch built for CUDA 12.6 in the `venv` instead of the `torch` and `nvidia-*` lines of `kokoro/requirements.txt`: `kokoro/venv/bin/pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cu126` (not tried). It takes about 170 seconds, writes only into `kokoro/` (`venv`, `hf` for the model's files, `voices`: all three are in `.gitignore`, and removing them removes it) and checks the model's files against the ones that were measured (`kokoro/model.sha256`). After that it needs no internet.
 
-Then, in `.env`:
-
-```
-PIPER_BINARY=/home/<you>/discord-bot/kokoro/kokoro
-PIPER_MODEL=/home/<you>/discord-bot/kokoro/voices/af_heart.onnx
-```
-
-`install.sh` ends by printing these two lines for where it is. The files in `kokoro/voices` are empty: the bot lists the `.onnx` files next to `PIPER_MODEL` as the voices a server can choose with `/settings voice:`, and refuses to start a call when `PIPER_MODEL` isn't a file, so each Kokoro voice is a name there, and the program only reads the name (`af_heart.onnx` is the voice `af_heart`). Voices starting with `b` are British, the others American.
+Nothing needs to be set in `.env`. The files in `kokoro/voices` are empty: the bot lists the `.onnx` files there, before those next to `PIPER_MODEL`, as the voices a server can choose with `/settings voice:`, so each Kokoro voice is a name, and the program only reads the name (`af_heart.onnx` is the voice `af_heart`). Voices starting with `b` are British, the others American. `KOKORO_BINARY` is for a Kokoro that is somewhere else (its `voices` folder is next to it), and `KOKORO_BINARY=` (empty) turns Kokoro off: calls speak with Piper only.
 
 To try it without the bot: `echo "Hello there." | kokoro/kokoro --model kokoro/voices/af_heart.onnx --output-dir /tmp/kokoro` writes `/tmp/kokoro/1.wav`. Its first line on stderr, `DEVICE cuda (<the card>)` or `DEVICE cpu`, says where it runs; without a card it runs on the processor, without a word of warning from PyTorch, and takes 2 to 6 seconds for a sentence.
+
+### Warming up, and falling back to Piper
+
+Kokoro takes 7 to 17 seconds to load its model onto the card. The bot starts it when `/record` or `/meet` is run, before it has joined the call, and gives it one sentence to speak that is thrown away, so the card has done its first, slow, run before anyone asks anything. Until Kokoro says it is ready, the answer to a question that comes first is written in the text channel, and spoken when the voice is ready; the text channel says so when the call starts.
+
+When Kokoro can't speak, the call goes on with Piper from the sentence Kokoro hadn't spoken, and the text channel is told once that the voice is a simpler one for the rest of the call (the log says `Speaking with Piper instead of Kokoro`, with the reason, no words). That happens when:
+
+- Kokoro ends (it crashed, or was killed) or can't start;
+- it says it runs on the processor (`DEVICE cpu`: there is no card, or the card is full), because it would take seconds for a sentence;
+- it isn't ready 30 seconds after it was started;
+- a sentence takes more than 5 seconds once it is ready.
+
+It doesn't go back to Kokoro within the call. With no Piper installed there is nothing to fall back to.
 
 Kokoro's code and weights are under the Apache 2.0 licence. Its model card says it was trained in part on audio made by other, closed text-to-speech systems. For a word it doesn't know it falls back to eSpeak NG, which is under the GPL: the `espeakng-loader` Python package that `requirements.txt` installs holds that library.
 

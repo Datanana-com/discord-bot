@@ -128,6 +128,9 @@ final class VoiceSession
     /** What the bot says in the call when something said couldn't be transcribed or answered. Never why: that is posted. */
     private const string SORRY = 'Sorry, something went wrong.';
 
+    /** What the text channel is told when Kokoro was given up for Piper. */
+    private const string FELL_BACK = 'My voice is not working as it should, so I will speak with a simpler one for the rest of the call.';
+
     /** What the text channel is told when the bot leaves a call over an error. */
     public const string LEFT = 'I ran into an error and had to leave the call. The bot\'s logs say what.';
 
@@ -550,10 +553,11 @@ final class VoiceSession
      * @param Channel|Thread $textChannel Where Claude's answers and the call's summary are posted.
      * @param array{wake_word: ?string, language: ?string, voice: ?string, model: ?string}|null $settings
      *        The server's settings, when they were already read.
+     * @param Speech|null $speech The voice, when it was started before the bot joined: see {@see Speech::start()}.
      *
      * @throws Throwable When the list of who opted out can't be read. Nothing is recorded then.
      */
-    public static function start(VoiceClient $vc, Channel|Thread $textChannel, Discord $discord, ?array $settings = null): self
+    public static function start(VoiceClient $vc, Channel|Thread $textChannel, Discord $discord, ?array $settings = null, ?Speech $speech = null): self
     {
         // Read before anything else, and only now: someone may have opted out while the bot was joining.
         $optedOut = array_fill_keys((new OptOuts())->all(), true);
@@ -575,7 +579,7 @@ final class VoiceSession
             $directory,
             Transcriber::fromEnv($settings['language']),
             Claude::fromEnv($settings['model']),
-            Speech::fromEnv($settings['voice']),
+            $speech ?? Speech::fromEnv($settings['voice']),
             self::player($vc, $discord),
             $wakeWord,
             self::defaultStopPhrase($wakeWord),
@@ -587,8 +591,12 @@ final class VoiceSession
         );
         $session->listen();
         $session->wait();
-        // Piper loads its voice now, and keeps running: the first sentence of an answer doesn't wait for that.
+        // The voice loads now (unless it already does), and keeps running: the first sentence of an answer doesn't wait for that.
         $session->speech->start("{$directory}/piper");
+        $session->speech->whenFallingBack(function (string $reason) use ($session): void {
+            $session->log('warning', 'Speaking with Piper instead of Kokoro', ['reason' => $reason]);
+            $session->post(self::FELL_BACK);
+        });
         // So does whisper: until its server has loaded the model, whisper-cli transcribes.
         $session->transcriber->server?->acquire($session->log(...));
         $session->log('info', 'Voice session started', ['channel' => $vc->channel->id, 'directory' => $directory]);
@@ -820,6 +828,14 @@ final class VoiceSession
         $parts[] = $text;
 
         return $parts;
+    }
+
+    /**
+     * Whether the voice can speak a sentence at once, and not only once it has loaded.
+     */
+    public function voiceIsReady(): bool
+    {
+        return $this->speech->isReady();
     }
 
     /**

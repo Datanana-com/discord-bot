@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Commands;
 
 use App\Privacy\OptOuts;
+use App\Voice\Speech;
 use App\Voice\VoiceSession;
 use Discord\Builders\MessageBuilder;
 use Discord\Parts\Channel\Channel;
@@ -77,25 +78,33 @@ trait RecordsCalls
      */
     private function record(Interaction $interaction, Channel $voiceChannel, Channel|Thread $textChannel, array $settings): PromiseInterface
     {
+        // The voice starts now and not once the bot has joined: Kokoro takes 7 to 17 s to load, and the call is
+        // joined in a few. A folder of its own, as the call's is made when it starts.
+        $speech = Speech::fromEnv($settings['voice']);
+        $speech->start(sys_get_temp_dir() . '/discord-bot-voice-' . bin2hex(random_bytes(6)));
+
         return $this->discord->joinVoiceChannel($voiceChannel, mute: false, deaf: false)->then(
-            function (VoiceClient $vc) use ($interaction, $textChannel, $settings) {
+            function (VoiceClient $vc) use ($interaction, $textChannel, $settings, $speech) {
                 // The bot was told to stop while it was joining: nothing would stop this call before it ends.
                 if (VoiceSession::refusesNewCalls()) {
                     $vc->close();
+                    $speech->stop();
 
                     throw new RuntimeException(self::STOPPING);
                 }
 
                 try {
-                    return VoiceSession::start($vc, $textChannel, $this->discord, $settings);
+                    return VoiceSession::start($vc, $textChannel, $this->discord, $settings, $speech);
                 } catch (Throwable $e) {
                     // The call starts with the list as it is now, which could still be read before joining.
                     $vc->close();
+                    $speech->stop();
 
                     throw new RuntimeException($this->optOutsUnreadable($e, $interaction));
                 }
             },
-            function (Throwable $e) use ($interaction, $voiceChannel) {
+            function (Throwable $e) use ($interaction, $voiceChannel, $speech) {
+                $speech->stop();
                 $this->log->error('Could not join the voice channel: ' . $e->getMessage(), ['guild' => $interaction->guild_id, 'channel' => $voiceChannel->id]);
 
                 throw new RuntimeException('Could not join the voice channel: ' . $e->getMessage());
@@ -113,7 +122,8 @@ trait RecordsCalls
         $leave = VoiceSession::wakeWordName($session->leavePhrase);
         $stop = VoiceSession::wakeWordName($session->stopPhrase);
 
-        return ($name === ''
+        return ($session->voiceIsReady() ? '' : 'My voice is still getting ready, which takes a few seconds: until it is, an answer is written in this channel first and spoken once it can be. ')
+            . ($name === ''
             ? 'I answer everything that is said.'
             // Every question needs it: nothing is answered because of what someone said before.
             : "I only answer what is said with \"{$name}\" in it: say it with every question.")

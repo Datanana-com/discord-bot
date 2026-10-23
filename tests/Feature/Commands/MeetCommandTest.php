@@ -8,6 +8,7 @@ use App\Application;
 use App\Commands\Global\MeetCommand;
 use App\Commands\Global\RecordCommand;
 use App\Commands\Global\StopCommand;
+use App\Support\Shell;
 use App\Voice\Meeting;
 use App\Voice\VoiceSession;
 use Discord\Builders\MessageBuilder;
@@ -41,6 +42,7 @@ use Tests\Fixtures\ManualTimers;
 use Throwable;
 
 use function React\Async\await;
+use function React\Async\delay;
 use function React\Promise\reject;
 use function React\Promise\resolve;
 
@@ -834,6 +836,10 @@ final class MeetCommandTest extends CommandTestCase
 
         $this->assertSame([], $this->responses, 'It is not refused.');
         $this->assertCount(2, $this->channels->made);
+
+        // The voice started for the meeting that is still being joined.
+        Shell::stopAll();
+        delay(0.3);
     }
 
     public function testDeletesTheChannelWhenTheCallCannotBeStopped(): void
