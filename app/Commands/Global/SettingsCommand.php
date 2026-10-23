@@ -200,8 +200,8 @@ final class SettingsCommand extends CommandAbstract implements SuggestsOptions
             // Only a name from the list, so a voice is always a file in the voices' folder.
             isset($values['voice']) && ! in_array($values['voice'], $voices, true)
                 ? ($voices === []
-                    ? "No Piper voices are installed in PIPER_MODEL's folder."
-                    : 'The voice must be one of the installed Piper voices: `' . implode('`, `', $voices) . '`.')
+                    ? "No voices are installed in the folders of PIPER_MODEL and Kokoro."
+                    : 'The voice must be one of the installed voices: `' . implode('`, `', $voices) . '`.')
                 : null,
             isset($values['model']) && ! in_array($values['model'], Claude::MODELS, true)
                 ? 'The model must be `haiku`, `sonnet` or `opus`.'

@@ -30,14 +30,11 @@ for name in ["config.json", "kokoro-v1_0.pth"] + [f"voices/{voice}.pt" for voice
 # the list.
 sha256sum --check model.sha256
 
-# The bot lists a server's voices by the .onnx files next to PIPER_MODEL, and refuses to start a call when
-# PIPER_MODEL is not a file. Kokoro keeps its voices elsewhere, so each voice is a name here: an empty file whose
-# name is all the program reads.
+# The bot lists Kokoro's voices by the .onnx files here, and a server picks one with /settings voice:. Kokoro keeps
+# its voices elsewhere, so each voice is a name here: an empty file whose name is all the program reads.
 mkdir -p voices
 for voice in "${voices[@]}"; do
     : > "voices/${voice}.onnx"
 done
 
-echo "kokoro: installed in $PWD. In .env:"
-echo "  PIPER_BINARY=$PWD/kokoro"
-echo "  PIPER_MODEL=$PWD/voices/af_heart.onnx"
+echo "kokoro: installed in $PWD. The bot finds it by itself and speaks calls with it, with Piper as the fallback."
